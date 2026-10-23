@@ -15,7 +15,8 @@ The _File Manager_ focuses on:
 Development prioritizes _correctness_ and _performance_.  
 Each release is validated by hundreds of correctness tests and accompanied by a detailed performance report.
 
-![](https://i.imgur.com/2t8CmJF.png)
+<!-- ![](https://i.postimg.cc/xdZDJThH/image.png) -->
+![](https://i.imgur.com/8n35oed.png)
 
 ## Installation
 

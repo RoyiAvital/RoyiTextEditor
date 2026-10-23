@@ -13,7 +13,10 @@ fn main() {
     println!("cargo:rerun-if-changed={}", fonts.display());
 
     let before = font_files(&fonts);
+    // Under pwsh 7 (e.g. GitHub Actions) the inherited PSModulePath hides Windows
+    // PowerShell's own modules (Get-FileHash, Expand-Archive); let it rebuild the default.
     let output = Command::new("powershell.exe")
+        .env_remove("PSModulePath")
         .args([
             "-NoProfile",
             "-NonInteractive",

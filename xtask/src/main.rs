@@ -453,6 +453,8 @@ mod tests {
         let silent = run_traced(&mut cmd("rem"), Duration::from_secs(10)).unwrap();
         assert!(parse_trace(&silent).is_err());
         let mut sleep = Command::new("powershell.exe");
+        // A pwsh 7 parent's PSModulePath would hide Start-Sleep.
+        sleep.env_remove("PSModulePath");
         sleep.args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"]);
         let start = Instant::now();
         let hung = run_traced(&mut sleep, Duration::from_millis(300)).unwrap_err();
