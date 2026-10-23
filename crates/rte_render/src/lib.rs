@@ -49,7 +49,10 @@ pub struct Renderer {
     cell: Cell,
     baseline: i32,
     ascii: Vec<Option<Bitmap>>,
-    other: HashMap<char, Option<Bitmap>>,
+    /// Glyph of each non-ASCII character seen; characters sharing a glyph
+    /// (e.g. the missing-glyph box) share one bitmap.
+    glyph_ids: HashMap<char, u16>,
+    glyphs: HashMap<u16, Option<Bitmap>>,
     contrast: [u8; 256],
 }
 
@@ -74,10 +77,11 @@ impl Renderer {
             },
             baseline: 0,
             ascii: Vec::new(),
-            other: HashMap::new(),
+            glyph_ids: HashMap::new(),
+            glyphs: HashMap::new(),
             contrast,
         };
-        renderer.set_size(px);
+        renderer.apply_size(px);
         Ok(renderer)
     }
 
@@ -97,8 +101,14 @@ impl Renderer {
         self.px
     }
 
-    /// Changes the pixel size; clears the glyph cache.
+    /// Changes the pixel size; a new size clears the glyph cache.
     pub fn set_size(&mut self, px: f32) {
+        if px != self.px {
+            self.apply_size(px);
+        }
+    }
+
+    fn apply_size(&mut self, px: f32) {
         self.px = px;
         let font = self.font();
         let metrics = font.metrics(&[]).scale(px);
@@ -113,7 +123,8 @@ impl Renderer {
         self.baseline =
             (metrics.ascent + (height - metrics.ascent - metrics.descent) / 2.0).round() as i32;
         self.ascii = (0..128).map(|_| None).collect();
-        self.other.clear();
+        self.glyph_ids.clear();
+        self.glyphs.clear();
     }
 
     /// Rasterizes printable ASCII ahead of the first frame.
@@ -125,33 +136,34 @@ impl Renderer {
 
     fn bitmap(&mut self, ch: char) -> Option<&Bitmap> {
         let code = ch as usize;
-        let cached = if code < 128 {
-            self.ascii[code].is_some()
-        } else {
-            self.other.contains_key(&ch)
-        };
-        if !cached {
-            let bitmap = self.rasterize(ch);
-            if code < 128 {
-                self.ascii[code] = Some(bitmap.unwrap_or_else(empty_bitmap));
-            } else {
-                self.other.insert(ch, bitmap);
-            }
-        }
         if code < 128 {
-            self.ascii[code].as_ref().filter(|b| b.width > 0)
-        } else {
-            self.other.get(&ch).and_then(Option::as_ref)
+            if self.ascii[code].is_none() {
+                let glyph = self.font().charmap().map(ch);
+                self.ascii[code] = Some(self.rasterize(glyph).unwrap_or_else(empty_bitmap));
+            }
+            return self.ascii[code].as_ref().filter(|b| b.width > 0);
         }
+        let glyph = match self.glyph_ids.get(&ch) {
+            Some(&glyph) => glyph,
+            None => {
+                let glyph = self.font().charmap().map(ch);
+                self.glyph_ids.insert(ch, glyph);
+                glyph
+            }
+        };
+        if !self.glyphs.contains_key(&glyph) {
+            let bitmap = self.rasterize(glyph);
+            self.glyphs.insert(glyph, bitmap);
+        }
+        self.glyphs.get(&glyph).and_then(Option::as_ref)
     }
 
-    fn rasterize(&mut self, ch: char) -> Option<Bitmap> {
+    fn rasterize(&mut self, glyph: u16) -> Option<Bitmap> {
         let font = FontRef {
             data: &self.data,
             offset: self.offset,
             key: self.key,
         };
-        let glyph = font.charmap().map(ch);
         let mut scaler = self.context.builder(font).size(self.px).hint(true).build();
         let image = Render::new(&[Source::Outline])
             .format(Format::Alpha)
@@ -188,6 +200,9 @@ impl Renderer {
                     &contrast,
                 );
             }
+        }
+        for fill in &list.overlays {
+            fill_rect(target, fill.rect, fill.color);
         }
     }
 }
@@ -271,7 +286,9 @@ fn blit(
 mod tests {
     use super::*;
     use rte_text::Snapshot;
-    use rte_view::{Chrome, Fill, Frame, Glyph, Layout, Options, Scroll, Theme, ViewBuilder};
+    use rte_view::{
+        CaretStyle, Chrome, Fill, Frame, Glyph, Layout, Options, Scroll, Theme, ViewBuilder,
+    };
 
     fn renderer() -> Renderer {
         Renderer::new(Cow::Borrowed(rte_assets::DEFAULT_FONT), 16.0).unwrap()
@@ -300,6 +317,21 @@ mod tests {
             }
         }
         assert!(faces >= 18, "only {faces} faces found");
+    }
+
+    #[test]
+    fn missing_characters_share_one_bitmap_and_sizes_keep_caches() {
+        let mut r = renderer();
+        for code in 0x2_0000..0x2_0000 + 1000 {
+            let ch = char::from_u32(code).unwrap();
+            assert!(r.bitmap(ch).is_some(), "the missing-glyph box is drawn");
+        }
+        assert_eq!(r.glyph_ids.len(), 1000);
+        assert_eq!(r.glyphs.len(), 1);
+        r.set_size(r.px());
+        assert_eq!(r.glyphs.len(), 1, "an unchanged size keeps the cache");
+        r.set_size(r.px() + 1.0);
+        assert!(r.glyphs.is_empty());
     }
 
     #[test]
@@ -414,6 +446,8 @@ mod tests {
                     theme: &theme,
                     chrome: Chrome::default(),
                     options: &options,
+                    selections: &[],
+                    caret: CaretStyle::Hidden,
                 },
                 &mut list,
             );

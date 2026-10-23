@@ -1,0 +1,17 @@
+[package]
+name = "syntax-probe"
+version = "0.0.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+tree-sitter = "0.25"
+tree-sitter-json = "0.24"
+tree-sitter-python = "0.23"
+tree-sitter-c = "0.24"
+tree-sitter-md = "0.3"
+windows-sys = { version = "0.59", features = ["Win32_System_ProcessStatus", "Win32_System_Threading"] }
+
+[profile.release]
+debug = false

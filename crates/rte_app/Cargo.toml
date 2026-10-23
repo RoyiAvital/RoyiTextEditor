@@ -11,10 +11,16 @@ path = "src/main.rs"
 
 [dependencies]
 rte_assets = { path = "../rte_assets" }
+rte_edit = { path = "../rte_edit" }
 rte_platform = { path = "../rte_platform" }
 rte_render = { path = "../rte_render" }
 rte_text = { path = "../rte_text" }
 rte_view = { path = "../rte_view" }
+xxhash-rust.workspace = true
+
+[build-dependencies]
+resvg.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

@@ -7,9 +7,15 @@
 //!   Any run (warm-up included) that fails, times out or prints an invalid
 //!   trace fails the task.
 //! - `check-imports [EXE]`: lists the DLLs the executable imports and fails
-//!   on MinGW runtime DLLs (the release must be self-contained).
+//!   on MinGW runtime DLLs (the release must be self-contained), and checks
+//!   that the application manifest is embedded.
+//! - `bench-perf [--short] [--print-hashes]`: Performance Benchmark v1 (`perf.rs`,
+//!   `Perfromance.md`); `--print-hashes` regenerates the fixtures and prints
+//!   their hashes.
 //! - `package`: builds the release, checks imports and writes
-//!   `target/package/RoyiTextEditor-<version>-windows-x86_64.zip`; prints its path last.
+//!   `target/package/<name>-<version>-windows-x86_64.zip` (`Meta/AppMeta.json`); prints its path last.
+
+mod perf;
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -27,11 +33,13 @@ const FORBIDDEN_DLLS: &[&str] = &[
     "libwinpthread-1.dll",
     "libstdc++-6.dll",
 ];
+const MANIFEST_MARK: &[u8] = b"<dpiAwareness";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("bench-startup") => bench_startup(&args[1..]),
+        Some("bench-perf") => perf::bench_perf(&args[1..]),
         Some("check-imports") => {
             let exe = args.get(1).map_or_else(release_exe, PathBuf::from);
             if check_imports(&exe) {
@@ -43,7 +51,7 @@ fn main() -> ExitCode {
         Some("package") => package(),
         _ => {
             eprintln!(
-                "usage: cargo xtask <bench-startup [--runs N] [--warmup N] [FILE] | check-imports [EXE] | package>"
+                "usage: cargo xtask <bench-startup [--runs N] [--warmup N] [FILE] | bench-perf [--short] [--print-hashes] | check-imports [EXE] | package>"
             );
             ExitCode::FAILURE
         }
@@ -64,6 +72,21 @@ fn release_exe() -> PathBuf {
         .join(format!("{APP}.exe"))
 }
 
+/// `(name, version)` from `Meta/AppMeta.json`.
+fn app_info() -> Result<(String, String), String> {
+    let path = root().join("Meta").join("AppMeta.json");
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let info: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    let field = |key: &str| {
+        info[key]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| format!("{}: no string field `{key}`", path.display()))
+    };
+    Ok((field("name")?, field("version")?))
+}
+
 fn build_release() -> bool {
     Command::new(env!("CARGO"))
         .args(["build", "--release", "-p", "rte_app"])
@@ -73,10 +96,11 @@ fn build_release() -> bool {
 }
 
 fn check_imports(exe: &Path) -> bool {
-    let dlls = match std::fs::read(exe)
-        .ok()
-        .and_then(|bytes| imported_dlls(&bytes))
-    {
+    let Ok(bytes) = std::fs::read(exe) else {
+        eprintln!("cannot read {}", exe.display());
+        return false;
+    };
+    let dlls = match imported_dlls(&bytes) {
         Some(dlls) => dlls,
         None => {
             eprintln!("cannot read the import table of {}", exe.display());
@@ -84,16 +108,21 @@ fn check_imports(exe: &Path) -> bool {
         }
     };
     println!("imports of {}: {}", exe.display(), dlls.join(", "));
+    // The manifest resource is stored as plain UTF-8 XML.
+    let manifest = bytes
+        .windows(MANIFEST_MARK.len())
+        .any(|w| w == MANIFEST_MARK);
+    if !manifest {
+        eprintln!("the application manifest is not embedded");
+    }
     let bad: Vec<&String> = dlls
         .iter()
         .filter(|d| FORBIDDEN_DLLS.iter().any(|f| d.eq_ignore_ascii_case(f)))
         .collect();
-    if bad.is_empty() {
-        true
-    } else {
+    if !bad.is_empty() {
         eprintln!("forbidden MinGW runtime imports: {bad:?}");
-        false
     }
+    manifest && bad.is_empty()
 }
 
 /// DLL names from the import directory of a PE32+ image.
@@ -151,7 +180,14 @@ fn package() -> ExitCode {
     if !check_imports(&exe) {
         return ExitCode::FAILURE;
     }
-    let name = format!("{APP}-{}-windows-x86_64", env!("CARGO_PKG_VERSION"));
+    let (app, version) = match app_info() {
+        Ok(info) => info,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let name = format!("{app}-{version}-windows-x86_64");
     let out = root().join("target").join("package");
     let stage = out.join(&name);
     let _ = std::fs::remove_dir_all(&stage);
@@ -243,7 +279,9 @@ fn bench_startup(args: &[String]) -> ExitCode {
             continue;
         }
         for (key, ms) in trace {
-            stages.entry(key).or_default().push(ms);
+            if !key.ends_with(MEMORY_SUFFIX) {
+                stages.entry(key).or_default().push(ms);
+            }
         }
     }
 
@@ -327,17 +365,25 @@ fn run_traced(command: &mut Command, timeout: Duration) -> Result<String, String
     Ok(stdout)
 }
 
-/// Parses `startup.<stage>_ms=<value>` lines. Every non-empty line must be a
-/// trace line with a finite, non-negative value; stages must be unique and
-/// `first_frame` present.
+/// Key suffix of memory values in a parsed trace.
+const MEMORY_SUFFIX: &str = "_mib";
+
+/// Parses `startup.<stage>_ms=<value>` lines and `memory.<name>_mib=<value>`
+/// lines (keyed `<name>_mib`). Every non-empty line must be one of them with
+/// a finite, non-negative value; keys must be unique and `first_frame` present.
 fn parse_trace(stdout: &str) -> Result<BTreeMap<String, f64>, String> {
     let mut stages = BTreeMap::new();
     for line in stdout.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        let (key, value) = line
-            .strip_prefix("startup.")
-            .and_then(|l| l.split_once("_ms="))
-            .filter(|(key, _)| !key.is_empty())
-            .ok_or_else(|| format!("unexpected output line: {line:?}"))?;
+        let (key, value) = if let Some(memory) = line.strip_prefix("memory.") {
+            memory
+                .split_once('=')
+                .filter(|(key, _)| key.len() > MEMORY_SUFFIX.len() && key.ends_with(MEMORY_SUFFIX))
+        } else {
+            line.strip_prefix("startup.")
+                .and_then(|l| l.split_once("_ms="))
+                .filter(|(key, _)| !key.is_empty())
+        }
+        .ok_or_else(|| format!("unexpected output line: {line:?}"))?;
         let ms = value
             .parse::<f64>()
             .ok()
@@ -426,10 +472,17 @@ mod tests {
             "startup.first_frame_ms=inf\n",
             "startup._ms=1\nstartup.first_frame_ms=1\n",
             "panic: something\nstartup.first_frame_ms=1\n",
+            "memory.peak=1\nstartup.first_frame_ms=1\n",
+            "memory._mib=1\nstartup.first_frame_ms=1\n",
+            "memory.peak_private_mib=-2\nstartup.first_frame_ms=1\n",
         ] {
             assert!(parse_trace(bad).is_err(), "{bad:?} was accepted");
         }
-        let ok = parse_trace("startup.window_ms=0.5\r\nstartup.first_frame_ms=2\r\n").unwrap();
-        assert_eq!(ok.len(), 2);
+        let ok = parse_trace(
+            "startup.window_ms=0.5\r\nstartup.first_frame_ms=2\r\nmemory.peak_private_mib=4.75\r\n",
+        )
+        .unwrap();
+        assert_eq!(ok.len(), 3);
+        assert_eq!(ok["peak_private_mib"], 4.75);
     }
 }

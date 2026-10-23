@@ -1,0 +1,37 @@
+# Heading $N
+
+## Sub *emphasis*, **strong**, ~~strike~~, `inline code`, [link](https://example.com/$N) and ![image](img.png "title")
+
+> Block quote with **bold** text and a [reference link][ref$N].
+
+- item one
+- [x] task done
+1. ordered item
+
+| Col A | Col B |
+| ----- | :---: |
+| `a`   | *b*   |
+
+```python
+def f(x):
+    return x * 2  # comment
+```
+
+```c
+int main(void) { return 0; }
+```
+
+```json
+{"key": [1, true, null]}
+```
+
+<div class="note">HTML block $N</div>
+
+Line with a hard break  
+and a footnote[^$N].
+
+[ref$N]: https://example.com/ref/$N "Reference"
+[^$N]: Footnote text.
+
+---
+

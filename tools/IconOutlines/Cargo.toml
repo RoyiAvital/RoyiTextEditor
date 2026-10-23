@@ -1,0 +1,10 @@
+[package]
+name = "icon-outlines"
+version = "0.0.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+ttf-parser = "0.25"
+resvg = { version = "0.45", default-features = false }

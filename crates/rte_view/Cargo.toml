@@ -6,6 +6,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+rte_edit = { path = "../rte_edit" }
 rte_text = { path = "../rte_text" }
 unicode-width.workspace = true
 

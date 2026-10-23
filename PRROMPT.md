@@ -13,6 +13,7 @@ Your onboarding tasks:
  - Learn the architecture.
  - Read `AGENTS.md`.
  - Go through the `md` files in `Plan` and `Done` and in the code.
+ - Use `GPT 6 Luna` as sub agent in case you need one.
 
 Once you're ready, We'll start adding and reviewing features.
 
@@ -34,6 +35,7 @@ Your onboarding tasks:
  - Learn the architecture.
  - Read `AGENTS.md`.
  - Go through the `md` files in `Plan` and `Done` and in the code.
+ - Use `GPT 6 Luna` or `Claude Haiku 5.5` as sub agents in case you need one.
 
 Once you're ready, We'll start adding and reviewing features.
 

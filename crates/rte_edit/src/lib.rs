@@ -1,0 +1,28 @@
+//! Editing model over `rte_text` snapshots: selections, movement, pure edit
+//! commands and the undo history. No I/O and no platform code.
+//!
+//! Positions are byte offsets. Movement never stops inside a UTF-8 sequence,
+//! between `\r` and `\n` of a CRLF, or before a zero-width mark (marks belong
+//! to the previous character, as the view draws them).
+
+mod columns;
+mod commands;
+mod cursor;
+mod history;
+mod motion;
+mod selection;
+
+pub use columns::{COLUMN_SCAN_LIMIT, cell_width, column_of, offset_at_column};
+pub use commands::{
+    Clip, Command, EditKind, EditOptions, apply, backspace, copy, cut, delete_forward,
+    delete_word_left, delete_word_right, insert, newline, outdent, paste, tab,
+};
+pub use history::{History, MAX_HISTORY_BYTES, MAX_HISTORY_STEPS, Step};
+pub use motion::{
+    MOTION_SCAN_LIMIT, column_at, content_range, line_end, line_home, next_boundary,
+    offset_in_line, prev_boundary, snap_to_boundary, vertical, word_at, word_left, word_right,
+};
+pub use selection::{Selection, Selections};
+
+#[cfg(test)]
+mod tests;

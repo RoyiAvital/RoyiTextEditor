@@ -12,6 +12,7 @@ swash.workspace = true
 [dev-dependencies]
 divan.workspace = true
 rte_assets = { path = "../rte_assets" }
+rte_edit = { path = "../rte_edit" }
 rte_text = { path = "../rte_text" }
 
 [[bench]]

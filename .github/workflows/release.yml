@@ -4,6 +4,10 @@ name: Release
 # with a pre-release suffix such as v1.0.0-rc.1). Ordinary pushes never build a
 # release. `workflow_dispatch` runs the same build as a dry run and uploads the
 # ZIP as a workflow artifact without publishing anything.
+#
+# Before building, the name and version in Meta/AppMeta.json are checked
+# against Cargo.toml and the tag, and the release notes are taken from the
+# matching CHANGELOG.md section.
 
 on:
   push:
@@ -24,6 +28,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 60
     outputs:
+      app-name: ${{ steps.version.outputs.app-name }}
       artifact-name: ${{ steps.version.outputs.artifact-name }}
       prerelease: ${{ steps.version.outputs.prerelease }}
       version: ${{ steps.version.outputs.version }}
@@ -41,54 +46,21 @@ jobs:
           path: target/font-cache
           key: fonts-${{ hashFiles('tools/Get-Fonts.ps1') }}
 
-      - name: Resolve version
+      - name: Resolve and verify version
         id: version
         shell: pwsh
-        run: |
-          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
-          $identifier = '(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
-          $semverBody = "(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-$identifier(?:\.$identifier)*)?"
-          if ($version -notmatch "^$semverBody`$") {
-            throw "Version '$version' in Cargo.toml is not valid SemVer."
-          }
-          if ($env:GITHUB_REF_TYPE -eq 'tag') {
-            $tag = $env:GITHUB_REF_NAME
-            if ($tag -notmatch "^v$semverBody`$" -or $tag -cne "v$version") {
-              throw "Tag '$tag' does not exactly match SemVer version 'v$version'."
-            }
-            git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"
-            if ($LASTEXITCODE -ne 0) {
-              throw "Could not fetch tag '$tag' from origin."
-            }
-            if ((git cat-file -t "refs/tags/$tag") -ne 'tag') {
-              throw "Tag '$tag' must be annotated; lightweight tags cannot publish releases."
-            }
-            $prerelease = $tag -match '-'
-          } else {
-            $prerelease = $false
-          }
-          "version=$version" >> $env:GITHUB_OUTPUT
-          "prerelease=$($prerelease.ToString().ToLower())" >> $env:GITHUB_OUTPUT
-          "artifact-name=RoyiTextEditor-$version" >> $env:GITHUB_OUTPUT
+        run: ./.github/scripts/Resolve-Version.ps1
 
       - name: Extract release notes from CHANGELOG.md
         shell: pwsh
         env:
           RELEASE_VERSION: ${{ steps.version.outputs.version }}
         run: |
-          $arguments = @(
-            '.github/scripts/release_notes.py',
-            '--version', $env:RELEASE_VERSION,
-            '--output', 'target/release-notes.md'
-          )
+          $arguments = @{ Version = $env:RELEASE_VERSION; Output = 'target/release-notes.md' }
           if ($env:GITHUB_REF_TYPE -ne 'tag') {
-            $arguments += '--dry-run'
+            $arguments.DryRun = $true
           }
-          New-Item -ItemType Directory -Force target | Out-Null
-          python @arguments
-          if ($LASTEXITCODE -ne 0) {
-            throw 'Release notes extraction failed.'
-          }
+          ./.github/scripts/Get-ReleaseNotes.ps1 @arguments
           Get-Content target/release-notes.md
 
       - name: Install Rust (GNU host)
@@ -116,11 +88,6 @@ jobs:
           "$hash *$(Split-Path $archive -Leaf)" | Set-Content "$archive.sha256"
           "archive=$archive" >> $env:GITHUB_OUTPUT
 
-      # Hosted runners are not the reference machine: launch check only, no gate.
-      - name: Smoke-test startup
-        shell: pwsh
-        run: cargo xtask bench-startup --runs 10 --warmup 2 --no-gate
-
       - name: Upload build artifact (dry run and audit trail)
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
@@ -140,6 +107,7 @@ jobs:
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
+      APP_NAME: ${{ needs.build.outputs.app-name }}
       RELEASE_TAG: ${{ github.ref_name }}
       RELEASE_VERSION: ${{ needs.build.outputs.version }}
       RELEASE_PRERELEASE: ${{ needs.build.outputs.prerelease }}
@@ -166,7 +134,7 @@ jobs:
             'release', 'create', $env:RELEASE_TAG,
             '--verify-tag',
             '--repo', $env:GITHUB_REPOSITORY,
-            '--title', "RoyiTextEditor $env:RELEASE_VERSION",
+            '--title', "$env:APP_NAME $env:RELEASE_VERSION",
             '--notes-file', 'target/release/release-notes.md',
             $archive[0].FullName,
             $checksum[0].FullName

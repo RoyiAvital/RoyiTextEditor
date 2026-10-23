@@ -9,3 +9,4 @@
 
 - [Workspace and Text Engine](Done/WorkspaceAndTextEngine.md)
 - [Window and Rendering](Done/WindowAndRendering.md)
+- [Editing](Done/Editing.md)

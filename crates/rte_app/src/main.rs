@@ -5,11 +5,15 @@
 
 #![windows_subsystem = "windows"]
 
+mod clip;
+mod document;
 mod editor;
 mod loader;
+mod save;
 mod trace;
 
 use std::borrow::Cow;
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::thread;
@@ -17,7 +21,8 @@ use std::thread;
 use rte_platform::{Waker, Window, WindowOptions};
 use rte_render::Renderer;
 
-use editor::{BASE_PX, Editor, Settings};
+use editor::{BASE_PX, Editor, Settings, window_title};
+use save::SystemFiles;
 use trace::Trace;
 
 /// Initial client size at 96 DPI.
@@ -26,22 +31,27 @@ const WINDOW_SIZE: (u32, u32) = (1100, 750);
 struct Args {
     path: Option<PathBuf>,
     read_only: bool,
+    /// `--syntax <id>`: language id overriding detection by file name.
+    syntax: Option<String>,
     trace_startup: bool,
     exit_after_first_frame: bool,
     exit_after_load: bool,
 }
 
-fn parse_args() -> Args {
+fn parse_args(raw: impl IntoIterator<Item = OsString>) -> Args {
     let mut args = Args {
         path: None,
         read_only: false,
+        syntax: None,
         trace_startup: false,
         exit_after_first_frame: false,
         exit_after_load: false,
     };
-    for arg in std::env::args_os().skip(1) {
+    let mut raw = raw.into_iter();
+    while let Some(arg) = raw.next() {
         match arg.to_str() {
             Some("--read-only") => args.read_only = true,
+            Some("--syntax") => args.syntax = raw.next().and_then(|id| id.into_string().ok()),
             Some("--trace-startup") => args.trace_startup = true,
             Some("--exit-after-first-frame") => args.exit_after_first_frame = true,
             Some("--exit-after-load") => args.exit_after_load = true,
@@ -52,10 +62,9 @@ fn parse_args() -> Args {
 }
 
 fn main() {
-    let args = parse_args();
+    let args = parse_args(std::env::args_os().skip(1));
     let mut trace = Trace::new(args.trace_startup);
     trace.mark("main");
-    rte_platform::init_dpi_awareness();
     let dpi = rte_platform::system_dpi();
 
     let waker: Arc<OnceLock<Waker>> = Arc::new(OnceLock::new());
@@ -72,16 +81,7 @@ fn main() {
         renderer
     });
 
-    let title = match &args.path {
-        Some(p) => format!(
-            "{} - RoyiTextEditor",
-            p.file_name().map_or_else(
-                || p.display().to_string(),
-                |n| n.to_string_lossy().into_owned()
-            )
-        ),
-        None => "RoyiTextEditor".to_owned(),
-    };
+    let title = window_title(args.path.as_deref(), false);
     let window = match Window::create(&WindowOptions {
         title: &title,
         width: WINDOW_SIZE.0 * dpi / 96,
@@ -110,6 +110,29 @@ fn main() {
             exit_after_load: args.exit_after_load,
         },
         trace,
+        Arc::new(SystemFiles),
+        Arc::new(move || waker.get().map_or((), Waker::wake)),
     );
     std::process::exit(window.run(Box::new(editor)));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(raw: &[&str]) -> Args {
+        parse_args(raw.iter().map(OsString::from))
+    }
+
+    #[test]
+    fn syntax_takes_the_next_argument_as_its_id() {
+        let args = parse(&["--syntax", "json", "a.ipynb", "--read-only"]);
+        assert_eq!(args.syntax.as_deref(), Some("json"));
+        assert_eq!(args.path, Some(PathBuf::from("a.ipynb")));
+        assert!(args.read_only);
+
+        let args = parse(&["a.ipynb", "--syntax"]);
+        assert_eq!(args.syntax, None);
+        assert_eq!(args.path, Some(PathBuf::from("a.ipynb")));
+    }
 }

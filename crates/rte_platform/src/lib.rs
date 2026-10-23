@@ -8,6 +8,9 @@
 
 #![allow(unsafe_code)] // Win32 FFI.
 
+mod clipboard;
+pub mod files;
+
 use std::ffi::c_void;
 use std::ptr::{null, null_mut};
 
@@ -22,39 +25,40 @@ use windows_sys::Win32::Graphics::Gdi::{
     PAINTSTRUCT, SRCCOPY, ScreenToClient, SelectObject, UpdateWindow,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
 use windows_sys::Win32::System::SystemInformation::GetSystemTimePreciseAsFileTime;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
 use windows_sys::Win32::UI::Controls::MARGINS;
-use windows_sys::Win32::UI::HiDpi::{
-    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem, GetDpiForWindow,
-    GetSystemMetricsForDpi, SetProcessDpiAwarenessContext,
+use windows_sys::Win32::UI::HiDpi::{GetDpiForSystem, GetDpiForWindow, GetSystemMetricsForDpi};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    GetCapture, GetDoubleClickTime, GetKeyState, ReleaseCapture, SetCapture, VK_CONTROL, VK_MENU,
+    VK_SHIFT,
 };
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_MENU, VK_SHIFT};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA,
-    GetClientRect, GetMessageW, GetWindowLongPtrW, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT,
-    HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, IDC_ARROW, IsZoomed,
-    LoadCursorW, MINMAXINFO, MSG, NCCALCSIZE_PARAMS, PostMessageW, PostQuitMessage,
-    RegisterClassExW, SM_CXPADDEDBORDER, SM_CXSIZEFRAME, SM_CYSIZEFRAME, SW_SHOW, SWP_FRAMECHANGED,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos,
-    SetWindowTextW, ShowWindow, TranslateMessage, WM_APP, WM_CHAR, WM_CLOSE, WM_DESTROY,
-    WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_MOUSEHWHEEL, WM_MOUSEWHEEL,
-    WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST, WM_PAINT, WM_SIZE, WM_SYSKEYDOWN, WNDCLASSEXW,
+    GetClientRect, GetCursorPos, GetMessageTime, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
+    HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT,
+    HTTOPRIGHT, IDC_ARROW, IDC_IBEAM, IMAGE_ICON, IsZoomed, LR_DEFAULTCOLOR, LoadCursorW,
+    LoadImageW, MINMAXINFO, MSG, NCCALCSIZE_PARAMS, PostMessageW, PostQuitMessage,
+    RegisterClassExW, SM_CXDOUBLECLK, SM_CXICON, SM_CXPADDEDBORDER, SM_CXSIZEFRAME, SM_CXSMICON,
+    SM_CYDOUBLECLK, SM_CYICON, SM_CYSIZEFRAME, SM_CYSMICON, SW_SHOW, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetCursor, SetWindowLongPtrW,
+    SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, WM_APP, WM_CAPTURECHANGED, WM_CHAR,
+    WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCACTIVATE,
+    WM_NCCALCSIZE, WM_NCHITTEST, WM_PAINT, WM_SETCURSOR, WM_SIZE, WM_SYSKEYDOWN, WNDCLASSEXW,
     WS_OVERLAPPEDWINDOW,
 };
 
 const WM_WAKE: u32 = WM_APP + 1;
 const CLASS_NAME: &str = "RoyiTextEditorWindow";
+/// Icon group embedded in the executable by `rte_app`'s build script.
+const APP_ICON: u16 = 1;
+/// `wParam` flag of mouse messages: left button down.
+const MK_LBUTTON: usize = 0x0001;
 
-/// Puts the process in per-monitor DPI awareness (v2). Call before creating windows.
-pub fn init_dpi_awareness() {
-    // SAFETY: plain Win32 call without pointers.
-    unsafe {
-        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    }
-}
-
-/// DPI of the primary monitor.
+/// DPI of the primary monitor. Per-monitor v2 awareness comes from the
+/// application manifest.
 pub fn system_dpi() -> u32 {
     // SAFETY: plain Win32 call without pointers.
     unsafe { GetDpiForSystem() }
@@ -90,6 +94,19 @@ pub fn wait_for_composition() {
     }
 }
 
+/// Peak private (commit) bytes of this process so far (`PeakPagefileUsage`).
+pub fn peak_private_bytes() -> u64 {
+    let mut counters: PROCESS_MEMORY_COUNTERS = unsafe { std::mem::zeroed() };
+    counters.cb = size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+    // SAFETY: `counters` is a live, correctly sized buffer.
+    let ok = unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb) };
+    if ok == 0 {
+        0
+    } else {
+        counters.PeakPagefileUsage as u64
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Key {
     /// Windows virtual-key code.
@@ -117,6 +134,24 @@ pub enum Event {
         shift: bool,
         ctrl: bool,
     },
+    /// Left button pressed in the client area; `clicks` counts 1-3 for
+    /// single, double and triple clicks. The mouse is captured until
+    /// [`Event::MouseUp`].
+    MouseDown {
+        x: i32,
+        y: i32,
+        clicks: u32,
+        shift: bool,
+        ctrl: bool,
+        alt: bool,
+    },
+    /// Pointer movement while the left button is held (also outside the window).
+    MouseMove {
+        x: i32,
+        y: i32,
+    },
+    /// The left button was released or the capture was lost.
+    MouseUp,
     CloseRequested,
     /// Posted by a [`Waker`] from another thread.
     Wake,
@@ -130,10 +165,14 @@ pub struct Ctx {
     redraw: bool,
     close: bool,
     title: Option<String>,
+    hwnd: HWND,
+    /// Clipboard of a headless context: text and private data.
+    memory_clipboard: Option<(String, Vec<u8>)>,
 }
 
 impl Ctx {
-    /// A context without a window, for driving an [`App`] in tests.
+    /// A context without a window, for driving an [`App`] in tests. Its
+    /// clipboard is held in memory.
     pub fn headless(width: u32, height: u32, dpi: u32) -> Ctx {
         Ctx {
             width,
@@ -142,11 +181,42 @@ impl Ctx {
             redraw: false,
             close: false,
             title: None,
+            hwnd: null_mut(),
+            memory_clipboard: None,
         }
     }
 
     pub fn close_requested(&self) -> bool {
         self.close
+    }
+
+    pub fn redraw_requested(&self) -> bool {
+        self.redraw
+    }
+
+    /// Title requested during this call, if any.
+    pub fn requested_title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
+    /// Clipboard text plus the data of the private `format`, if present.
+    pub fn clipboard(&mut self, format: &str) -> Option<(String, Option<Vec<u8>>)> {
+        if self.hwnd.is_null() {
+            return self
+                .memory_clipboard
+                .clone()
+                .map(|(text, data)| (text, Some(data)));
+        }
+        clipboard::read(self.hwnd, format)
+    }
+
+    /// Replaces the clipboard with `text` plus `data` in the private `format`.
+    pub fn set_clipboard(&mut self, text: &str, format: &str, data: &[u8]) -> bool {
+        if self.hwnd.is_null() {
+            self.memory_clipboard = Some((text.to_owned(), data.to_vec()));
+            return true;
+        }
+        clipboard::write(self.hwnd, text, format, data)
     }
 
     pub fn size(&self) -> (u32, u32) {
@@ -180,6 +250,11 @@ pub trait App {
 
     /// True when the client point belongs to the draggable title strip.
     fn is_caption(&self, x: i32, y: i32) -> bool;
+
+    /// True when the pointer shows the text (I-beam) cursor at the client point.
+    fn is_text(&self, _x: i32, _y: i32) -> bool {
+        false
+    }
 }
 
 /// Wakes the window thread from any thread; it receives [`Event::Wake`].
@@ -283,6 +358,8 @@ struct State {
     height: u32,
     dpi: u32,
     high_surrogate: Option<u16>,
+    /// Time, position and count of the last left click.
+    last_click: (u32, i32, i32, u32),
 }
 
 pub struct WindowOptions<'a> {
@@ -313,11 +390,24 @@ impl Window {
             height: options.height,
             dpi: system_dpi(),
             high_surrogate: None,
+            last_click: (0, 0, 0, 0),
         }));
         // SAFETY: strings are NUL-terminated and outlive the calls; the state
         // pointer stays valid until `run` frees it after the loop.
         unsafe {
             let instance = GetModuleHandleW(null());
+            // Taskbar and Alt+Tab use the class icons; null (no resource) keeps the default.
+            let icon = |w, h| {
+                let dpi = system_dpi();
+                LoadImageW(
+                    instance,
+                    APP_ICON as usize as *const u16,
+                    IMAGE_ICON,
+                    GetSystemMetricsForDpi(w, dpi),
+                    GetSystemMetricsForDpi(h, dpi),
+                    LR_DEFAULTCOLOR,
+                )
+            };
             let wc = WNDCLASSEXW {
                 cbSize: size_of::<WNDCLASSEXW>() as u32,
                 style: 0,
@@ -325,12 +415,12 @@ impl Window {
                 cbClsExtra: 0,
                 cbWndExtra: 0,
                 hInstance: instance,
-                hIcon: null_mut(),
+                hIcon: icon(SM_CXICON, SM_CYICON),
                 hCursor: LoadCursorW(null_mut(), IDC_ARROW),
                 hbrBackground: null_mut(),
                 lpszMenuName: null(),
                 lpszClassName: class.as_ptr(),
-                hIconSm: null_mut(),
+                hIconSm: icon(SM_CXSMICON, SM_CYSMICON),
             };
             RegisterClassExW(&wc);
             let hwnd = CreateWindowExW(
@@ -456,6 +546,8 @@ unsafe fn dispatch(hwnd: HWND, event: Event) -> Option<bool> {
         redraw: false,
         close: false,
         title: None,
+        hwnd,
+        memory_clipboard: None,
     };
     let handled = app.event(event, &mut ctx);
     // SAFETY: as above; the application is not re-entered while taken.
@@ -486,6 +578,36 @@ unsafe fn apply(hwnd: HWND, ctx: Ctx) {
 fn modifier(vk: u16) -> bool {
     // SAFETY: plain Win32 call.
     unsafe { GetKeyState(i32::from(vk)) < 0 }
+}
+
+fn point_of(lparam: LPARAM) -> (i32, i32) {
+    (
+        i32::from((lparam & 0xFFFF) as u16 as i16),
+        i32::from(((lparam >> 16) & 0xFFFF) as u16 as i16),
+    )
+}
+
+/// Click count of a left click at `(x, y)`: 1-3, cycling, when it follows the
+/// previous click within the double-click time and rectangle.
+fn count_click(state: &mut State, x: i32, y: i32) -> u32 {
+    // SAFETY: plain Win32 calls.
+    let (time, limit, cx, cy) = unsafe {
+        (
+            GetMessageTime() as u32,
+            GetDoubleClickTime(),
+            GetSystemMetrics(SM_CXDOUBLECLK) / 2,
+            GetSystemMetrics(SM_CYDOUBLECLK) / 2,
+        )
+    };
+    let (last_time, lx, ly, count) = state.last_click;
+    let near = (x - lx).abs() <= cx && (y - ly).abs() <= cy;
+    let clicks = if count > 0 && near && time.wrapping_sub(last_time) <= limit {
+        count % 3 + 1
+    } else {
+        1
+    };
+    state.last_click = (time, x, y, clicks);
+    clicks
 }
 
 fn resize_border(dpi: u32) -> (i32, i32) {
@@ -611,6 +733,53 @@ unsafe extern "system" fn window_proc(
                 dispatch(hwnd, Event::Wake);
                 0
             }
+            WM_LBUTTONDOWN => {
+                let (x, y) = point_of(lparam);
+                let Some(state) = state(hwnd) else {
+                    return 0;
+                };
+                let clicks = count_click(state, x, y);
+                SetCapture(hwnd);
+                let event = Event::MouseDown {
+                    x,
+                    y,
+                    clicks,
+                    shift: modifier(VK_SHIFT),
+                    ctrl: modifier(VK_CONTROL),
+                    alt: modifier(VK_MENU),
+                };
+                dispatch(hwnd, event);
+                0
+            }
+            WM_MOUSEMOVE => {
+                if wparam & MK_LBUTTON != 0 && GetCapture() == hwnd {
+                    let (x, y) = point_of(lparam);
+                    dispatch(hwnd, Event::MouseMove { x, y });
+                }
+                0
+            }
+            WM_LBUTTONUP => {
+                // Releasing the capture sends WM_CAPTURECHANGED, which reports MouseUp.
+                ReleaseCapture();
+                0
+            }
+            WM_CAPTURECHANGED => {
+                dispatch(hwnd, Event::MouseUp);
+                0
+            }
+            WM_SETCURSOR if (lparam & 0xFFFF) as u32 == HTCLIENT => {
+                let mut point = POINT { x: 0, y: 0 };
+                GetCursorPos(&mut point);
+                ScreenToClient(hwnd, &mut point);
+                let text = state(hwnd)
+                    .and_then(|s| s.app.as_ref())
+                    .is_some_and(|app| app.is_text(point.x, point.y));
+                SetCursor(LoadCursorW(
+                    null_mut(),
+                    if text { IDC_IBEAM } else { IDC_ARROW },
+                ));
+                1
+            }
             WM_CLOSE => {
                 if dispatch(hwnd, Event::CloseRequested) != Some(true) {
                     DestroyWindow(hwnd);
@@ -627,10 +796,8 @@ unsafe extern "system" fn window_proc(
 }
 
 unsafe fn hit_test(hwnd: HWND, lparam: LPARAM) -> LRESULT {
-    let mut point = POINT {
-        x: i32::from((lparam & 0xFFFF) as u16 as i16),
-        y: i32::from(((lparam >> 16) & 0xFFFF) as u16 as i16),
-    };
+    let (x, y) = point_of(lparam);
+    let mut point = POINT { x, y };
     // SAFETY: valid window and stack pointers.
     unsafe {
         ScreenToClient(hwnd, &mut point);

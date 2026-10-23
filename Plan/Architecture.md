@@ -102,7 +102,7 @@ flowchart TB
 | Crate          | Owns                                                                  | Main dependencies        |
 | -------------- | --------------------------------------------------------------------- | ------------------------ |
 | `rte_text`     | Piece tree, snapshots, line index, encodings, change sets             | `memchr`                 |
-| `rte_edit`     | Selections, transactions, undo, movement, edit commands               | `unicode-segmentation`   |
+| `rte_edit`     | Selections, transactions, undo, movement, edit commands               | `unicode-width`          |
 | `rte_search`   | Literal and regex search over snapshots (two regex engines)           | `memchr`, regex crates   |
 | `rte_syntax`   | Languages, parsing, highlights, folds, symbols, brackets              | `tree-sitter`, grammars  |
 | `rte_view`     | Cell layout, wrap, folding, viewport, hit testing, display list       | `unicode-width`          |
@@ -195,7 +195,7 @@ struct Summary { bytes: u64, newlines: u64 }
 - **UTF-16.** Valid UTF-16 is transcoded to UTF-8 on load (per block, carrying
   a split code unit or surrogate) and back on save. Malformed UTF-16 (unpaired
   surrogate, odd byte count) opens **read-only**: shown with U+FFFD, save
-  and Save As disabled, status-line notice. The original bytes are never
+  disabled, status-line notice. The original bytes are never
   rewritten. Lossless editing (WTF-8 style storage) is a possible later step.
 - **ChangeSet.** Each applied transaction yields `(old_range, new_len)` pairs.
   It maps positions (with left/right bias) for selections, search hits, folds,
@@ -214,6 +214,10 @@ struct Summary { bytes: u64, newlines: u64 }
   10,000 steps and 256 MiB of inserted bytes held only by history; the oldest
   steps drop first.
 - **Cursor undo** (`Ctrl+U`): a separate bounded stack of selection states.
+- **Bounded movement.** One movement (character with its marks, word,
+  double-click word) scans at most 64 KiB through a borrowed chunk cursor;
+  longer runs are crossed by repeating it. Positions estimated from columns
+  past the scanned prefix snap to a character boundary.
 - **Clean state:** `Arc::ptr_eq(saved_root, current_root)`, where `saved_root`
   is the root of the snapshot actually committed by the last successful save
   (see [Saving](#saving)). Undo back to it clears the dirty marker.
@@ -283,6 +287,13 @@ replacement syntax), with bounded memory and preemptible work.
 - **Initial languages:** Rust, C, C++, C#, Python, JavaScript, TypeScript,
   JSON, TOML, YAML, Markdown, HTML, CSS, XML, Bash, PowerShell, Lua, SQL, Go,
   Java, MATLAB, Octave, Julia.
+- **Unregistered extensions** open as plain text. `.ipynb` is not registered
+  as JSON; a notebook is highlighted as JSON only when chosen (below).
+- **Language override.** Change Language Mode (`Ctrl+K M`,
+  `workbench.action.editor.changeLanguageMode`) lists Plain Text and the
+  registered languages and re-parses with the choice. `--syntax <id>` (registry
+  id, for example `json`) sets it at startup; an unknown id keeps detection and
+  shows a status-line notice. The choice lasts for the process.
 - **MATLAB and Octave** share `tree-sitter-matlab` (MIT; no Octave dialect).
   Octave adds its own configuration (`%` and `#` comments, `end*` keywords).
   `.m` opens as MATLAB unless content shows Octave markers (`#` comments,
@@ -306,18 +317,47 @@ replacement syntax), with bounded memory and preemptible work.
   Smaller queries compile faster at startup and match faster per frame.
 - **First frame:** wait for highlights until a startup deadline, otherwise draw
   plain text and repaint when ready.
-- **Off switch:** unknown language, or file above `largeFileThresholdMiB`
-  (default 32) → plain text, no parser work.
+- **Off switch:** unknown language, Plain Text chosen, or a file above
+  `syntax.maxFileMiB` (default 32) → plain text, no parser work.
+- **Size limit.** Measured with tree-sitter 0.25 on the reference machine
+  (`tools/SyntaxProbe`; one thread, the benchmark fixture blocks;
+  memory and time grow linearly with size), at the 32 MiB limit:
+
+  | Language                      | Parse [MiB/s] | Tree [B/B] | 32 MiB: tree | 32 MiB: parse |
+  | ----------------------------- | ------------- | ---------- | ------------ | ------------- |
+  | JSON                          | 11.1          | 44         | 1.4 GiB      | 2.9 s         |
+  | JSON, minified                | 9.9           | 51         | 1.6 GiB      | 3.2 s         |
+  | Python                        | 8.3           | 48         | 1.5 GiB      | 3.9 s         |
+  | C                             | 6.7           | 30         | 0.9 GiB      | 4.8 s         |
+  | Markdown, block grammar       | 4.0           | 80         | 2.5 GiB      | 8.9 s         |
+  | Markdown, inline and fences ¹ | 1.6           | 132        | 4.1 GiB      | 20.4 s        |
+
+  Tree [B/B]: syntax tree bytes per file byte. ¹ All injection layers.
+  JSON and Markdown were measured at 32 MiB; Python, C and minified JSON at
+  128 MiB, scaled to 32 MiB (128 MiB: 3.8–6.4 GiB, 12–19 s; Markdown with all
+  layers about 16.5 GiB, 82 s).
+- **Viewport first.** When the estimated full parse exceeds 100 ms, the worker
+  first parses a 128 KiB window around the viewport, starting at a line
+  start, as a standalone document (10–80 ms) and posts its spans. The
+  cancellable full parse follows and replaces them. A jump outside the window
+  (`Ctrl+End`, scroll bar, Go to Line) parses a new window. Window spans can
+  be wrong for constructs opened before the window (block comments, strings,
+  code fences) until the full tree arrives. Edits re-parse incrementally: the
+  full tree when present, otherwise the current window.
 - **Injections** (embedded languages) are in v1, on by default, setting
   `syntax.injections`:
   - **HTML:** `<script>` → JavaScript, `<style>` → CSS.
   - **Markdown:** inline elements (second `tree-sitter-markdown` grammar, always
     on), fenced code blocks by info string (any registered language), YAML
     front matter, HTML blocks.
-  - **Layers.** One extra parser per injected language, parsed with
-    `set_included_ranges` over all of its regions (combined), incrementally.
-    Layers are rebuilt on the worker after the host parse. Highlighting merges
-    the visible captures of all layers; the innermost layer wins.
+  - **Layers.** One parser per injected language; each region (an inline
+    node, a code fence, a `<script>` element) gets its own tree, parsed with
+    `set_included_ranges` over that region and re-parsed only when an edit
+    touches it. One combined tree over all regions is quadratic in the region
+    count in tree-sitter 0.25 (13,152 inline ranges: 1.3 s; 26,200: 5.1 s;
+    separate trees: 0.6 s). Layers are rebuilt on the worker after the host
+    parse. Highlighting merges the visible captures of all layers; the
+    innermost layer wins.
   - **Depth.** One level below the host. HTML inside Markdown gets no further
     injections. Markdown inline counts as part of Markdown.
   - **Lazy grammars.** An injected language's queries compile on the worker
@@ -433,8 +473,9 @@ measurably hurts cold start, move each grammar to a lazily loaded DLL.
   is needed and older systems keep working with the plain look.
 - **Application manifest** (M3): supported-OS entry, per-monitor v2 DPI
   (replacing the runtime call), UTF-8 active code page, long paths. The
-  segment heap is enabled only if measured memory and startup improve.
-  Embedded with MinGW `windres` or the `embed-resource` crate.
+  segment heap is enabled only if measured memory and startup improve (M3:
+  no gain measured, not enabled). Embedded with MinGW `windres` from
+  `rte_app/build.rs`.
 - **Keyboard.** Virtual key + modifiers (layout independent, as VS Code on
   Windows); `WM_CHAR` for text including surrogate pairs.
 - **Mouse.** Click counts, `Alt+Click`, `Shift+Alt+Drag`, high-resolution wheel.
@@ -467,11 +508,11 @@ measurably hurts cold start, move each grammar to a lazily loaded DLL.
   | `load_error` | Loader                        | Read error                  | Never (process lifetime) |
 
   Commands with `mutates = true` are refused (status-line notice) and shown
-  disabled in the palette while any lock is set. Save and Save As are refused
+  disabled in the palette while any lock is set. Save is refused
   under `encoding` and `load_error`. Read-only command:
   `workbench.action.files.toggleActiveEditorReadonlyInSession` (VS Code ID),
   status line shows `RO` and the reason.
-- **CLI.** `RoyiTextEditor.exe [--read-only] [--trace-startup] [<path>]`.
+- **CLI.** `RoyiTextEditor.exe [--read-only] [--syntax <id>] [--trace-startup] [<path>]`.
 - **Configuration.** One file, `RoyiTextEditor.yaml`, next to the executable:
   settings plus a `keybindings:` section (VS Code semantics, including
   `-command` removals). Read once at startup; changes apply to new instances.
@@ -486,7 +527,8 @@ measurably hurts cold start, move each grammar to a lazily loaded DLL.
   another file. Open / New / Quick Open spawn a new process. When the current
   document is untitled and unmodified, it exits after the spawn.
   `Ctrl+,` opens `RoyiTextEditor.yaml` in a new instance.
-- **Dirty close.** In-window prompt strip: Save / Don't Save / Cancel.
+- **Dirty close.** In-window prompt strip: Save / Don't Save / Cancel; for an
+  untitled document: Discard / Cancel.
 - **Crash recovery** (best effort):
   - After each transaction the UI publishes the current `Snapshot` (an `Arc`
     clone) into a recovery slot.
@@ -499,8 +541,11 @@ measurably hurts cold start, move each grammar to a lazily loaded DLL.
   - Limits: no coverage for process kill, power loss or allocation-failure
     aborts. Save failures keep their own recovery copies (see [Saving](#saving)).
 - **Large files.** Shown read-only from the first published prefix; editable
-  when fully loaded; progress on the status line. Syntax off and wrap off above
-  the threshold.
+  when fully loaded; progress on the status line. Syntax off above
+  `syntax.maxFileMiB` (see [Syntax](#syntax-and-code-awareness-rte_syntax)).
+  Large-file mode
+  above `largeFileThresholdMiB` (default 256): no wrap, search counts only
+  asynchronously; the default is set by measurement when wrap ships.
 
 ### Saving
 
@@ -514,10 +559,11 @@ tests can inject each outcome.
   targets the current document path. Saves are never cancelled mid-write.
 - **Baseline.** Recorded at load and after each successful save: volume serial
   + 128-bit file ID (`FILE_ID_INFO`), size, last-write time, and for files
-  ≤ 64 MiB a 64-bit content hash.
+  ≤ 64 MiB a 64-bit content hash (XXH3).
 - **Sequence** for snapshot `S` to path `P`:
   1. Write `S` to a temporary sibling `P.~rte-<pid>.tmp`, flush
-     (`FlushFileBuffers`).
+     (`FlushFileBuffers`). Only the layer that created it removes it after
+     a write failure; a name taken by another file is never deleted.
   2. **Pre-check:** open `P`, compare with the baseline (identity, size,
      time; hash when ≤ 64 MiB). Mismatch → conflict prompt (Overwrite / Cancel);
      the temporary file is kept until the prompt resolves.
@@ -526,9 +572,12 @@ tests can inject each outcome.
      the baseline (identity, size, time; hash when ≤ 64 MiB). Match → delete
      the backup. Mismatch → another writer raced the commit: keep the backup,
      report its path.
-  5. `saved_root = S.root`, new baseline, dirty marker recomputed. Edits made
-     during the save keep the document dirty.
-- **Absent target** (new file, Save As to a new name, target deleted):
+  5. `saved_root = S.root`, dirty marker recomputed. Edits made during the
+     save keep the document dirty; undo coalescing is sealed when the save
+     starts. The new baseline is adopted only if `P` still holds `S` (size,
+     and hash ≤ 64 MiB or file identity above); otherwise the committed
+     version's stamp is kept, so the next save reports a conflict.
+- **Absent target** (new file named on the command line, target deleted):
   `MoveFileExW(tmp, P, MOVEFILE_WRITE_THROUGH)` without
   `MOVEFILE_REPLACE_EXISTING`, so a file that appears meanwhile fails the move
   instead of being overwritten. No other `MoveFileExW` fallback.
@@ -549,10 +598,10 @@ tests can inject each outcome.
   A change racing the commit is detected afterwards and its version survives
   as the backup. Limit: files above 64 MiB rewritten in place with the same
   size and timestamp are not detected.
-- **Save As.** Destination chosen by dialog. An existing destination needs
-  overwrite consent; its baseline is captured at consent time. The document
-  path and baseline change only after success; Save As waits for an in-flight
-  save to finish first.
+- **New files** are created only from the command line: a path that does not
+  exist opens an empty document, and its first save creates the file. There
+  is no Save As. A document started without a path is an untitled scratch
+  document: editable, never saved (Save shows a notice), marked as at risk.
 - **Close during a save:** input is disabled and "Saving…" is shown until the
   save finishes. Clean afterwards → exit. Failed or dirty → the dirty-close
   prompt.
@@ -629,6 +678,7 @@ General:
 | `Ctrl+Shift+W`       | Close window/instance  | Kept                              |
 | `Ctrl+,`             | User Settings          | Adapted: opens config file        |
 | `Ctrl+K Ctrl+S`      | Keyboard Shortcuts     | Adapted: opens config file        |
+| `Ctrl+K M`           | Change Language Mode   | Kept; also `--syntax <id>`        |
 
 Basic Editing:
 
@@ -701,7 +751,7 @@ Multi-cursor and Selection:
 Implicit essentials (not in the sheet): typing, `Backspace`/`Delete` and their
 `Ctrl` word variants, arrows / `Ctrl+Arrows` / `PgUp` / `PgDn` with `Shift`,
 `Ctrl+A`, `Ctrl+Z`, `Ctrl+Y` / `Ctrl+Shift+Z`, `Ctrl+V`, `Ctrl+S`,
-`Ctrl+Shift+S`, `Ctrl+O`, `Ctrl+N`, `Ctrl+W` / `Ctrl+F4`, `Tab` / `Shift+Tab`,
+`Ctrl+O`, `Ctrl+N` (untitled scratch instance), `Ctrl+W` / `Ctrl+F4`, `Tab` / `Shift+Tab`,
 `Esc` (collapse carets, close overlay), `Insert`, `F11`, `Ctrl+=` / `Ctrl+-` (zoom),
 Toggle Read-Only (palette; no default key, as VS Code).
 
@@ -738,6 +788,7 @@ Toggle Read-Only (palette; no default key, as VS Code).
 | Read-only | `--read-only` and toggle command; central edit-permission locks     |
 | Regex     | Automata engine; `fancy-regex` for lookaround and backreferences    |
 | Saving    | `ReplaceFileW` with backup; verified cleanup; no blind fallback     |
+| New files | Only from a command-line path; no Save As; untitled is never saved  |
 | Recovery  | Best-effort panic snapshots under `UserSettings/Recovery/`          |
 | Languages | Initial list above, including MATLAB, Octave and Julia              |
 
@@ -766,6 +817,11 @@ also build with GNU. Linking uses Rust's bundled MinGW runtime
 - **Syntax.** Selected: tree-sitter. Rejected: syntect (regex engine, slower
   highlighting, syntax-set load cost), hand-written lexers (no structure for
   folding, symbols, expand selection). Reason: incremental, fast, structural.
+- **Syntax size limit.** Selected: a fixed `syntax.maxFileMiB` (default 32),
+  with viewport-first window parses below it. At 32 MiB the tree takes up to
+  4.1 GiB and a full parse up to 20 s. Rejected: no fixed limit while the tree
+  fits in half of the available memory (Markdown up to about 350 MiB on the
+  reference machine, minutes of full parsing).
 - **Font rasterization.** Selected: `swash` (parse, hint, rasterize, shape).
   Rejected: `fontdue` (no hinting, no shaping), DirectWrite (COM, system font
   machinery). Reason: pure Rust, zero-copy memory-mapped fonts.
@@ -788,7 +844,9 @@ also build with GNU. Linking uses Rust's bundled MinGW runtime
   caps: glyph atlas 16 MiB, span cache around the viewport, undo history
   (10,000 steps, 256 MiB), Replace All construction (512 MiB). Search never
   stores whole-document match lists. Large files ≈ file size + tree overhead
-  (~1 KiB per 64 KiB of text). No per-line objects.
+  (~1 KiB per 64 KiB of text). No per-line objects. Syntax trees take 30–132
+  bytes per file byte (see the size limit); `syntax.maxFileMiB` (default 32)
+  bounds them to about 1–4 GiB.
 - **I/O:** configuration read once at startup and never written. File read
   once; save streams to a temporary sibling file with a backup during replace.
   Recovery files are written only on panic. No file watchers; external changes
@@ -798,7 +856,7 @@ also build with GNU. Linking uses Rust's bundled MinGW runtime
 - **Cancellation:** every job has a `CancelToken`; parsing and search check it
   per chunk; superseded revisions are rejected on arrival.
 - **Disabled paths:** syntax off → no parser, no queries. Large-file mode → no
-  wrap, no parse, async-only search counts. Idle → no timers.
+  wrap, async-only search counts. Idle → no timers.
 
 ## Tests
 
@@ -812,7 +870,7 @@ also build with GNU. Linking uses Rust's bundled MinGW runtime
 - **Round trip:** load → save without edits is byte identical for LF, CRLF,
   mixed, lone CR, BOM, UTF-16 LE/BE, invalid UTF-8, no trailing newline.
 - **Malformed UTF-16:** LE and BE files with an unpaired surrogate or an odd
-  byte count open read-only; save and Save As are refused; file bytes are
+  byte count open read-only; save is refused; file bytes are
   unchanged afterwards.
 - **Progressive load:** a throttled reader source publishes the first prefix
   snapshot before the remaining bytes are read; cancellation between blocks;
@@ -823,8 +881,8 @@ also build with GNU. Linking uses Rust's bundled MinGW runtime
   snapshot), close during a save. Injected `FileOps` outcomes 1175, 1176 and
   1177 and an unknown error: assert which files survive (target, temporary,
   backup), that no surviving version is deleted, and the reported paths.
-  Absent target with a file appearing before the move. Save As to existing
-  (consent) and absent targets, failure, and a queued Save after Save As.
+  Absent target (new file from the command line, deleted target) with a
+  file appearing before the move. Save of an untitled document is refused.
 - **Conflicts:** two writers with a barrier between pre-check and commit;
   same-size replacement with the old timestamp (detected ≤ 64 MiB by hash;
   backup kept and reported when racing the commit).
@@ -886,7 +944,7 @@ Each milestone gets its own task document.
    Record the reference machine.
    **Gate:** first frame p95 < 100 ms; scroll budgets at 1080p and 4K.
    Failure triggers the D3D11 presenter decision.
-4. **M3 Editing:** carets, selections, undo, clipboard, edit-permission locks,
+4. **M3 Editing** (done): carets, selections, undo, clipboard, edit-permission locks,
    `--read-only`, saving with `FileOps` fault injection, application manifest
    (segment heap measured before adoption).
 5. **M4 Commands:** registry, keymap and chords, palette, configuration file.

@@ -109,6 +109,19 @@ fn chunks_cover_ranges() {
 }
 
 #[test]
+fn chunk_at_finds_the_leaf_of_every_offset() {
+    let model: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
+    let s = Snapshot::from_bytes(&model);
+    for offset in 0..1000u64 {
+        let (start, chunk) = s.chunk_at(offset).unwrap();
+        assert!(start <= offset && offset < start + chunk.len() as u64);
+        assert_eq!(chunk, &model[start as usize..start as usize + chunk.len()]);
+    }
+    assert!(s.chunk_at(1000).is_none());
+    assert!(Snapshot::empty().chunk_at(0).is_none());
+}
+
+#[test]
 fn apply_returns_new_revision_and_keeps_old() {
     let s0 = Snapshot::from_bytes(b"hello world");
     let tx = Transaction::new(vec![

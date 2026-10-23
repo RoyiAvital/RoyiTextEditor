@@ -4,9 +4,12 @@
 use std::borrow::Cow;
 
 use divan::Bencher;
+use rte_edit::Selection;
 use rte_render::{Renderer, Target};
 use rte_text::Snapshot;
-use rte_view::{Chrome, DisplayList, Frame, Layout, Options, Scroll, Theme, ViewBuilder};
+use rte_view::{
+    CaretStyle, Chrome, DisplayList, Frame, Layout, Options, Scroll, Theme, ViewBuilder,
+};
 
 static FONT: &[u8] = rte_assets::DEFAULT_FONT;
 
@@ -64,10 +67,16 @@ fn frames(bencher: Bencher, snapshot: &Snapshot, width: u32, height: u32, px: f3
             theme: &Theme::DARK,
             chrome: Chrome {
                 title: "C:\\Projects\\sample.rs",
+                title_mark: Some(Theme::DARK.unsaved),
+                app_name: "RoyiTextEditor",
                 status_left: "5000 lines",
                 status_right: "UTF-8 · CRLF",
+                prompt: false,
             },
             options: &options,
+            // Every visible row is partly selected; one caret.
+            selections: &[Selection::new(100, 300_000)],
+            caret: CaretStyle::Bar,
         };
         view.build(&frame, &mut list);
         renderer.draw(

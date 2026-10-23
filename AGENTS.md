@@ -6,6 +6,8 @@ These instructions apply to the entire repository.
 
  - We are developing on Windows system, targeting Windows system and building GitHub Action Windows runner.
  - Use the available `cargo`, `rustup` and `rustc` commands in path.
+ - Do not run the full test suite unless told so. When developing run focused sub set related to the actual change.
+ - Do not run the full performance suite unless told so. When developing a performances related feature run focused related sub set.
  - Do not change `.gitattributes` or `.gitignore` without permission or explicitly being asked for.
  - Make the code easy to grasp for human and agents.
  - Be focused and short on documentation and text.

@@ -1,9 +1,15 @@
 name: Pages
 
-# Inherited from RoyiFileManager (Python/conda, file manager docs). Manual only
-# until the editor documentation replaces it.
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - docs/**
+      - tools/Build-Docs.ps1
+      - Meta/**
+      - .github/workflows/pages.yml
 
 permissions:
   contents: read
@@ -16,49 +22,59 @@ jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 30
-    env:
-      DOCS_ENV: RoyiFileManager
+    permissions:
+      contents: read
+      pages: read
+    outputs:
+      deploy: ${{ steps.pages.outputs.enabled }}
     steps:
       - name: Check out
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-        with:
-          lfs: true
 
-      - name: Verify Git LFS assets
+      # Without Settings > Pages > Source = GitHub Actions, build only and warn.
+      - name: Check GitHub Pages setting
+        id: pages
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          $icon = Get-Content docs/assets/icon.svg -Raw
-          if ($icon.StartsWith('version https://git-lfs.github.com/spec/v1') -or
-              $icon -notmatch '<svg(?:\s|>)') {
-            throw 'docs/assets/icon.svg is not a materialized SVG file. Check Git LFS checkout.'
+          try {
+            $site = Invoke-RestMethod -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/pages" -Headers @{
+              Authorization = "Bearer $env:GH_TOKEN"
+              Accept = 'application/vnd.github+json'
+            }
+            $enabled = $site.build_type -eq 'workflow'
+          } catch {
+            $enabled = $false
           }
+          if (-not $enabled) {
+            "::warning title=GitHub Pages is not enabled::Set Settings > Pages > Source to 'GitHub Actions'. The documentation is built but not deployed."
+          }
+          "enabled=$($enabled.ToString().ToLower())" >> $env:GITHUB_OUTPUT
 
-      - name: Set up conda environment from lock file
-        uses: mamba-org/setup-micromamba@f457c30a868e4760d3a6fcea5f25dc655b8edf39 # v3.2.1
+      - name: Cache documentation tools
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          environment-file: conda-lock.yml
-          environment-name: ${{ env.DOCS_ENV }}
-          cache-environment: true
-          cache-environment-key: docs-lock-${{ hashFiles('conda-lock.yml') }}
+          path: target/docs-tools
+          key: docs-tools-${{ hashFiles('tools/Build-Docs.ps1') }}
 
       - name: Configure GitHub Pages
+        if: steps.pages.outputs.enabled == 'true'
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
-
-      - name: Generate documentation screenshots
-        shell: pwsh
-        run: micromamba run -n $env:DOCS_ENV python src/misc/generate_docs_screenshots.py --mode source
 
       - name: Build documentation
         shell: pwsh
-        run: micromamba run -n $env:DOCS_ENV python build.py doc
+        run: ./tools/Build-Docs.ps1
 
       - name: Upload GitHub Pages artifact
+        if: steps.pages.outputs.enabled == 'true'
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
-          path: site
+          path: target/book
 
   deploy:
     needs: build
+    if: needs.build.outputs.deploy == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

@@ -153,6 +153,34 @@ impl Snapshot {
         Some(start..end)
     }
 
+    /// The leaf slice containing byte `offset` and the offset where it
+    /// starts; `None` at or past the end. For cursors that read nearby bytes.
+    pub fn chunk_at(&self, offset: u64) -> Option<(u64, &[u8])> {
+        if offset >= self.len() {
+            return None;
+        }
+        let mut node: &Node = &self.root;
+        let mut remaining = offset;
+        let mut start = 0;
+        loop {
+            match node.kind() {
+                Kind::Internal(children) => {
+                    let mut next = None;
+                    for child in children {
+                        if remaining < child.len() {
+                            next = Some(child);
+                            break;
+                        }
+                        remaining -= child.len();
+                        start += child.len();
+                    }
+                    node = next.expect("offset is inside the tree");
+                }
+                Kind::Leaf(chunk) => return Some((start, chunk.bytes())),
+            }
+        }
+    }
+
     /// Contiguous slices covering `range` in order. The range is clamped.
     pub fn chunks(&self, range: Range<u64>) -> Chunks<'_> {
         let end = range.end.min(self.len());

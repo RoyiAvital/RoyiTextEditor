@@ -1,0 +1,12 @@
+#include <stdio.h>
+#define MAX_$N(a, b) ((a) > (b) ? (a) : (b))
+/* Block comment $N */
+typedef struct node_$N { int value; struct node_$N *next; const char *name; } node_$N_t;
+static inline unsigned long sum_$N(const int *values, size_t count) {
+    unsigned long total = 0UL; // line comment
+    for (size_t k = 0; k < count; ++k) { total += (unsigned long)values[k] * 3.5f; }
+    if (total > MAX_$N(10, 20)) { printf("total=%lu\n", total); return total; }
+    switch (count) { case 0: return '\0'; default: break; }
+    return sizeof(node_$N_t);
+}
+

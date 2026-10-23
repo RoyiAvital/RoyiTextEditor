@@ -1,0 +1,21 @@
+[package]
+name = "rte_edit"
+description = "Selections, movement, pure edit commands and undo history."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+rte_text = { path = "../rte_text" }
+unicode-width.workspace = true
+
+[dev-dependencies]
+divan.workspace = true
+proptest.workspace = true
+
+[[bench]]
+name = "motion"
+harness = false
+
+[lints]
+workspace = true

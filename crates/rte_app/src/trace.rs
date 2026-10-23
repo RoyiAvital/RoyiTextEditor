@@ -22,7 +22,15 @@ impl Trace {
         }
     }
 
-    /// Prints `startup.<stage>_ms=<value>` lines to stdout (a pipe when traced).
+    /// Records a time measured elsewhere (another thread).
+    pub fn mark_at(&mut self, stage: &'static str, ms: f64) {
+        if self.enabled {
+            self.marks.push((stage, ms));
+        }
+    }
+
+    /// Prints `startup.<stage>_ms=<value>` lines and the peak private memory
+    /// (`memory.peak_private_mib=<value>`) to stdout (a pipe when traced).
     pub fn report(&self) {
         if !self.enabled {
             return;
@@ -31,6 +39,8 @@ impl Trace {
         for (stage, ms) in &self.marks {
             let _ = writeln!(out, "startup.{stage}_ms={ms:.3}");
         }
+        let peak = rte_platform::peak_private_bytes() as f64 / (1024.0 * 1024.0);
+        let _ = writeln!(out, "memory.peak_private_mib={peak:.2}");
         let _ = out.flush();
     }
 }

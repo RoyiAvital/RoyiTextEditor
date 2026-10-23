@@ -8,10 +8,16 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use rte_platform::files;
 use rte_text::{BUFFER_MAX, Encoding, LineEnding, Snapshot, TreeBuilder, Utf16Decoder};
+use xxhash_rust::xxh3::Xxh3;
+
+use crate::save::{Baseline, HASH_LIMIT};
 
 const FIRST_BLOCK: usize = 1024 * 1024;
 const BLOCK: usize = 16 * 1024 * 1024;
+/// Smallest read: confirms the end of the file, or catches a file that grew.
+const PROBE: usize = 64 * 1024;
 const PUBLISH_INTERVAL: Duration = Duration::from_millis(50);
 const LINE_ENDING_SAMPLE: u64 = 1024 * 1024;
 
@@ -19,6 +25,8 @@ const LINE_ENDING_SAMPLE: u64 = 1024 * 1024;
 pub struct FileInfo {
     pub encoding: Encoding,
     pub line_ending: LineEnding,
+    /// More sampled lines are indented with tabs than with spaces.
+    pub indent_tabs: bool,
     /// Malformed UTF-16: the document must stay read-only and unsaved.
     pub malformed: bool,
     /// The path does not exist yet.
@@ -35,16 +43,17 @@ pub enum LoadEvent {
     Done {
         snapshot: Snapshot,
         info: FileInfo,
+        /// `None` for a new file.
+        baseline: Option<Baseline>,
+        /// When reading finished, in ms since process creation.
+        read_ms: f64,
     },
     /// Reading failed; `snapshot` holds what was read before the error.
-    Failed {
-        snapshot: Snapshot,
-        error: String,
-    },
+    Failed { snapshot: Snapshot, error: String },
 }
 
 /// Calls the wake function when dropped, also while unwinding from a panic.
-struct WakeOnDrop<F: Fn()>(F);
+pub(crate) struct WakeOnDrop<F: Fn()>(pub(crate) F);
 
 impl<F: Fn()> Drop for WakeOnDrop<F> {
     fn drop(&mut self) {
@@ -85,15 +94,20 @@ fn read(path: &PathBuf, send: &impl Fn(LoadEvent)) -> Result<(), (Snapshot, Stri
                 info: FileInfo {
                     encoding: Encoding::Utf8,
                     line_ending: LineEnding::CrLf,
+                    indent_tabs: false,
                     malformed: false,
                     new_file: true,
                 },
+                baseline: None,
+                read_ms: rte_platform::ms_since_process_start(),
             });
             return Ok(());
         }
         Err(e) => return Err((Snapshot::empty(), e.to_string())),
     };
     let total = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let stamp = files::stamp_of(&file).ok();
+    let mut hasher = (total <= HASH_LIMIT).then(Xxh3::new);
     let mut builder = TreeBuilder::new();
     let mut encoding = Encoding::Utf8;
     let mut decoder: Option<Utf16Decoder> = None;
@@ -101,17 +115,26 @@ fn read(path: &PathBuf, send: &impl Fn(LoadEvent)) -> Result<(), (Snapshot, Stri
     let mut last_publish: Option<Instant> = None;
     let mut first = true;
     loop {
-        let mut block = vec![0u8; if first { FIRST_BLOCK } else { BLOCK }];
-        let n = fill(&mut file, &mut block).map_err(|e| (builder.snapshot(), e.to_string()))?;
-        block.truncate(n);
+        // Sized by what remains (a small probe at the expected end, in case the file grew).
+        let standard = if first { FIRST_BLOCK } else { BLOCK };
+        let remaining = usize::try_from(total.saturating_sub(loaded)).unwrap_or(usize::MAX);
+        let size = standard.min(remaining.max(PROBE));
+        // Allocated as the shared buffer and filled in place: full blocks are never copied.
+        let mut block: Arc<[u8]> = std::iter::repeat_n(0u8, size).collect();
+        let buf = Arc::get_mut(&mut block).expect("new block is unique");
+        let n = fill(&mut file, buf).map_err(|e| (builder.snapshot(), e.to_string()))?;
         if n == 0 {
             break;
         }
         loaded += n as u64;
-        let mut body = &block[..];
+        let data = &block[..n];
+        if let Some(hasher) = hasher.as_mut() {
+            hasher.update(data);
+        }
+        let mut body = data;
         if first {
-            encoding = Encoding::detect(&block);
-            body = &block[encoding.bom().len()..];
+            encoding = Encoding::detect(data);
+            body = &data[encoding.bom().len()..];
             decoder = match encoding {
                 Encoding::Utf16Le => Some(Utf16Decoder::new(true)),
                 Encoding::Utf16Be => Some(Utf16Decoder::new(false)),
@@ -127,10 +150,11 @@ fn read(path: &PathBuf, send: &impl Fn(LoadEvent)) -> Result<(), (Snapshot, Stri
                     builder.push_block(Arc::from(part));
                 }
             }
-            None if body.len() == block.len() => builder.push_block(Arc::from(block)),
+            None if body.len() == block.len() => builder.push_block(block.clone()),
+            // Short or BOM-trimmed: a right-sized copy, so the tree never holds unused bytes.
             None => builder.push_block(Arc::from(body)),
         }
-        let more = n == if first { FIRST_BLOCK } else { BLOCK };
+        let more = n == size;
         if more && last_publish.is_none_or(|t| t.elapsed() >= PUBLISH_INTERVAL) {
             send(LoadEvent::Progress {
                 snapshot: builder.snapshot(),
@@ -140,6 +164,10 @@ fn read(path: &PathBuf, send: &impl Fn(LoadEvent)) -> Result<(), (Snapshot, Stri
             last_publish = Some(Instant::now());
         }
         first = false;
+        if !more {
+            // A short read means the end of the file was reached.
+            break;
+        }
     }
     let mut malformed = false;
     if let Some(d) = decoder {
@@ -151,14 +179,30 @@ fn read(path: &PathBuf, send: &impl Fn(LoadEvent)) -> Result<(), (Snapshot, Stri
     }
     let snapshot = builder.finish();
     let sample = snapshot.to_vec(0..snapshot.len().min(LINE_ENDING_SAMPLE));
+    let (mut tabs, mut spaces) = (0u32, 0u32);
+    for line in sample.split(|&b| b == b'\n') {
+        match line.first() {
+            Some(b'\t') => tabs += 1,
+            Some(b' ') => spaces += 1,
+            _ => {}
+        }
+    }
+    let baseline = stamp.map(|stamp| Baseline {
+        stamp,
+        // A file that changed size while loading keeps no hash; its stamp differs anyway.
+        hash: hasher.filter(|_| loaded == stamp.size).map(|h| h.digest()),
+    });
     send(LoadEvent::Done {
         snapshot,
         info: FileInfo {
             encoding,
             line_ending: LineEnding::detect(&sample),
+            indent_tabs: tabs > spaces,
             malformed,
             new_file: false,
         },
+        baseline,
+        read_ms: rte_platform::ms_since_process_start(),
     });
     Ok(())
 }
@@ -193,7 +237,7 @@ mod tests {
 
     fn done(events: &[LoadEvent]) -> (&Snapshot, FileInfo) {
         match events.last() {
-            Some(LoadEvent::Done { snapshot, info }) => (snapshot, *info),
+            Some(LoadEvent::Done { snapshot, info, .. }) => (snapshot, *info),
             _ => panic!("load did not finish"),
         }
     }
@@ -217,6 +261,17 @@ mod tests {
         assert!(!info.malformed);
         let events = load_bytes("utf16bad", b"\xFF\xFE\x00\xD8A");
         assert!(done(&events).1.malformed);
+    }
+
+    #[test]
+    fn empty_and_exact_block_files_load_completely() {
+        let events = load_bytes("empty", b"");
+        assert!(done(&events).0.is_empty());
+        let bytes: Vec<u8> = (0..FIRST_BLOCK).map(|i| b'a' + (i % 26) as u8).collect();
+        let events = load_bytes("exact", &bytes);
+        let (s, info) = done(&events);
+        assert_eq!(s.to_vec(0..s.len()), bytes);
+        assert!(!info.malformed);
     }
 
     #[test]

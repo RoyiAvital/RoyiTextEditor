@@ -1,0 +1,17 @@
+@dataclass(frozen=True)
+class Point$N(Base):
+    """Docstring with 'quotes' and an escape \n."""
+    x: float = 1.5e-3
+    y: int = 0x1F
+    z: int = 0o17 + 0b1010
+
+    def norm(self, scale: float = 2) -> float:
+        # comment $N
+        value = (self.x ** 2 + self.y ** 2) ** 0.5
+        return f"{value:.3f} {self!r}" if value > 10 else None
+
+async def fetch_$N(items: list[str], *args, **kwargs) -> dict:
+    result = {k: v for k, v in zip(items, range(len(items))) if v % 2 == 0}
+    return await asyncio.sleep(0, result=[True, False, None, b"bytes", r"raw\d"])
+
+

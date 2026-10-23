@@ -1,0 +1,317 @@
+/* RoyiTextEditor dark palette for mdBook 0.5.4. Loaded after pagetoc.css. */
+
+:root {
+    --rfm-bg: #1b1c1d;
+    --rfm-surface: #242526;
+    --rfm-surface-raised: #2d2e2f;
+    --rfm-border: #3c3a2d;
+    --rfm-text: #f3f2ee;
+    --rfm-muted: #b6b5af;
+    --rfm-red: #ed253e;
+    --rfm-orange: #f68f33;
+    --rfm-green: #72be44;
+    --rfm-blue: #448aff;
+    --rfm-amber: #ff9100;
+    --rfm-tip: #00bfa5;
+    --rfm-caution: #ff5252;
+    --rfm-link: #f5a45d;
+    --rfm-code-bg: #141516;
+    --rfm-code-fg: #f5e1d8;
+    --rfm-kbd-bg: #303132;
+    --rfm-kbd-border: #4b4c4d;
+    --rfm-kbd-shadow: #101112;
+}
+
+/* Layout (theme-independent). */
+:root {
+    --content-max-width: 46rem;
+    --menu-bar-height: 3rem;
+    --mono-font: "Roboto Mono", "Cascadia Mono", Consolas, monospace;
+    --sidebar-target-width: 17rem;
+}
+
+.coal {
+    --bg: var(--rfm-bg);
+    --fg: var(--rfm-text);
+
+    --sidebar-bg: var(--rfm-bg);
+    --sidebar-fg: var(--rfm-text);
+    --sidebar-non-existant: var(--rfm-muted);
+    --sidebar-active: var(--rfm-orange);
+    --sidebar-spacer: var(--rfm-border);
+    --sidebar-header-border-color: var(--rfm-orange);
+
+    --scrollbar: var(--rfm-border);
+    --icons: var(--rfm-muted);
+    --icons-hover: var(--rfm-orange);
+    --links: var(--rfm-link);
+    --inline-code-color: var(--rfm-code-fg);
+
+    --theme-popup-bg: var(--rfm-surface);
+    --theme-popup-border: var(--rfm-border);
+    --theme-hover: var(--rfm-surface-raised);
+
+    --quote-bg: var(--rfm-surface);
+    --quote-border: var(--rfm-border);
+    --warning-border: var(--rfm-amber);
+
+    --table-border-color: var(--rfm-border);
+    --table-header-bg: var(--rfm-surface-raised);
+    --table-alternate-bg: transparent;
+
+    --searchbar-border-color: var(--rfm-border);
+    --searchbar-bg: var(--rfm-bg);
+    --searchbar-fg: var(--rfm-text);
+    --searchbar-shadow-color: transparent;
+    --searchresults-header-fg: var(--rfm-muted);
+    --searchresults-border-color: var(--rfm-border);
+    --searchresults-li-bg: var(--rfm-surface);
+    --search-mark-bg: var(--rfm-orange);
+
+    --blockquote-note-color: var(--rfm-blue);
+    --blockquote-tip-color: var(--rfm-tip);
+    --blockquote-important-color: var(--rfm-orange);
+    --blockquote-warning-color: var(--rfm-amber);
+    --blockquote-caution-color: var(--rfm-caution);
+}
+
+/* Header bar: title left-aligned after the left buttons; print and theme picker hidden. */
+.menu-title {
+    flex: 1;
+    font-size: 1.15rem;
+    font-weight: 700;
+    padding-inline-start: 0.25rem;
+    text-align: left;
+}
+
+.menu-title::before {
+    content: "";
+    display: inline-block;
+    width: 1.6rem;
+    height: 1.6rem;
+    margin-inline-end: 0.6rem;
+    vertical-align: middle;
+    background: url("../assets/icon.svg") center / contain no-repeat;
+}
+
+#mdbook-theme-toggle,
+#mdbook-theme-list,
+.right-buttons a[href="print.html"] {
+    display: none;
+}
+
+.coal #mdbook-menu-bar {
+    background-color: var(--rfm-surface);
+    border-block-end: 1px solid var(--rfm-border);
+    box-shadow: none;
+}
+
+.coal .menu-title {
+    color: var(--rfm-text);
+}
+
+/* Typography and content column. */
+:root {
+    font-size: 100%;
+}
+
+html {
+    font-family: "Roboto", "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+
+body {
+    font-size: 1rem;
+}
+
+.content main {
+    padding-top: 1.5rem;
+}
+
+.content h1 {
+    font-size: 2rem;
+    font-weight: 700;
+}
+
+.content h2 {
+    font-weight: 700;
+    margin-block-start: 2em;
+    padding-bottom: 0.35rem;
+}
+
+.coal .content h2 {
+    border-bottom: 1px solid var(--rfm-border);
+}
+
+.content p,
+.content ol,
+.content ul {
+    line-height: 1.6;
+}
+
+.content li + li {
+    margin-top: 0.25em;
+}
+
+/* Sidebar: page background, Material-like item size, hidden resize mark. */
+.sidebar {
+    font-size: 0.95rem;
+}
+
+.sidebar .sidebar-scrollbox {
+    padding: 1rem 1.2rem;
+}
+
+.sidebar-resize-indicator {
+    display: none;
+}
+
+.coal .sidebar {
+    border-inline-end: 1px solid var(--rfm-border);
+}
+
+/* Inline code, code blocks and keys. */
+.content :not(pre) > code {
+    border-radius: 3px;
+    padding: 0.1em 0.35em;
+}
+
+.coal .content :not(pre) > code {
+    background: var(--rfm-surface-raised);
+}
+
+.content pre {
+    border: 1px solid var(--table-border-color);
+    border-radius: 4px;
+}
+
+.coal .content pre {
+    background: var(--rfm-code-bg);
+}
+
+.content kbd {
+    border-radius: 3px;
+    font-family: var(--mono-font);
+    font-size: 0.85em;
+    padding: 0.05em 0.4em;
+}
+
+.coal .content kbd {
+    background: var(--rfm-kbd-bg);
+    border: 1px solid var(--rfm-kbd-border);
+    box-shadow: 0 0.1rem 0 var(--rfm-kbd-shadow);
+    color: var(--rfm-text);
+}
+
+/* Admonitions: <blockquote class="blockquote-tag blockquote-tag-<kind>">. */
+.content .blockquote-tag {
+    border-radius: 4px;
+    border-style: solid;
+    border-width: 1px;
+    font-size: 0.9rem;
+    margin: 1rem 0;
+    overflow: hidden;
+    padding: 0 0 0.6rem;
+}
+
+.content .blockquote-tag > p:not(.blockquote-tag-title) {
+    margin-inline: 0.8rem;
+}
+
+.content .blockquote-tag-title {
+    font-size: 0.85rem;
+    font-weight: 700;
+    margin: 0 0 0.5rem;
+    padding: 0.5rem 0.8rem;
+}
+
+.content .blockquote-tag-title svg {
+    color: var(--tag-color);
+    margin-right: 0.5rem;
+}
+
+.content .blockquote-tag-note { --tag-color: var(--rfm-blue); }
+.content .blockquote-tag-tip { --tag-color: var(--rfm-tip); }
+.content .blockquote-tag-important { --tag-color: var(--rfm-orange); }
+.content .blockquote-tag-warning { --tag-color: var(--rfm-amber); }
+.content .blockquote-tag-caution { --tag-color: var(--rfm-caution); }
+
+.coal .content .blockquote-tag {
+    background: var(--rfm-surface);
+    border-color: var(--tag-color);
+    color: var(--rfm-text);
+}
+
+.coal .content .blockquote-tag-title {
+    background: color-mix(in srgb, var(--tag-color) 12%, transparent);
+    color: var(--rfm-text);
+}
+
+/* Tables: left-aligned, bordered, sized to content. */
+.content table {
+    border: 1px solid var(--table-border-color);
+    border-collapse: separate;
+    border-radius: 4px;
+    border-spacing: 0;
+    margin: 0 0 1rem;
+    overflow: hidden;
+}
+
+.content table td,
+.content table th {
+    border: 0;
+    border-top: 1px solid var(--table-border-color);
+    padding: 0.6rem 0.9rem;
+}
+
+.content table thead td,
+.content table thead th {
+    border: 0;
+}
+
+/* Figures: <figure class="product-shot">. */
+.content .product-shot {
+    background: var(--rfm-surface);
+    border: 1px solid var(--rfm-border);
+    border-radius: 4px;
+    margin: 1.5rem 0 2rem;
+    overflow: hidden;
+    padding: 0.5rem;
+}
+
+.content .product-shot img {
+    border-radius: 3px;
+    display: block;
+    margin: 0 auto;
+    max-width: 100%;
+}
+
+.content .product-shot figcaption {
+    color: var(--rfm-muted);
+    font-size: 0.9em;
+    margin-top: 0.4rem;
+    text-align: center;
+}
+
+/* On-page table of contents (pagetoc). */
+.pagetoc {
+    font-size: 0.85rem;
+}
+
+.pagetoc a {
+    border-left-width: 2px;
+}
+
+.coal .pagetoc a {
+    border-left-color: var(--rfm-border);
+    color: var(--rfm-muted) !important;
+}
+
+.coal .pagetoc a:hover {
+    color: var(--rfm-text) !important;
+}
+
+.coal .pagetoc a.active {
+    background: transparent;
+    border-left-color: var(--rfm-orange);
+    color: var(--rfm-orange) !important;
+}
