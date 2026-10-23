@@ -7,7 +7,8 @@ name: Release
 #
 # Before building, the name and version in Meta/AppMeta.json are checked
 # against Cargo.toml and the tag, and the release notes are taken from the
-# matching CHANGELOG.md section.
+# matching CHANGELOG.md section. This is the only workflow that checks the code
+# (format, Clippy, tests); ordinary pushes run no checks.
 
 on:
   push:
@@ -71,6 +72,12 @@ jobs:
           rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal --component rustfmt,clippy
           rustc --version --verbose
 
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
       - name: Test
         run: cargo test --workspace --locked
 
@@ -127,17 +134,20 @@ jobs:
           if ($LASTEXITCODE -eq 0) {
             throw "Release '$env:RELEASE_TAG' already exists; refusing to replace it."
           }
-          $archive = @(Get-ChildItem target/release -Filter '*.zip' -File)
-          $checksum = @(Get-ChildItem target/release -Filter '*.zip.sha256' -File)
-          if ($archive.Count -ne 1 -or $checksum.Count -ne 1) {
-            throw 'Expected exactly one ZIP and one SHA-256 file in the build artifact.'
+          # upload-artifact keeps paths below the files' common folder (package/ for the ZIP).
+          $archive = @(Get-ChildItem target/release -Recurse -File -Filter '*.zip')
+          $checksum = @(Get-ChildItem target/release -Recurse -File -Filter '*.zip.sha256')
+          $notes = @(Get-ChildItem target/release -Recurse -File -Filter 'release-notes.md')
+          if ($archive.Count -ne 1 -or $checksum.Count -ne 1 -or $notes.Count -ne 1) {
+            Get-ChildItem target/release -Recurse -File | ForEach-Object { $_.FullName }
+            throw 'Expected exactly one ZIP, one SHA-256 file and one release-notes.md in the build artifact.'
           }
           $arguments = @(
             'release', 'create', $env:RELEASE_TAG,
             '--verify-tag',
             '--repo', $env:GITHUB_REPOSITORY,
             '--title', "$env:APP_NAME $env:RELEASE_VERSION",
-            '--notes-file', 'target/release/release-notes.md',
+            '--notes-file', $notes[0].FullName,
             $archive[0].FullName,
             $checksum[0].FullName
           )

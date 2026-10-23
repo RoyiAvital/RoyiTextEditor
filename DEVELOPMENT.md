@@ -121,8 +121,9 @@ cargo xtask package
 ```
 
 During development run the tests of the changed crates (`cargo test -p rte_view`)
-rather than the whole workspace. The `CI` workflow runs format, Clippy and the
-workspace tests on every push to `main` and on pull requests.
+rather than the whole workspace. Format, Clippy and the workspace tests run on
+GitHub only in the `Release` workflow (tags `vX.Y.Z` and manual dry runs);
+ordinary pushes and pull requests run no checks.
 
 `check-imports` fails when the release executable imports a MinGW runtime DLL
 (`libgcc_s_seh-1.dll`, `libwinpthread-1.dll`, `libstdc++-6.dll`) or lacks the
@@ -163,7 +164,8 @@ only when a version tag is pushed:
 The workflow verifies that `Meta/AppMeta.json` and `Cargo.toml` agree, that the
 tag is annotated and equals `v<version>`, that `## [Unreleased]` is the first
 changelog section and that a matching `## [X.Y.Z]` section exists. It runs the
-workspace tests and `cargo xtask package` (no benchmarks), then publishes a
+format check, Clippy, the workspace tests and `cargo xtask package` (no
+benchmarks), then publishes a
 GitHub release titled `<name> X.Y.Z`. The notes are that version's section; the
 assets are the ZIP and its SHA-256. Tags with a suffix (`v1.0.0-rc.1`) are
 published as pre-releases. An existing release is never replaced.
@@ -231,7 +233,7 @@ Serve it locally with live reload:
 The browser opens at <http://localhost:3000>; saving a page under `docs/`
 rebuilds and refreshes it. Stop the server with <kbd>Ctrl</kbd>+<kbd>C</kbd>.
 
-Build it once, as CI does (output in `target/book`):
+Build it once, as the `Pages` workflow does (output in `target/book`):
 
 ```powershell
 .\tools\Build-Docs.ps1
@@ -282,8 +284,8 @@ rows; otherwise run `cargo xtask bench-perf --short`.
 Measure on the reference machine on AC power, without other heavy load, and do
 not run tests or builds concurrently. First-paint times show two stable levels
 (about 13.5 ms and 19 ms) depending on how the benchmark is launched; compare
-versions under the same conditions. Benchmarks run only locally; neither CI nor
-the release workflow runs them.
+versions under the same conditions. Benchmarks run only locally; no workflow
+runs them.
 
 `tools/SyntaxProbe` measures tree-sitter parse time and syntax-tree memory; it
 produced the size-limit table in [Plan/Architecture.md](Plan/Architecture.md).

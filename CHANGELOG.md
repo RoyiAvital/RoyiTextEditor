@@ -15,7 +15,8 @@ It misses the _Command Center_ (M4), Search (M5) and Syntax Highlighting (M6).
 ### Added
 
 - Rust workspace on the `x86_64-pc-windows-gnu` toolchain, linking against the
-  MinGW runtime bundled with Rust. CI runs format, Clippy and tests on Windows.
+  MinGW runtime bundled with Rust. The release workflow runs format, Clippy and
+  tests on Windows.
 - `rte_text` text engine: persistent piece tree with cheap snapshots, line
   queries, multi-edit transactions with position mapping, progressive block
   loading, and streaming UTF-16 conversion with malformed-input detection.

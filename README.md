@@ -145,7 +145,8 @@ Run the script directly to refresh (`-Force`) or to fetch without building.
    `git push origin vX.Y.Z`.
 
 The `Release` workflow checks that the versions and the tag match, takes the
-release notes from the `CHANGELOG.md` section, runs the tests, builds and
+release notes from the `CHANGELOG.md` section, runs the format check, Clippy
+and the tests, builds and
 packages the ZIP with its SHA-256 file, and publishes the GitHub release.
 A pre-release suffix (`v1.0.0-rc.1`) publishes a pre-release. Running the
 workflow manually is a dry run: the ZIP and notes (from `## [Unreleased]`) are
