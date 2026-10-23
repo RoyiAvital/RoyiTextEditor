@@ -21,6 +21,9 @@ jobs:
     steps:
       - name: Check out
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          # .gitattributes stores *.svg (icons) in Git LFS.
+          lfs: true
 
       # The build downloads fonts into assets/ (tools/Get-Fonts.ps1); cache the archives.
       - name: Cache font downloads

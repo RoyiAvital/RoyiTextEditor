@@ -30,6 +30,9 @@ jobs:
     steps:
       - name: Check out
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          # .gitattributes stores *.svg (logo, favicon) in Git LFS.
+          lfs: true
 
       # Without Settings > Pages > Source = GitHub Actions, build only and warn.
       - name: Check GitHub Pages setting

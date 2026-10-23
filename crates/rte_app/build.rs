@@ -96,6 +96,10 @@ fn check_version() {
 
 fn svg_tree(path: &str) -> resvg::usvg::Tree {
     let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    assert!(
+        !text.starts_with("version https://git-lfs"),
+        "{path} is a Git LFS pointer; fetch it with `git lfs pull` (or `lfs: true` in actions/checkout)"
+    );
     resvg::usvg::Tree::from_str(&text, &resvg::usvg::Options::default())
         .unwrap_or_else(|e| panic!("parse {path}: {e}"))
 }
