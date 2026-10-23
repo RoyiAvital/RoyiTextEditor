@@ -1,0 +1,20 @@
+[package]
+name = "rte_app"
+description = "RoyiTextEditor application."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "RoyiTextEditor"
+path = "src/main.rs"
+
+[dependencies]
+rte_assets = { path = "../rte_assets" }
+rte_platform = { path = "../rte_platform" }
+rte_render = { path = "../rte_render" }
+rte_text = { path = "../rte_text" }
+rte_view = { path = "../rte_view" }
+
+[lints]
+workspace = true

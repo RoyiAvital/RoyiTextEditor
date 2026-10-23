@@ -1,0 +1,22 @@
+[package]
+name = "rte_render"
+description = "Glyph rasterization and CPU drawing of display lists."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+rte_view = { path = "../rte_view" }
+swash.workspace = true
+
+[dev-dependencies]
+divan.workspace = true
+rte_assets = { path = "../rte_assets" }
+rte_text = { path = "../rte_text" }
+
+[[bench]]
+name = "frame"
+harness = false
+
+[lints]
+workspace = true

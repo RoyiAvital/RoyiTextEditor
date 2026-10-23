@@ -1,0 +1,8 @@
+# Link with the MinGW runtime bundled in the Rust toolchain, independent of the
+# MinGW installation on PATH (some lack libgcc_eh.a). Code targets AVX2-class
+# CPUs (x86-64-v3: AVX2, BMI2, FMA).
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "link-self-contained=yes", "-C", "target-cpu=x86-64-v3"]
+
+[alias]
+xtask = "run -p xtask --release --"
