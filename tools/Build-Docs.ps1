@@ -7,8 +7,9 @@ Downloads pinned mdBook, mdbook-pagetoc, and mdbook-mermaid binaries into
 target/docs-tools when missing or outdated, verifies their SHA-256 hashes,
 captures the editor fixture, then builds docs/.
 The screenshot build requires the GNU Rust toolchain and MinGW-w64 windres.
-The hierarchy in docs/src/index.md is staged as mdBook's SUMMARY.md and removed
-after the build. Live preview keeps the generated hierarchy synchronized.
+The hierarchy in docs/src/index.md is staged as mdBook's SUMMARY.md. An existing
+summary is restored afterwards; otherwise the generated file is removed.
+Live preview keeps the generated hierarchy synchronized.
 Warnings and errors reported by mdBook fail the build.
 
 .PARAMETER Serve
@@ -145,11 +146,17 @@ $SourceAssetsDir = Join-Path $DocsDir 'src\assets'
 $MermaidStage = Join-Path $ToolsDir "mermaid-stage-$PID"
 $PreviousSiteUrl = [Environment]::GetEnvironmentVariable('MDBOOK_OUTPUT__HTML__SITE_URL', 'Process')
 $SummaryJob = $null
+$SummaryBackup = $null
+$HadSummary = $false
 try {
-    if (Test-Path $DocsSummary) {
-        throw "Refusing to overwrite an existing generated hierarchy: $DocsSummary"
+    if (Test-Path $DocsSummary -PathType Leaf) {
+        $SummaryBackup = [IO.File]::ReadAllBytes($DocsSummary)
+        $HadSummary = $true
+    } elseif (Test-Path $DocsSummary) {
+        throw "The generated hierarchy path is not a file: $DocsSummary"
+    } else {
+        $StagedFiles.Add($DocsSummary)
     }
-    $StagedFiles.Add($DocsSummary)
     & $SyncSummary $DocsIndex $DocsSummary $false
     if ($Serve) {
         $SummaryJob = Start-Job -ScriptBlock $SyncSummary -ArgumentList $DocsIndex, $DocsSummary, $true
@@ -268,5 +275,12 @@ finally {
     if (Test-Path $MermaidStage) {
         Remove-Item $MermaidStage -Recurse -Force
     }
-    [Environment]::SetEnvironmentVariable('MDBOOK_OUTPUT__HTML__SITE_URL', $PreviousSiteUrl, 'Process')
+    try {
+        if ($HadSummary) {
+            [IO.File]::WriteAllBytes($DocsSummary, $SummaryBackup)
+        }
+    }
+    finally {
+        [Environment]::SetEnvironmentVariable('MDBOOK_OUTPUT__HTML__SITE_URL', $PreviousSiteUrl, 'Process')
+    }
 }

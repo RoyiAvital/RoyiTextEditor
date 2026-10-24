@@ -1052,10 +1052,9 @@ mod tests {
         let plus = Matcher::new(&query("a+", Mode::Regex)).unwrap().unwrap();
         let mut searcher = Searcher::new(&plus, &one, &never);
         let twice = Replacement::parse("$&$&");
-        let started = Instant::now();
+        assert!(twice.bound(&mut |_| Some(one.len())) > 1 << 20);
         let result = replace_all(&mut searcher, 0..one.len(), &twice, false, 1 << 20);
         assert!(result.unwrap_err().contains("more than 1 MiB"));
-        assert!(started.elapsed() < Duration::from_secs(2));
         let mut searcher = Searcher::new(&plus, &one, &never);
         let upper = Replacement::parse(r"\U$&");
         assert!(replace_all(&mut searcher, 0..one.len(), &upper, false, 4 << 20).is_err());

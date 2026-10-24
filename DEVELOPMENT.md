@@ -229,9 +229,10 @@ workflow only builds the book and shows a warning.
 
 `docs/src/index.md` defines sections, page order and hierarchy. Content lives
 in separate files; the introduction is `docs/src/introduction.md`. The build
-temporarily generates mdBook's required `SUMMARY.md` from the index and removes
-it afterwards. Do not maintain a second navigation file. Live preview keeps
-the generated hierarchy synchronized when the index changes.
+temporarily generates mdBook's required `SUMMARY.md` from the index. An existing
+summary is restored afterwards; a build-created summary is removed, including
+on failure. Do not maintain a second navigation file. Live preview keeps the
+generated hierarchy synchronized when the index changes.
 
 Serve it locally with live reload:
 

@@ -445,6 +445,104 @@ mod tests {
     use super::*;
 
     #[test]
+    fn docs_summary_staging_restores_existing_files_on_success_and_failure() {
+        let script = r##"
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$parseErrors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile(
+    $env:RTE_DOCS_BUILD_SCRIPT, [ref]$tokens, [ref]$parseErrors)
+if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
+$assignment = $ast.Find({ param($node)
+    $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+    $node.Left -is [Management.Automation.Language.VariableExpressionAst] -and
+    $node.Left.VariablePath.UserPath -eq 'SyncSummary'
+}, $true)
+$expression = $assignment.Right.Find({ param($node)
+    $node -is [Management.Automation.Language.ScriptBlockExpressionAst]
+}, $true)
+$SyncSummary = $expression.ScriptBlock.GetScriptBlock()
+$buildTry = $ast.Find({ param($node)
+    $node -is [Management.Automation.Language.TryStatementAst] -and
+    $node.Body.Extent.Text.Contains('$CaptureScript =')
+}, $true)
+if (-not $buildTry) { throw 'Documentation build staging not found.' }
+$setup = @()
+foreach ($statement in $buildTry.Body.Statements) {
+    if ($statement.Extent.Text.StartsWith('$CaptureScript =')) { break }
+    $setup += $statement.Extent.Text
+}
+$prepare = [scriptblock]::Create($setup -join "`n")
+$cleanup = [scriptblock]::Create(($buildTry.Finally.Statements | ForEach-Object { $_.Extent.Text }) -join "`n")
+$folder = Join-Path ([IO.Path]::GetTempPath()) ('rte-summary-test-' + [Guid]::NewGuid().ToString('N'))
+$null = [IO.Directory]::CreateDirectory($folder)
+try {
+    foreach ($case in @('absent', 'matching', 'stale')) {
+        foreach ($fail in @($false, $true)) {
+            $caseDir = Join-Path $folder "$case-$fail"
+            $null = [IO.Directory]::CreateDirectory($caseDir)
+            $DocsIndex = Join-Path $caseDir 'index.md'
+            $DocsSummary = Join-Path $caseDir 'SUMMARY.md'
+            $SourceAssetsDir = Join-Path $caseDir 'assets'
+            $MermaidStage = Join-Path $caseDir 'mermaid'
+            $StagedFiles = New-Object 'System.Collections.Generic.List[string]'
+            $SummaryJob = $null
+            $SummaryBackup = $null
+            $HadSummary = $false
+            $CreatedAssetsDir = $false
+            $Serve = $false
+            $PreviousSiteUrl = [Environment]::GetEnvironmentVariable('MDBOOK_OUTPUT__HTML__SITE_URL', 'Process')
+            $expected = "# Index`n- [Introduction](introduction.md)`n"
+            [IO.File]::WriteAllText($DocsIndex, $expected)
+            $original = $null
+            if ($case -eq 'matching') {
+                [IO.File]::WriteAllText($DocsSummary, $expected)
+                $original = [IO.File]::ReadAllBytes($DocsSummary)
+            } elseif ($case -eq 'stale') {
+                $original = [byte[]](0xEF, 0xBB, 0xBF, 0x23, 0x20, 0x4F, 0x6C, 0x64, 0x0D, 0x0A)
+                [IO.File]::WriteAllBytes($DocsSummary, $original)
+            }
+            $caught = $false
+            try {
+                . $prepare
+                if ([IO.File]::ReadAllText($DocsSummary) -cne $expected) { throw 'Build did not use index.md.' }
+                if ($fail) { throw [InvalidOperationException]::new('injected renderer failure') }
+            } catch [InvalidOperationException] {
+                if (-not $fail -or $_.Exception.Message -ne 'injected renderer failure') { throw }
+                $caught = $true
+            } finally {
+                . $cleanup
+            }
+            if ($fail -and -not $caught) { throw 'Injected failure was not observed.' }
+            if ($case -eq 'absent') {
+                if (Test-Path $DocsSummary) { throw 'Generated summary was not removed.' }
+            } else {
+                if (-not (Test-Path $DocsSummary)) { throw 'Existing summary was deleted.' }
+                if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($DocsSummary)) -ne
+                    [Convert]::ToBase64String($original)) { throw 'Existing summary bytes changed.' }
+            }
+        }
+    }
+}
+finally {
+    Remove-Item -LiteralPath $folder -Recurse -Force
+}
+"##;
+        let output = Command::new("powershell.exe")
+            .env_remove("PSModulePath")
+            .env("RTE_DOCS_BUILD_SCRIPT", root().join("tools/Build-Docs.ps1"))
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .output()
+            .expect("run the summary staging regression");
+        assert!(
+            output.status.success(),
+            "Summary staging failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
     fn docs_mermaid_staging_preserves_existing_assets_and_cleanup_ownership() {
         let script = r#"
 $ErrorActionPreference = 'Stop'
