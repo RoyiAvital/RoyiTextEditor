@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-24
+
+This release focuses on _Selections_ and _Search and Replace_.  
+It matches the features of VS Code in those areas with the additional Glob search option.  
+The focus, as always, was performance and correctness.
+
 ### Added
 
 - Search box (`Ctrl+F`) at the top right, seeded with the selection or the
