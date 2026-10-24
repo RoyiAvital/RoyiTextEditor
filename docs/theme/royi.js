@@ -23,14 +23,45 @@ window.addEventListener("DOMContentLoaded", () => {
 				window.scrollTo(0, offset);
 			}
 		});
+		const closeSearch = () => {
+			if (!search.classList.contains("hidden")) searchToggle.click();
+			searchbar.blur();
+			searchToggle.focus({ preventScroll: true });
+		};
 		searchbar.addEventListener("keydown", event => {
 			if (event.key !== "Escape") return;
 			event.preventDefault();
 			event.stopPropagation();
-			if (!search.classList.contains("hidden")) searchToggle.click();
-			searchbar.blur();
-			searchToggle.focus({ preventScroll: true });
+			closeSearch();
 		}, true);
+		let returnFocusAfterPointer = false;
+		document.addEventListener("pointerdown", event => {
+			returnFocusAfterPointer = false;
+			if (event.button !== 0
+				|| search.classList.contains("hidden")
+				|| search.contains(event.target)
+				|| searchToggle.contains(event.target)) return;
+			closeSearch();
+			returnFocusAfterPointer = true;
+		}, true);
+		document.addEventListener("pointerup", () => {
+			if (returnFocusAfterPointer) {
+				window.setTimeout(() => { returnFocusAfterPointer = false; }, 0);
+			}
+		}, true);
+		document.addEventListener("pointercancel", () => {
+			returnFocusAfterPointer = false;
+		}, true);
+		document.addEventListener("click", event => {
+			if (search.contains(event.target) || searchToggle.contains(event.target)) return;
+			if (returnFocusAfterPointer) {
+				returnFocusAfterPointer = false;
+				searchToggle.focus({ preventScroll: true });
+				return;
+			}
+			if (search.classList.contains("hidden")) return;
+			closeSearch();
+		});
 	}
 	if (sidebarToggle) {
 		const syncSidebar = () => {

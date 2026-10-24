@@ -1390,7 +1390,11 @@ mod tests {
         // "title" and its marker end at 80 px; the divider needs a 1-cell gap.
         assert_eq!(
             name(150),
-            ("\u{2502}App".to_owned(), Some(90), Some(Theme::DARK.unsaved))
+            (
+                "\u{2502}App".to_owned(),
+                Some(90),
+                Some(Theme::DARK.unsaved)
+            )
         );
         assert_eq!(name(149), (String::new(), None, None));
     }
