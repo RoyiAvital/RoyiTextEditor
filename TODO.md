@@ -3,6 +3,7 @@
 ## Features
 
  - [x] Add _Syntax Highlight_ for Batch (Windows Command Shell).
+ - [x] Add option to reset geometry of the application (Check if it affects start up time).
  - [ ] Add support for Spelling with support for code skipping (Only remarks). Should be disabled by default.
  - [ ] Add support for Code Spelling like VS Code extensions (Will mark `myVarieble` with support for `snake_case` and `camelCase`).
  - [ ] Add _Auto Indent_ for `C`.
@@ -26,6 +27,8 @@
 ## Changes
 
 ## Bugs
+
+ - [ ] `Untitled` file can not be saved. Yet on close it asks for approval to discard.
 
 ## Performance
 
