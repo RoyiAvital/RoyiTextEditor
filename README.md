@@ -22,7 +22,8 @@ Each release is validated by hundreds of correctness tests and accompanied by a 
 
 1. Open the [latest release](https://github.com/RoyiAvital/RoyiTextEditor/releases/latest).
 2. Download `RoyiTextEditor-<version>-windows-x86_64.zip`.
-3. Extract the ZIP file to a folder of your choice.
+3. Extract the ZIP file to a folder of your choice; its top-level folder is
+  `RoyiTextEditor` (the `file name` in the application metadata).
 4. Run `RoyiTextEditor.exe` from the extracted folder.
 
 > [!TIP]
@@ -120,10 +121,12 @@ line at each.
 ### Syntax Highlighting and Code
 
 Code is highlighted with built-in [tree-sitter](https://tree-sitter.github.io)
-grammars: Bash, C, C#, C++, CSS, Go, HTML, Java, JavaScript, JSON, Julia, Lua,
+grammars: Bash, Batch, C, C#, C++, CSS, Go, HTML, Java, JavaScript, JSON, Julia, Lua,
 Markdown, MATLAB, Octave, PowerShell, Python, Rust, SQL, TOML, TypeScript
 (and TSX), XML and YAML. The language follows the file name (or a `#!` line);
 `.m` files are MATLAB unless they look like Octave. The status line shows it.
+Windows Batch files (`.bat` and `.cmd`) are detected automatically; use
+`--syntax batch` (aliases `bat`, `cmd`, `dosbatch`) to select Batch explicitly.
 
 - The window opens at once with plain text; the highlights follow within
   milliseconds. Large files are highlighted around the view first, then

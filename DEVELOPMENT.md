@@ -132,8 +132,9 @@ ordinary pushes and pull requests run no checks.
 (`libgcc_s_seh-1.dll`, `libwinpthread-1.dll`, `libstdc++-6.dll`) or lacks the
 embedded manifest. `package` builds the release, runs that check and writes
 `target/package/<file name>-<version>-windows-x86_64.zip` (from
-`Meta/AppMeta.json`) with the executable, `Fonts`, `README.md` and
-`CHANGELOG.md`. It prints the archive path last.
+`Meta/AppMeta.json`). The ZIP contains a top-level `<file name>/` folder with
+the executable, `Fonts`, `README.md` and `CHANGELOG.md`; only the ZIP filename
+includes the version and platform. It prints the archive path last.
 
 ### Releasing
 

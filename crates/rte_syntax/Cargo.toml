@@ -14,6 +14,7 @@ rte_text = { path = "../rte_text" }
 streaming-iterator = "0.1"
 tree-sitter = "0.27"
 tree-sitter-bash = "0.25"
+tree-sitter-batch = "0.11.1"
 tree-sitter-c = "0.24"
 tree-sitter-c-sharp = "0.23"
 tree-sitter-cpp = "0.23"

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-24
+
+### Added
+
+- Windows Batch syntax highlighting for `.bat` and `.cmd` files, with Batch
+  in Change Language Mode, `--syntax batch` (aliases `bat`, `cmd`, `dosbatch`),
+  and Markdown code fences using the same names.
+
+### Changed
+
+- Release ZIPs use the `file name` from application metadata for their
+  top-level folder (for example `RoyiTextEditor/`), while retaining the
+  version and platform in the ZIP filename.
+
 ## [0.4.0] - 2026-10-24
 
 This release focuses on adding _Syntax Highlighting_.  

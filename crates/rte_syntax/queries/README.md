@@ -12,6 +12,7 @@ authors where the crate ships none):
 | Grammar crate            | Copyright or authors                                         |
 | ------------------------ | ------------------------------------------------------------ |
 | `tree-sitter-bash`       | Max Brunsfeld                                                |
+| `tree-sitter-batch`      | WharfLab                                                     |
 | `tree-sitter-c`          | Max Brunsfeld                                                |
 | `tree-sitter-c-sharp`    | Max Brunsfeld, Damien Guard, Amaan Qureshi, and contributors |
 | `tree-sitter-cpp`        | Max Brunsfeld, Amaan Qureshi                                 |

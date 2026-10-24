@@ -55,6 +55,7 @@ pub fn highlights_source(grammar: Grammar) -> &'static str {
         Grammar::Css => q!("css"),
         Grammar::Xml => q!("xml"),
         Grammar::Bash => q!("bash"),
+        Grammar::Batch => q!("batch"),
         Grammar::PowerShell => q!("powershell"),
         Grammar::Lua => q!("lua"),
         Grammar::Sql => q!("sql"),
@@ -95,7 +96,7 @@ pub fn tags_source(grammar: Grammar) -> Option<&'static str> {
         Grammar::Java => q!("java"),
         Grammar::Matlab => q!("matlab"),
         Grammar::Julia => q!("julia"),
-        Grammar::MarkdownInline | Grammar::Html | Grammar::Xml => None,
+        Grammar::MarkdownInline | Grammar::Html | Grammar::Xml | Grammar::Batch => None,
     }
 }
 

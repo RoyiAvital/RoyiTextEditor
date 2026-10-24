@@ -23,6 +23,7 @@ pub enum Grammar {
     Css,
     Xml,
     Bash,
+    Batch,
     PowerShell,
     Lua,
     Sql,
@@ -33,7 +34,7 @@ pub enum Grammar {
 }
 
 impl Grammar {
-    pub const ALL: [Grammar; 24] = [
+    pub const ALL: [Grammar; 25] = [
         Grammar::Rust,
         Grammar::C,
         Grammar::Cpp,
@@ -51,6 +52,7 @@ impl Grammar {
         Grammar::Css,
         Grammar::Xml,
         Grammar::Bash,
+        Grammar::Batch,
         Grammar::PowerShell,
         Grammar::Lua,
         Grammar::Sql,
@@ -80,6 +82,7 @@ impl Grammar {
             Grammar::Css => "css",
             Grammar::Xml => "xml",
             Grammar::Bash => "bash",
+            Grammar::Batch => "batch",
             Grammar::PowerShell => "powershell",
             Grammar::Lua => "lua",
             Grammar::Sql => "sql",
@@ -109,6 +112,7 @@ impl Grammar {
             Grammar::Css => tree_sitter_css::LANGUAGE.into(),
             Grammar::Xml => tree_sitter_xml::LANGUAGE_XML.into(),
             Grammar::Bash => tree_sitter_bash::LANGUAGE.into(),
+            Grammar::Batch => tree_sitter_batch::LANGUAGE.into(),
             Grammar::PowerShell => tree_sitter_powershell::LANGUAGE.into(),
             Grammar::Lua => tree_sitter_lua::LANGUAGE.into(),
             Grammar::Sql => tree_sitter_sequel::LANGUAGE.into(),
@@ -174,7 +178,7 @@ const fn lang(id: &'static str, name: &'static str, grammar: Grammar) -> Lang {
 }
 
 /// All languages, sorted by name.
-pub static LANGUAGES: [Lang; 24] = [
+pub static LANGUAGES: [Lang; 25] = [
     Lang {
         extensions: &["sh", "bash", "zsh", "ksh"],
         file_names: &[
@@ -191,6 +195,14 @@ pub static LANGUAGES: [Lang; 24] = [
         aliases: &["sh", "shell", "shellscript", "zsh"],
         line_comment: Some("#"),
         ..lang("bash", "Bash", Grammar::Bash)
+    },
+    Lang {
+        extensions: &["bat", "cmd"],
+        aliases: &["bat", "cmd", "dosbatch"],
+        line_comment: Some("REM"),
+        brackets: &[('(', ')')],
+        auto_close: &[('(', ')'), ('"', '"')],
+        ..lang("batch", "Batch", Grammar::Batch)
     },
     Lang {
         extensions: &["c", "h"],

@@ -147,6 +147,12 @@ fn upstream(grammar: Grammar) -> Upstream {
             true,
             &[],
         ),
+        Grammar::Batch => up(
+            "tree-sitter-batch",
+            &[tree_sitter_batch::HIGHLIGHTS_QUERY],
+            true,
+            &[],
+        ),
         Grammar::PowerShell => up(
             "tree-sitter-powershell",
             &[tree_sitter_powershell::HIGHLIGHTS_QUERY],

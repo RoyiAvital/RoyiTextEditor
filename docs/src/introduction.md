@@ -79,7 +79,7 @@ undo step.
 
 ## Syntax Highlighting
 
-Code is highlighted with built-in tree-sitter grammars for Bash, C, C#, C++,
+Code is highlighted with built-in tree-sitter grammars for Bash, Batch, C, C#, C++,
 CSS, Go, HTML, Java, JavaScript, JSON, Julia, Lua, Markdown, MATLAB, Octave,
 PowerShell, Python, Rust, SQL, TOML, TypeScript (and TSX), XML and YAML. The
 language follows the file name or a `#!` line and is shown on the status line;
@@ -87,6 +87,9 @@ language follows the file name or a `#!` line and is shown on the status line;
 plain text and the highlights follow within milliseconds; large files are
 highlighted around the view first. Markdown also highlights code fences, front
 matter and HTML blocks, and HTML its scripts and styles.
+
+Windows Batch files (`.bat` and `.cmd`) use Batch highlighting automatically.
+Use `--syntax batch` or select Batch in Change Language Mode to override it.
 
 Code-aware editing: comments (<kbd>Ctrl</kbd>+<kbd>/</kbd>,
 <kbd>Shift</kbd>+<kbd>Alt</kbd>+<kbd>A</kbd>), auto-closing brackets and quotes,

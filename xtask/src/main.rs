@@ -230,9 +230,8 @@ fn package() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let name = format!("{}-{}-windows-x86_64", info.file_name, info.version);
     let out = root().join("target").join("package");
-    let stage = out.join(&name);
+    let stage = out.join(&info.file_name);
     let _ = std::fs::remove_dir_all(&stage);
     let copied = (|| -> std::io::Result<()> {
         std::fs::create_dir_all(&stage)?;
@@ -247,25 +246,40 @@ fn package() -> ExitCode {
         eprintln!("staging failed: {e}");
         return ExitCode::FAILURE;
     }
-    let archive = out.join(format!("{name}.zip"));
+    let archive = match archive_package(&out, &info) {
+        Ok(archive) => archive,
+        Err(e) => {
+            eprintln!("creating release archive failed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!("{}", archive.display());
+    ExitCode::SUCCESS
+}
+
+fn archive_package(out: &Path, info: &AppInfo) -> std::io::Result<PathBuf> {
+    let archive = out.join(format!(
+        "{}-{}-windows-x86_64.zip",
+        info.file_name, info.version
+    ));
     let _ = std::fs::remove_file(&archive);
     // Windows' bsdtar writes ZIP archives with `-a`.
-    let zipped = Command::new("tar")
+    let status = Command::new("tar")
         .arg("-a")
         .arg("-c")
         .arg("-f")
         .arg(&archive)
         .arg("-C")
-        .arg(&out)
-        .arg(&name)
-        .status()
-        .is_ok_and(|s| s.success());
-    if !zipped {
-        eprintln!("creating {} failed", archive.display());
-        return ExitCode::FAILURE;
+        .arg(out)
+        .arg(&info.file_name)
+        .status()?;
+    if !status.success() {
+        return Err(std::io::Error::other(format!(
+            "creating {} failed: {status}",
+            archive.display()
+        )));
     }
-    println!("{}", archive.display());
-    ExitCode::SUCCESS
+    Ok(archive)
 }
 
 fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
@@ -472,6 +486,46 @@ fn sample_c_file() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn package_archive_uses_metadata_file_name_for_its_folder() {
+        let info = AppInfo {
+            name: "Portable Editor".to_owned(),
+            file_name: "PortableEditor".to_owned(),
+            version: "1.2.3".to_owned(),
+        };
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let out = std::env::temp_dir().join(format!("rte-package-{}-{unique}", std::process::id()));
+        let stage = out.join(&info.file_name);
+        std::fs::create_dir_all(&stage).unwrap();
+        std::fs::write(stage.join("README.md"), b"package fixture").unwrap();
+        let archive = archive_package(&out, &info).unwrap();
+        let listing = Command::new("tar")
+            .arg("-tf")
+            .arg(&archive)
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(&out).unwrap();
+        assert_eq!(
+            archive.file_name().unwrap(),
+            "PortableEditor-1.2.3-windows-x86_64.zip"
+        );
+        assert!(listing.status.success());
+        let paths = String::from_utf8(listing.stdout).unwrap();
+        assert!(
+            paths
+                .lines()
+                .all(|path| path.starts_with("PortableEditor/")),
+            "{paths}"
+        );
+        assert!(
+            paths.lines().any(|path| path == "PortableEditor/README.md"),
+            "{paths}"
+        );
+    }
 
     #[test]
     fn docs_build_uses_summary_and_restores_staged_images() {

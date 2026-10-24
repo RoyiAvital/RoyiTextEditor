@@ -49,6 +49,20 @@ fn queries_are_generated_and_compile() {
 }
 
 #[test]
+fn windows_batch_detection() {
+    for name in ["build.bat", "setup.cmd", "BUILD.BAT", "SETUP.CMD"] {
+        assert_eq!(
+            detect(Path::new(name), b"@echo off\r\n").map(|l| l.id),
+            Some("batch")
+        );
+    }
+    for id in ["batch", "bat", "cmd", "dosbatch"] {
+        assert_eq!(by_id(id).map(|l| l.id), Some("batch"));
+        assert_eq!(by_fence(id).map(|l| l.id), Some("batch"));
+    }
+}
+
+#[test]
 fn detection() {
     let d = |name: &str, head: &str| detect(Path::new(name), head.as_bytes()).map(|l| l.id);
     assert_eq!(d("main.rs", ""), Some("rust"));
@@ -70,7 +84,7 @@ fn detection() {
     assert_eq!(by_fence("py").map(|l| l.id), Some("python"));
     assert_eq!(by_fence("c++").map(|l| l.id), Some("cpp"));
     assert_eq!(by_fence("{.rust}").map(|l| l.id), Some("rust"));
-    assert_eq!(LANGUAGES.len(), 24);
+    assert_eq!(LANGUAGES.len(), 25);
     for pair in LANGUAGES.windows(2) {
         assert!(pair[0].name.to_lowercase() < pair[1].name.to_lowercase());
     }
@@ -112,6 +126,81 @@ fn rust_highlights() {
     assert!(has(&s, "\"a\"", Style::String), "{s:?}");
 }
 
+#[test]
+fn windows_batch_highlights() {
+    let text = "@ECHO OFF\nREM build\n:: note\nsetlocal EnableDelayedExpansion\nset NAME=world\nif /i \"%NAME%\"==\"world\" (\n  echo \"Hello\" >out.txt\n)\nfor %%F in (*.txt) do echo %%F\necho %ERRORLEVEL% !TIME! %~dp0\ncall :build\ngoto :eof\n:build\nexit /b 2\n";
+    for ending in ["\n", "\r\n"] {
+        let text = text.replace('\n', ending);
+        let s = spans("batch", &text);
+        for (piece, style) in [
+            ("@ECHO OFF", Style::Keyword),
+            ("REM build", Style::Comment),
+            (":: note", Style::Comment),
+            ("set", Style::Keyword),
+            ("world", Style::String),
+            ("echo", Style::Function),
+            ("\"Hello\"", Style::String),
+            ("==", Style::Operator),
+            (">", Style::Operator),
+            ("%ERRORLEVEL%", Style::Keyword),
+            ("!TIME!", Style::Keyword),
+            ("2", Style::Number),
+        ] {
+            assert!(has(&s, piece, style), "{piece:?} {style:?}: {s:?}");
+        }
+        let snapshot = Snapshot::from_bytes(text.as_bytes());
+        let mut session = Session::new(by_id("batch").unwrap(), snapshot, false).unwrap();
+        while session.work(&|| false) != Work::Idle {}
+        let view = session.view();
+        assert!(!view.tree().unwrap().root_node().has_error());
+    }
+}
+
+#[test]
+fn windows_batch_markdown_fences() {
+    for id in ["batch", "bat", "cmd", "dosbatch"] {
+        let s = spans("markdown", &format!("```{id}\n@echo off\nREM note\n```\n"));
+        assert!(has(&s, "@echo off", Style::Keyword), "{id}: {s:?}");
+        assert!(has(&s, "REM note", Style::Comment), "{id}: {s:?}");
+    }
+}
+
+#[test]
+fn windows_batch_incremental_parse_matches_fresh() {
+    use rte_text::{Edit, Transaction};
+    let text = "@echo off\r\nset NAME=old\r\necho %NAME%\r\n";
+    let mut snapshot = Snapshot::from_bytes(text.as_bytes());
+    let mut session = Session::new(by_id("batch").unwrap(), snapshot.clone(), false).unwrap();
+    while session.work(&|| false) != Work::Idle {}
+    let start = text.find("old").unwrap() as u64;
+    let (next, changes) = snapshot
+        .apply(&Transaction::single(Edit::new(
+            start..start + 3,
+            &b"new value"[..],
+        )))
+        .unwrap();
+    session.edit(
+        &crate::input_edits(&snapshot, &next, &changes),
+        next.clone(),
+    );
+    snapshot = next;
+    while session.work(&|| false) != Work::Idle {}
+    let text = String::from_utf8(snapshot.to_vec(0..snapshot.len())).unwrap();
+    let mut out = Vec::new();
+    assert!(Painter::default().paint(
+        &session.view(),
+        &snapshot,
+        0..snapshot.len(),
+        None,
+        &mut out
+    ));
+    let incremental: Vec<(String, Style)> = out
+        .iter()
+        .map(|s| (text[s.start as usize..s.end as usize].to_owned(), s.style))
+        .collect();
+    assert_eq!(incremental, spans("batch", &text));
+}
+
 /// Language, text and expected (text, style) spans.
 type Case = (&'static str, &'static str, &'static [(&'static str, Style)]);
 
@@ -123,6 +212,11 @@ fn every_language_highlights() {
             "bash",
             "echo \"x\" # c\n",
             &[("echo", Function), ("# c", Comment)],
+        ),
+        (
+            "batch",
+            "@echo off\r\nREM note\r\n",
+            &[("@echo off", Keyword), ("REM note", Comment)],
         ),
         (
             "c",

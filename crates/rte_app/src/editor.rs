@@ -3054,6 +3054,48 @@ mod tests {
     }
 
     #[test]
+    fn windows_batch_files_highlight_and_can_be_selected_manually() {
+        for name in [r"C:\scripts\build.bat", r"C:\scripts\setup.cmd"] {
+            let mut ctx = Ctx::headless(800, 600, 96);
+            let mut editor = editor_named(name, b"@echo off\r\nREM build\r\n");
+            editor.event(
+                Event::Resized {
+                    width: 800,
+                    height: 600,
+                },
+                &mut ctx,
+            );
+            assert_eq!(editor.language.map(|l| l.id), Some("batch"));
+            assert!(editor.status_text().1.contains("Batch"));
+            wait_for_syntax(&mut editor, &mut ctx);
+            let keyword = editor.theme.syntax[rte_syntax::Style::Keyword as usize];
+            assert_eq!(glyph_color(&mut editor, '@'), keyword);
+            editor.event(key(VK_OEM_2, true, false), &mut ctx);
+            assert!(text(&editor).starts_with("REM @echo off\r\n"));
+            wait_for_syntax(&mut editor, &mut ctx);
+            let comment = editor.theme.syntax[rte_syntax::Style::Comment as usize];
+            assert_eq!(glyph_color(&mut editor, 'R'), comment);
+            editor.event(key(VK_Z, true, false), &mut ctx);
+            wait_for_syntax(&mut editor, &mut ctx);
+            assert_eq!(glyph_color(&mut editor, '@'), keyword);
+        }
+        let mut ctx = Ctx::headless(800, 600, 96);
+        let mut editor = editor_named(r"C:\scripts\notes.txt", b"@echo off\r\n");
+        chord_k(&mut editor, &mut ctx, VK_M);
+        assert!(
+            palette(&editor)
+                .choices
+                .labels
+                .iter()
+                .any(|label| label == "Batch")
+        );
+        type_text(&mut editor, &mut ctx, "batch");
+        editor.event(key(VK_RETURN, false, false), &mut ctx);
+        assert_eq!(editor.language.map(|l| l.id), Some("batch"));
+        assert!(editor.syntax.is_some());
+    }
+
+    #[test]
     fn plain_text_runs_no_syntax_work() {
         let files = Arc::new(FakeFiles::default());
         let editor = editor_on(&files, b"fn main() {}\n", false);

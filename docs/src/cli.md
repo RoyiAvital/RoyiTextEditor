@@ -38,6 +38,7 @@ JSON (`.ipynb` is not detected as JSON), the third measures startup.
 | ID           | Language       | Aliases                             |
 | ------------ | -------------- | ----------------------------------- |
 | `bash`       | Bash           | `sh`, `shell`, `shellscript`, `zsh` |
+| `batch`      | Batch          | `bat`, `cmd`, `dosbatch`            |
 | `c`          | C              |                                     |
 | `csharp`     | C#             | `c#`                                |
 | `cpp`        | C++            | `c++`, `cxx`, `cc`                  |
@@ -64,3 +65,5 @@ JSON (`.ipynb` is not detected as JSON), the third measures startup.
 
 The same names (and file extensions) select the language of Markdown code
 fences.
+
+Windows Batch files are detected by their `.bat` or `.cmd` extension.
