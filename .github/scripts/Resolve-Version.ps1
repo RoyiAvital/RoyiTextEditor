@@ -1,6 +1,6 @@
-# Reads the application name and version from Meta/AppMeta.json, verifies them
-# against Cargo.toml (and the tag in a tag build) and writes the release
-# outputs. Used by .github/workflows/release.yml; runnable locally:
+# Reads the application name, file name and version from Meta/AppMeta.json,
+# verifies them against Cargo.toml (and the tag in a tag build) and writes the
+# release outputs. Used by .github/workflows/release.yml; runnable locally:
 #
 #     .\.github\scripts\Resolve-Version.ps1 [-Tag v0.1.0]
 param(
@@ -12,9 +12,13 @@ $root = Split-Path (Split-Path $PSScriptRoot)
 
 $meta = Get-Content (Join-Path $root 'Meta/AppMeta.json') -Raw | ConvertFrom-Json
 $name = $meta.name
+$fileName = $meta.'file name'
 $version = $meta.version
-if ($name -notmatch '^[A-Za-z0-9._-]+$') {
-    throw "Name '$name' in Meta/AppMeta.json must be a plain file name (letters, digits, '.', '_', '-')."
+if ([string]::IsNullOrWhiteSpace($name)) {
+    throw 'Meta/AppMeta.json has no name.'
+}
+if ($fileName -notmatch '^[A-Za-z0-9._-]+$') {
+    throw "File name '$fileName' in Meta/AppMeta.json must be a plain file name (letters, digits, '.', '_', '-')."
 }
 
 # `version` of [workspace.package], which every crate inherits.
@@ -64,7 +68,7 @@ $outputs = [ordered]@{
     'version'       = $version
     'tag'           = $Tag
     'prerelease'    = $prerelease.ToString().ToLower()
-    'artifact-name' = "$name-$version"
+    'artifact-name' = "$fileName-$version"
 }
 foreach ($key in $outputs.Keys) {
     $line = "$key=$($outputs[$key])"

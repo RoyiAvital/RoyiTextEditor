@@ -16,6 +16,9 @@ rte_platform = { path = "../rte_platform" }
 rte_render = { path = "../rte_render" }
 rte_text = { path = "../rte_text" }
 rte_view = { path = "../rte_view" }
+saphyr-parser.workspace = true
+serde_json.workspace = true
+unicode-width.workspace = true
 xxhash-rust.workspace = true
 
 [build-dependencies]

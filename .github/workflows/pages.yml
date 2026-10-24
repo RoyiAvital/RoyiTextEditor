@@ -8,6 +8,12 @@ on:
     paths:
       - docs/**
       - tools/Build-Docs.ps1
+      - tools/Capture-DocsScreenshot.ps1
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - crates/**
+      - assets/**
       - Meta/**
       - .github/workflows/pages.yml
 

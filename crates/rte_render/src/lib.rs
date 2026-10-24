@@ -5,7 +5,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
 
-use rte_view::{Cell, Color, DisplayList, Rect};
+use rte_view::{Cell, Color, DisplayList, Glyph, Image, Layer, Rect};
 use swash::scale::{Render, ScaleContext, Source};
 use swash::zeno::Format;
 use swash::{CacheKey, FontRef};
@@ -53,6 +53,8 @@ pub struct Renderer {
     /// (e.g. the missing-glyph box) share one bitmap.
     glyph_ids: HashMap<char, u16>,
     glyphs: HashMap<u16, Option<Bitmap>>,
+    /// Star coverage by side and fill.
+    stars: HashMap<(u32, bool), Bitmap>,
     contrast: [u8; 256],
 }
 
@@ -79,6 +81,7 @@ impl Renderer {
             ascii: Vec::new(),
             glyph_ids: HashMap::new(),
             glyphs: HashMap::new(),
+            stars: HashMap::new(),
             contrast,
         };
         renderer.apply_size(px);
@@ -181,14 +184,48 @@ impl Renderer {
         })
     }
 
-    /// Draws `list` into `target`.
+    /// Draws `list` into `target`, except its popup layer.
     pub fn draw(&mut self, list: &DisplayList, target: &mut Target<'_>) {
         for fill in &list.fills {
             fill_rect(target, fill.rect, fill.color);
         }
+        self.draw_glyphs(&list.glyphs, target);
+        for fill in &list.overlays {
+            fill_rect(target, fill.rect, fill.color);
+        }
+    }
+
+    /// Draws a popup layer above what `target` holds.
+    pub fn draw_layer(&mut self, popup: &Layer, target: &mut Target<'_>) {
+        for fill in &popup.fills {
+            fill_rect(target, fill.rect, fill.color);
+        }
+        for image in &popup.images {
+            draw_image(target, image);
+        }
+        for star in &popup.stars {
+            let key = (star.rect.w.min(star.rect.h), star.filled);
+            let bitmap = self
+                .stars
+                .entry(key)
+                .or_insert_with(|| star_bitmap(key.0, key.1));
+            blit(
+                target,
+                bitmap,
+                star.rect.x,
+                star.rect.y,
+                star.color,
+                star.rect,
+                &self.contrast,
+            );
+        }
+        self.draw_glyphs(&popup.glyphs, target);
+    }
+
+    fn draw_glyphs(&mut self, glyphs: &[Glyph], target: &mut Target<'_>) {
         let baseline = self.baseline;
         let contrast = self.contrast;
-        for glyph in &list.glyphs {
+        for glyph in glyphs {
             if let Some(bitmap) = self.bitmap(glyph.ch) {
                 blit(
                     target,
@@ -201,8 +238,92 @@ impl Renderer {
                 );
             }
         }
-        for fill in &list.overlays {
-            fill_rect(target, fill.rect, fill.color);
+    }
+}
+
+/// Coverage of a five-pointed star in a `side` square; the outline is the
+/// star minus a smaller concentric one.
+fn star_bitmap(side: u32, filled: bool) -> Bitmap {
+    const SAMPLES: u32 = 4;
+    let r = side as f32 / 2.0;
+    // The points span 1.809 r vertically; center that span.
+    let (cx, cy) = (r, r + 0.0955 * r);
+    let points = |scale: f32| -> [(f32, f32); 10] {
+        std::array::from_fn(|k| {
+            let angle = (-90.0 + 36.0 * k as f32).to_radians();
+            let radius = scale * if k % 2 == 0 { r } else { 0.45 * r };
+            (cx + radius * angle.cos(), cy + radius * angle.sin())
+        })
+    };
+    let outer = points(1.0);
+    // Inner edges sit 1.4 px inside the outer ones (edge distance about 0.33 r).
+    let inner = points((1.0 - 1.4 / (0.33 * r.max(1.0))).clamp(0.0, 0.85));
+    let mut coverage = vec![0u8; (side * side) as usize];
+    for y in 0..side {
+        for x in 0..side {
+            let mut hits = 0;
+            for sy in 0..SAMPLES {
+                for sx in 0..SAMPLES {
+                    let px = x as f32 + (sx as f32 + 0.5) / SAMPLES as f32;
+                    let py = y as f32 + (sy as f32 + 0.5) / SAMPLES as f32;
+                    if inside(&outer, px, py) && (filled || !inside(&inner, px, py)) {
+                        hits += 1;
+                    }
+                }
+            }
+            coverage[(y * side + x) as usize] = (hits * 255 / (SAMPLES * SAMPLES)) as u8;
+        }
+    }
+    Bitmap {
+        left: 0,
+        top: 0,
+        width: side,
+        height: side,
+        coverage: coverage.into_boxed_slice(),
+    }
+}
+
+/// Even-odd point-in-polygon test.
+fn inside(polygon: &[(f32, f32)], x: f32, y: f32) -> bool {
+    let mut result = false;
+    let mut j = polygon.len() - 1;
+    for (i, &(xi, yi)) in polygon.iter().enumerate() {
+        let (xj, yj) = polygon[j];
+        if (yi > y) != (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi {
+            result = !result;
+        }
+        j = i;
+    }
+    result
+}
+
+/// Blends premultiplied image pixels over the target.
+fn draw_image(target: &mut Target<'_>, image: &Image) {
+    if image.pixels.len() < (image.width * image.height) as usize {
+        return;
+    }
+    let stride = target.width as usize;
+    for iy in 0..image.height as i32 {
+        let y = image.y + iy;
+        if y < 0 || y >= target.height as i32 {
+            continue;
+        }
+        for ix in 0..image.width as i32 {
+            let x = image.x + ix;
+            if x < 0 || x >= target.width as i32 {
+                continue;
+            }
+            let s = image.pixels[(iy * image.width as i32 + ix) as usize];
+            let a = s >> 24;
+            if a == 0 {
+                continue;
+            }
+            let d = &mut target.pixels[y as usize * stride + x as usize];
+            let mix = |shift: u32| {
+                let (sc, dc) = ((s >> shift) & 0xFF, (*d >> shift) & 0xFF);
+                (sc + (dc * (255 - a) + 127) / 255).min(255) << shift
+            };
+            *d = OPAQUE | mix(16) | mix(8) | mix(0);
         }
     }
 }
@@ -384,6 +505,61 @@ mod tests {
             lit.iter()
                 .all(|&i| (cell.width..2 * cell.width).contains(&(i % w)))
         );
+    }
+
+    #[test]
+    fn popup_layer_covers_the_text_and_draws_stars_and_images() {
+        let mut r = renderer();
+        let (w, h) = (40u32, 40u32);
+        let mut pixels = vec![0u32; (w * h) as usize];
+        let all = Rect { x: 0, y: 0, w, h };
+        let mut list = DisplayList::default();
+        list.glyphs.push(Glyph {
+            x: 0,
+            y: 0,
+            ch: 'M',
+            color: 0xFFFFFF,
+            clip: all,
+        });
+        list.popup.fills.push(Fill {
+            rect: all,
+            color: 0x000000,
+        });
+        let star = |x, filled| rte_view::Star {
+            rect: Rect {
+                x,
+                y: 0,
+                w: 20,
+                h: 20,
+            },
+            color: 0xFF0000,
+            filled,
+        };
+        list.popup.stars.push(star(0, true));
+        list.popup.stars.push(star(20, false));
+        list.popup.images.push(Image {
+            x: 0,
+            y: 30,
+            width: 2,
+            height: 1,
+            pixels: vec![0xFF00_FF00, 0x8000_4000].into(),
+        });
+        let mut target = Target {
+            pixels: &mut pixels,
+            width: w,
+            height: h,
+        };
+        r.draw(&list, &mut target);
+        r.draw_layer(&list.popup, &mut target);
+        let at = |x: u32, y: u32| pixels[(y * w + x) as usize] & 0xFF_FFFF;
+        // The filled star covers its center; the outline leaves it empty.
+        assert_eq!(at(10, 10), 0xFF0000);
+        assert_eq!(at(30, 10), 0x000000);
+        assert!((0..20).any(|x| at(20 + x, 10) >> 16 > 0x80));
+        assert_eq!(at(0, 30), 0x00FF00);
+        assert_eq!(at(1, 30), 0x004000, "premultiplied blend over black");
+        // The text glyph is hidden by the popup background.
+        assert!((0..20).all(|y| (0..20).all(|x| at(x, y) & 0xFFFF == 0)));
     }
 
     #[test]

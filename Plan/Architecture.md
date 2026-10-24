@@ -293,7 +293,9 @@ replacement syntax), with bounded memory and preemptible work.
   `workbench.action.editor.changeLanguageMode`) lists Plain Text and the
   registered languages and re-parses with the choice. `--syntax <id>` (registry
   id, for example `json`) sets it at startup; an unknown id keeps detection and
-  shows a status-line notice. The choice lasts for the process.
+  shows a status-line notice. `--syntax none` / `--syntax off` (any case) and
+  `View: Toggle Syntax Highlighting` select plain text (status line:
+  `Syntax off`). The choice lasts for the process.
 - **MATLAB and Octave** share `tree-sitter-matlab` (MIT; no Octave dialect).
   Octave adds its own configuration (`%` and `#` comments, `end*` keywords).
   `.m` opens as MATLAB unless content shows Octave markers (`#` comments,
@@ -488,14 +490,44 @@ measurably hurts cold start, move each grammar to a lazily loaded DLL.
 
 ### App (`rte_app`)
 
-- **Commands.** Static registry: `{ id, title, keys, when, mutates, run }`. IDs
-  follow VS Code (`editor.action.copyLinesDownAction`) so bindings are familiar.
-  Keymap and palette both dispatch through one `run_command`.
+- **Commands.** Static registry: `{ id, label, keys, mutates, action }`, sorted
+  by label. Labels use VS Code style families (`Application:`, `File:`, `Edit:`,
+  `Selection:`, `Go:`, `View:`). IDs follow VS Code (`editor.action.copyLinesDownAction`)
+  so bindings are familiar. Keymap and palette both dispatch through one
+  `Editor::perform(Action)`. Bindings match modifiers exactly; keys that are
+  not commands (movement, typing) stay in the editor, and unbound `Alt` keys
+  keep their system behavior. `Application: Quit` (`Alt+F4`) and `File: Close`
+  (`Ctrl+W`) both close the instance: one document per process. `Ctrl+Q` is
+  not bound (VS Code quits every window with it).
 - **Keymap.** Two-key chords (`Ctrl+K Ctrl+C`) with a pending-chord hint.
-  `when` uses a fixed set of contexts (editor, palette, find widget, multi-caret).
-- **Palette modes.** `>` commands (`Ctrl+Shift+P`), `:` go to line (`Ctrl+G`),
-  `@` symbols (`Ctrl+Shift+O`), none = files in the current file's folder
-  (`Ctrl+P`). Fuzzy match with key hints. No history.
+  `when` uses a fixed set of contexts (editor, palette, find widget, multi-cursor).
+- **Palette.** `Ctrl+Shift+P` / `F1`: all commands. `Ctrl+P`: the last
+  `palette.recentCount` commands run from the palette, then the favorites (by
+  label). Own fuzzy matcher: in-order subsequence, case-insensitive, bonuses
+  for word starts and consecutive characters; matched characters highlighted.
+  A star per row (click or `Ctrl+Space`) toggles a favorite. The search field
+  has a caret and selection (arrows, `Ctrl` word moves, `Shift` extends,
+  `Home`/`End`, `Backspace`/`Delete`, `Ctrl+A`, `Ctrl+V` first line), at most
+  256 characters, scrolled to keep the caret visible. Planned modes:
+  `:` go to line (`Ctrl+G`), `@` symbols (`Ctrl+Shift+O`); Quick Open moves to
+  another key.
+- **Palette state.** `UserSettings/Palette.json` (favorites, recent IDs). The
+  UI applies every change at once; a worker thread, started when the palette
+  first opens, reads the file and then persists the changes in order: re-read
+  (keeping other instances' changes), apply, replace atomically (temporary
+  file + rename). Replies older than the last change are ignored. Limits:
+  64 KiB file, 256 favorites, 128-byte IDs; duplicates and recent entries past
+  20 are dropped. An unreadable, oversized or invalid file is reported and
+  left unchanged; changes then last for the session. Unknown IDs are kept and
+  ignored; favorites are indexed by registry position for painting.
+- **Popups.** The palette and panels (About, Keyboard Shortcuts) are a
+  `DisplayList` layer drawn last (fills, images, stars, glyphs). They do not
+  zoom: a second renderer at the zoom-0 size exists only while the editor is
+  zoomed. They fit the client, moving over the title strip and dropping the
+  About icon when the window is too low. A fingerprint of the visible popup
+  state decides repaints. The About icon is a premultiplied image rendered by
+  the build script and scaled when the panel opens. Links open through
+  `ShellExecuteW`; `shell32` and `ole32` load on first use.
 - **Edit permission.** `Editor::apply(Transaction)` is the only mutation entry
   (typing, paste, undo, redo, replace, commands). It requires all independent
   locks to be clear; each lock has one owner:
@@ -520,9 +552,11 @@ measurably hurts cold start, move each grammar to a lazily loaded DLL.
   Errors are reported on the status line and never block startup.
 - **Window placement** comes from the configuration (`window:` size, position,
   maximized or centered). No automatic placement memory.
-- **YAML parser.** A maintained, pure-Rust YAML 1.2 parser, chosen at M4
-  (`serde_yaml` is archived). YAML 1.2 keeps `no`/`off` as strings. Only
-  plain maps, lists and scalars are accepted; anchors and tags are rejected.
+- **YAML parser.** `saphyr-parser` (pure Rust, YAML 1.2, event API; small
+  dependency set). `serde_yaml` is archived; `yaml-rust2` pulls more crates.
+  YAML 1.2 keeps `no`/`off` as strings. Only plain maps, lists and scalars are
+  accepted; anchors, aliases, tags and multiple documents are rejected.
+  Unknown keys are reported.
 - **Process model.** One document per process lifetime; no in-place reload of
   another file. Open / New / Quick Open spawn a new process. When the current
   document is untitled and unmodified, it exits after the spawn.
@@ -670,15 +704,15 @@ Status: **Kept**, **Adapted** (behavior changed for a single-file editor),
 
 General:
 
-| Keys                 | Command                | Status                            |
-| -------------------- | ---------------------- | --------------------------------- |
-| `Ctrl+Shift+P`, `F1` | Show Command Palette   | Kept                              |
-| `Ctrl+P`             | Quick Open, Go to File | Adapted: files in current folder  |
-| `Ctrl+Shift+N`       | New window/instance    | Adapted: new process              |
-| `Ctrl+Shift+W`       | Close window/instance  | Kept                              |
-| `Ctrl+,`             | User Settings          | Adapted: opens config file        |
-| `Ctrl+K Ctrl+S`      | Keyboard Shortcuts     | Adapted: opens config file        |
-| `Ctrl+K M`           | Change Language Mode   | Kept; also `--syntax <id>`        |
+| Keys                 | Command                | Status                                    |
+| -------------------- | ---------------------- | ----------------------------------------- |
+| `Ctrl+Shift+P`, `F1` | Show Command Palette   | Kept                                      |
+| `Ctrl+P`             | Quick Open, Go to File | Adapted: recent and favorite commands     |
+| `Ctrl+Shift+N`       | New window/instance    | Adapted: new process                      |
+| `Ctrl+Shift+W`       | Close window/instance  | Kept                                      |
+| `Ctrl+,`             | User Settings          | Adapted: opens config file                |
+| `Ctrl+K Ctrl+S`      | Keyboard Shortcuts     | Adapted: opens config file                |
+| `Ctrl+K M`           | Change Language Mode   | Kept; also `--syntax <id>`                |
 
 Basic Editing:
 
@@ -1540,3 +1574,365 @@ verified on an MSVC-default machine (only GNU is installed here).
   color, Mica) are optional calls without a version check; an application
   manifest is added in M3 with the segment heap measured before adoption.
   Assets are downloaded by the build (`rte_assets`), not stored in Git.
+
+### 2026_10_24 - GPT-6.1 Sol
+
+- Role: Reviewer
+- Activity: Review
+- Agent: GitHub Copilot
+- Model: GPT-6.1 Sol
+- Effort: High
+- Context Window: 1M
+- Outcome: Changes requested for CP1-CP4 below. Reviewed the command palette,
+  registry, configuration, favorites, popups and Help panels. Existing focused
+  tests, formatting, Clippy, an isolated release build and native palette smoke
+  pass. Three interaction assertions fail; storage probes expose blocking and
+  missing input bounds. No application fixes were authored.
+
+#### Palette Review Scope
+
+The request calls this "M3 - The Command Palette"; the milestone list above
+places Commands under M4. This record reviews the current palette implementation,
+not the earlier M3 editing work. There is no separate palette task document.
+The registry's shared dispatch and central edit locks work in the existing
+tests. Missing later modes, configurable keybindings and unrelated metadata
+changes are not treated as completed palette features here.
+
+#### CP1 [P1] Palette state I/O blocks the UI before actions run
+
+Locations: [first open](../crates/rte_app/src/editor.rs#L862),
+[command execution](../crates/rte_app/src/editor.rs#L1011), and
+[state update](../crates/rte_app/src/favorites.rs#L77).
+Opening the palette synchronously reads/parses its file. Running any command
+synchronously rereads, serializes, writes and renames that file before calling
+`perform`, so even Save or Close waits for optional recent-command persistence.
+Stars do the same on the UI thread. Slow/removable/network storage or a large
+state file therefore breaks the no-disk-wait and next-frame interaction goals.
+
+A controlled named-pipe input kept `Store::open` blocked until data was released
+after 250 ms; observed duration was 266.5 ms. This demonstrates blocking, not
+ordinary SSD latency. Keep UI state changes and dispatch immediate; serialize
+asynchronous state reads/writes, reject stale results, and report persistence
+failures without delaying the chosen command. Test with delayed and failed
+storage and assert commands/UI continue before persistence completes. Unused
+palette state must remain lazy, with no feature-specific background work.
+
+#### CP2 [P2] Popup geometry can put every command row off-screen
+
+Location: [palette geometry](../crates/rte_view/src/popup.rs#L84).
+The geometry forces at least one row even when no vertical space remains and
+does not reduce the title/input/padding for the available height. At a supported
+400 x 240 client and maximum editor zoom, the cell is 38 x 93, the input begins
+at y=217, and the first command row begins at y=372. No command row is visible;
+the panel ends below y=500. A headless integration assertion reproduces this.
+Panel geometry has the same force-at-least-one policy. Fit the entire popup to
+the client or use a separately bounded popup font/layout, and make hit testing
+follow that fitted geometry. Add minimum-size, high-zoom and DPI tests requiring
+visible input/selection and access to every command by keyboard.
+
+#### CP3 [P2] The search field ignores standard text-editing keys
+
+Locations: [palette key handling](../crates/rte_app/src/editor.rs#L926) and
+[typed query text](../crates/rte_app/src/editor.rs#L833).
+The query is append-only except for Backspace/clear. `Ctrl+V` is swallowed and
+does not paste; `Ctrl+A` is swallowed and does not select the query. Typing
+`save`, pressing Ctrl+A, then typing `undo` leaves `saveundo`. The two headless
+integration probes fail with those exact results. Left/Right/Home/End/Delete
+also have no query-editing model. Add a caret/selection and clipboard handling
+for the query, independent of document commands, plus input scrolling when
+the caret exceeds its width. Test paste, select-all replacement, movement,
+deletion and Escape while asserting the document remains unchanged. The
+existing query tests cover append/backspace and do not cover these workflows.
+
+#### CP4 [P2] Palette state has no file, entry or string bounds
+
+Locations: [state parsing](../crates/rte_app/src/favorites.rs#L93) and
+[favorites enumeration](../crates/rte_app/src/palette.rs#L64).
+The entire file is read into a string, parsed into `serde_json::Value`, and
+copied into owned IDs. Favorites and ID lengths are unbounded; recent entries
+are truncated only after all entries are parsed/copied. Unknown IDs are kept
+and scanned on every Favorites refresh. A disposable 2,388,917-byte JSON file
+with 100,000 unknown IDs is accepted, takes 13.8 ms to read/parse in release,
+then scans all entries despite producing no visible commands. Larger inputs
+scale allocations and work without a limit; moving I/O off-thread alone does
+not bound memory. Set explicit file/entry/ID/query limits before allocating
+unbounded structures, report over-limit state, and preserve the original file
+on refusal. Keep the documented unknown-ID behavior within those bounds.
+Add oversized valid JSON, very long IDs, duplicate IDs and long-query tests.
+
+#### Palette Review Validation
+
+Successful focused commands:
+
+```powershell
+cargo test -p rte_app -p rte_view -p rte_render -p rte_platform --locked
+cargo clippy -p rte_app -p rte_view -p rte_render -p rte_platform --all-targets --locked -- -D warnings
+cargo fmt --all --check
+cargo build -p rte_app --release --locked --target-dir target/palette-review-build --message-format=json
+```
+
+- Existing focused tests: 95 pass (65 application, 20 view, 7 renderer,
+  3 platform); one native clipboard test is intentionally ignored because it
+  replaces the user's clipboard. The full workspace suite was not run.
+- A disposable console harness keeps the original application modules and
+  build-generated metadata/icon, adding only review tests in memory.
+  `target/palette_review_probe.exe --skip review_ --nocapture`: 65 existing
+  application tests pass. `target/palette_review_probe.exe review_ --nocapture
+  --test-threads=1`: three assertions fail (query paste, query select-all
+  replacement, visible command rows at 400 x 240/max zoom). No source test
+  files were added or edited.
+- `target/palette_storage_review.exe <review-owned named-pipe path>` reproduces
+  CP1. The parent withholds data for a bounded 250 ms, releases valid JSON,
+  then joins/disposes the child and pipe. No normal settings were read.
+- `target/palette_cost_review.exe`: 1,000 in-memory All builds plus `fsave`
+  refreshes take about 10.4 ms total (10.4 microseconds each). The default
+  registry/matcher is not the measured bottleneck. A separate temporary JSON
+  fixture demonstrates CP4 and is removed afterwards. Its 13.8 ms is a local
+  sample, not a percentile or managed-heap measurement.
+- The normal release build could not replace `target/release/RoyiTextEditor.exe`
+  (access denied). No existing process was inspected or stopped. The isolated
+  build succeeded and leaves normal binaries/settings untouched.
+- Native isolated smoke: F1, type `about`, Enter, Escape, Close via bounded
+  messages to a review-owned window. Exit 0; About appears in the isolated
+  recent-command file. No global keyboard injection, clipboard replacement,
+  browser launch or inspection of normal application settings.
+- Isolated startup: 50 checked `--trace-startup --exit-after-first-frame`
+  launches plus 5 warm-ups, untitled and without a configuration file. Every
+  child exits 0 with exactly one finite frame sample. Median 26.798 ms,
+  p95 27.505 ms (< 100 ms). This is not a C-file/syntax startup measurement
+  or a palette-open latency gate; first-use persistence remains CP1.
+- Review recording: preserve the original architecture byte prefix and
+  reviewer history, verify CP1-CP4 and attribution, resolve local links and
+  compare 18 source/build/metadata hashes.
+- Not run: full performance suite, hosted CI/release, packaging of this isolated
+  build, actual 4K/multi-monitor/high-zoom UI capture, native inter-application
+  clipboard exchange, or OS-handled browser links. Earlier screenshots are
+  not claimed as fresh validation.
+
+No application code, settings, metadata, changelog, task index or previous
+reviewer record was changed by this review. Approval remains pending CP1-CP4.
+
+### 2026_10_24 - GPT-6.1 Sol
+
+- Role: Reviewer
+- Activity: Review
+- Agent: GitHub Copilot
+- Model: GPT-6.1 Sol
+- Effort: High
+- Context Window: 1M
+- Outcome: Extended the palette review with focused release allocation and
+  frame-cost probes. Priorities are bounded asynchronous state I/O, precise
+  invalidation, indexed favorites and reusable matching/paint buffers. Warm
+  rendering is already fast; no renderer replacement is justified by these
+  samples. No optimizations were implemented; CP1-CP4 remain open.
+
+#### CPE1 High: Remove state I/O and duplicate parsing storage from input
+
+Location: [palette state](../crates/rte_app/src/favorites.rs#L93).
+CP1 and CP4 remain the largest latency/memory risks. A 2,388,917-byte file with
+100,000 unknown favorite IDs required 200,038 allocation/reallocation calls,
+13,907,443 peak extra heap bytes (13.3 MiB), and 5,234,685 retained bytes
+(5.0 MiB). This is in addition to the UI-thread disk wait already reproduced.
+Bound bytes, entries and ID lengths before constructing unbounded containers.
+Deserialize directly into bounded records rather than a JSON Value tree and
+then duplicate ID strings; serialize borrowed records directly rather than
+construct another owned JSON tree. Preserve bounded unknown IDs and original
+files on refusal. Apply UI changes immediately and serialize asynchronous
+persistence with failure reporting and stale-result rejection. Keep the unused
+path free of state scans or workers. Test delayed storage and peak heap, not
+only warm-cache elapsed time.
+
+#### CPE2 High: Stop invalidating on unchanged popup events
+
+Locations: [popup revision](../crates/rte_app/src/editor.rs#L1410) and
+[visible-state copies](../crates/rte_app/src/editor.rs#L431).
+All 1,000 ignored Left-key events requested redraws while the query, selection
+and document stayed unchanged. Increment `popup_rev` only when visible popup
+state changes: query, rows, selection, scroll, mode, stars or panel content.
+Keep resize, DPI and exposed-window invalidation correct. These are redraw
+requests, not a claim of 1,000 native paints: Win32 can coalesce them.
+The same events also allocate two selection-vector copies each (2,000 calls,
+64,000 requested bytes, 64 peak extra bytes). Stable selection/notice revisions
+could replace copies if broader input profiling justifies that change; avoid
+introducing elaborate tracking solely to save this small single-caret cost.
+Add no-op key/character/wake paint-count tests alongside real state changes.
+
+#### CPE3 Medium: Index favorite membership once per state change
+
+Location: [favorite membership](../crates/rte_app/src/favorites.rs#L53).
+Every visible command row linearly scans the stored favorites during paint.
+With 100,000 unknown IDs, warm 1080p palette paint rises from about 0.34 ms to
+0.57 ms while producing exactly the same pixels. Clearing only those irrelevant
+IDs returns the frame to about 0.34 ms. Build a small bitset or bounded lookup
+indexed by registry position when state changes; retain unknown IDs separately
+within CPE1's limits. Then painting cost depends on visible rows, not unrelated
+persisted IDs. Preserve recent/favorite ordering and duplicate handling. Normal
+small state is not a demonstrated bottleneck; this prevents adverse scaling.
+
+#### CPE4 Medium: Reuse fuzzy-matching and navigation scratch
+
+Locations: [matcher](../crates/rte_app/src/fuzzy.rs#L23),
+[match collection](../crates/rte_app/src/palette.rs#L101), and
+[navigation](../crates/rte_app/src/palette.rs#L144).
+Each `fsave` refresh makes 218 allocation/reallocation calls and requests
+37,864 bytes cumulatively, with only 2,820 peak extra bytes. The 1,000-refresh
+timing is about 9.7-10.0 ms total: roughly 10 microseconds per refresh. This is
+allocation churn, not a growing 37 KiB resident footprint per keystroke.
+Normalize the query once, share/precompute immutable label metadata, and reuse
+bounded score/predecessor/match buffers. Navigate command rows without building
+a new index Vec each time. Preserve best-score selection, stable ordering,
+case folding and highlighted character indices. Keep changes small: the
+current registry is fast enough that a large matcher rewrite or dependency
+change has little demonstrated benefit.
+
+#### CPE5 Medium: Borrow paint metadata and reuse formatting storage
+
+Locations: [popup draw preparation](../crates/rte_app/src/editor.rs#L1101) and
+[line-number formatting](../crates/rte_view/src/lib.rs#L383).
+A warm popup-only display-list rebuild makes 16 allocations, requesting
+1,096 bytes; a complete 1080p palette paint makes 125, requesting 6,178 bytes.
+Peaks are about 1.1 KiB, so the issue is repeated CPU/allocator work, not
+large retained memory. Shortcut labels are rebuilt into Strings, row records
+into a new Vec, and each line number uses a temporary `to_string` before
+copying into another String. Borrow stable shortcut strings, iterate rows or
+reuse a bounded row buffer, and format numbers into reusable storage with
+`write!`. Cache only small immutable metadata; measure any persistent-memory
+increase. Keep snapshot sharing and existing display-list capacity reuse.
+
+#### CPE6 Benchmark-Gated: Damage regions and cold-frame work
+
+Location: [complete paint](../crates/rte_app/src/editor.rs#L1420).
+Uninstrumented warm layout/draw costs are about 0.33-0.34 ms at 1080p and
+1.25-1.27 ms at 4K with doubled font size, excluding GDI/DWM. Consider clipping
+updates to old/new popup damage or skipping body glyphs hidden by an opaque
+popup only after CPE1-CPE5. Exposed content on close, scroll and resize must
+still redraw. Avoid a second full-screen backdrop buffer: a 4K copy alone
+adds 31.6 MiB, potentially trading away the requested memory savings.
+
+Cold setup is different: one in-memory first palette open/paint at 1080p took
+0.52 ms; a first 28 px/4K paint after a font-size change took 8.8 ms. A smaller
+renderer control (4K fill plus 12 stars) measured 2.73 ms with a cold framebuffer
+and star, 0.93 ms with resident pixels but a cold star, and 0.63 ms warm.
+Pixels are identical. This identifies first-touch and star-cache work, not a
+proof that either alone explains the full 8.8 ms. Include preparation in
+end-to-end latency; moving it earlier on the same UI thread is not a free win.
+Any extra font-size caches or background preparation need memory limits and
+cancellation/stale-result handling. Warm samples do not certify cold-frame
+tails, and no GPU switch is supported by the current evidence.
+
+#### Palette Efficiency Validation
+
+```powershell
+cargo build -p rte_app --release --locked --target-dir target/palette-review-build --message-format=json
+.\target\palette_efficiency_alloc.exe --exact palette_efficiency_profile --nocapture --test-threads=1
+.\target\palette_efficiency_timing.exe --exact palette_efficiency_profile --nocapture --test-threads=1
+.\target\palette_cold_render_control.exe
+```
+
+- Disposable stdin-built harnesses use the unchanged current app/modules,
+  build metadata/icon and exact Cargo artifact paths. Release settings match
+  production: opt-level 3, fat LTO, one codegen unit and x86-64-v3. Only the
+  single review profile runs; existing application tests are filtered out.
+- Allocation and timing executables are separate. Counters wrap Rust's system
+  allocator; timing figures above come from the uninstrumented executable.
+  Cumulative requests are churn, not physical bytes copied. Live/peak requested
+  bytes exclude allocator overhead, internal realloc overlap, mapped assets,
+  DIB/Win32 allocations and thread stacks; they are not process PrivateUsage.
+- Frame fixture: 5,000 ASCII code lines; 1920 x 1080 at 14 px, then
+  3840 x 2160 at 28 px. Warm samples include full visible-document layout,
+  status and popup drawing. Thirty-sample medians/means and cold single
+  samples are local probes, not frozen-hardware percentile certification.
+- The tracked state phase excludes the input JSON-generation buffers. The
+  temporary state file is deleted. State-scaling and renderer controls assert
+  identical pixels; completion/count assertions pass in both profile modes.
+- A larger ASCII-prewarm control was interrupted and is not claimed as a
+  result; the smaller renderer-only control completed successfully.
+- No UI process, user settings, system clipboard, normal executable or source
+  file was changed. No full test/performance suite, startup benchmark, native
+  presentation timing, hosted CI or cross-editor comparison was run here.
+- Record checks preserve all preceding architecture/reviewer bytes, verify
+  CPE1-CPE6 and attribution, resolve local links and compare 16 source/build/
+  metadata hashes. Only this review addendum changes in the worktree.
+
+"Fastest editor" remains a competitive measurement goal, not an approval
+claim. Judge changes by end-to-end input-to-present p95/p99 and peak/idle
+memory on representative and adverse documents, including cold paths. Do not
+cut useful caches or undo guarantees merely to improve a heap number.
+
+### 2026_10_24 - Claude Opus 5.5
+
+- Role: Implementer
+- Activity: Implementation
+- Agent: GitHub Copilot
+- Model: Claude Opus 5.5
+- Effort: High
+- Context Window: 872K
+- Outcome: Implemented CP1-CP4 and CPE1-CPE5; CPE6 stays benchmark-gated.
+  Focused tests (104), Clippy and formatting pass. Responses below.
+
+#### Response CP1: Accepted
+
+The store applies changes in memory at once and sends them to one worker
+thread (`favorites.rs`), started when the palette first opens. Opening the
+palette and running a command no longer touch the disk; replies arrive through
+the window waker. Each reply carries the change number; replies older than
+the last change are ignored. Tests: a gated storage blocks the worker's read
+while changes and lookups proceed; failed writes are reported and the change
+kept; an editor test runs a palette command before its state is saved.
+Pending writes may be lost when the process exits mid-write; the atomic
+rename keeps the file whole.
+
+#### Response CP2: Accepted
+
+Popups no longer zoom: they use the zoom-0 font through a second renderer that
+exists only while the editor is zoomed. Palette and panel geometry fit the
+client: they move over the title strip and the About icon is dropped when a
+line would not fit. Tests cover 400 x 240 at 96 DPI, 800 x 480 at 192 DPI and
+600 x 360 at 144 DPI at maximum zoom, reaching every command by keyboard with
+the selection visible, plus geometry tests down to the smallest fitting height.
+
+#### Response CP3: Accepted
+
+The query is a one-line field (`palette::Query`) with caret, selection,
+character and word movement and deletion, `Ctrl+A`, and `Ctrl+V` (first line,
+control characters removed). The input scrolls to keep the caret visible and
+draws the selection. Tests cover select-all replacement, paste, movement,
+deletion and Escape with the document unchanged.
+
+#### Response CP4: Accepted
+
+Reads stop after 64 KiB; files are limited to 256 favorites and 128-byte IDs;
+duplicates and recent entries past 20 are dropped. A refused file is reported
+once and never overwritten. The JSON value tree is kept (bounded by the file
+limit) instead of a hand-written visitor; writes serialize the ID slices
+directly. Queries are limited to 256 characters.
+
+#### Response CPE1-CPE5
+
+- CPE1: covered by CP1 and CP4.
+- CPE2: `Visible` holds a fingerprint of the popup state (mode, query,
+  selection, scroll, row count, store revision, panel scroll) instead of a
+  counter bumped on every event. The selection copies are unchanged, as the
+  review suggested. Test: no-op keys, control characters and wakes request no
+  repaint; edits and moves do.
+- CPE3: favorites are a flag per registry command and recent commands a list
+  of registry indices, rebuilt on each list change.
+- CPE4: `fuzzy::Matcher` reuses its query, label and score buffers; matched
+  indices live in one palette buffer; selection moves without index vectors.
+- CPE5: key hints are built once; palette rows are passed as an iterator;
+  line numbers are formatted into a reused buffer.
+- CPE6: not started; no measurement yet shows a need.
+
+#### Implementation Validation
+
+```powershell
+cargo fmt --all --check
+cargo clippy -p rte_app -p rte_view -p rte_render -p rte_platform --all-targets -- -D warnings
+cargo test -p rte_app -p rte_view -p rte_render -p rte_platform
+```
+
+- 104 tests pass (74 application, 22 view, 7 renderer, 3 platform); one native
+  clipboard test is ignored by design. The full workspace suite, benchmarks
+  and a native interactive run were not run.
+- An offscreen render at zoom 6 shows the palette at the zoom-0 size with a
+  query selection; the probe test was removed afterwards.

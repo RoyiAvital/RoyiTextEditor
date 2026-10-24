@@ -15,8 +15,8 @@ The _File Manager_ focuses on:
 Development prioritizes _correctness_ and _performance_.  
 Each release is validated by hundreds of correctness tests and accompanied by a detailed performance report.
 
-<!-- ![](https://i.postimg.cc/xdZDJThH/image.png) -->
-![](https://i.imgur.com/8n35oed.png)
+![](https://i.imgur.com/SvrIr7Y.png)
+<!-- ![](https://i.postimg.cc/1tjmS1pD/image.png) -->
 
 ## Installation
 
@@ -37,8 +37,9 @@ RoyiTextEditor.exe [--read-only] [--syntax <id>] [file]
 ```
 
 `--syntax <id>` chooses the highlighting language (for example `--syntax json`
-for a `.ipynb` notebook). It is accepted now and applies once syntax
-highlighting ships.
+for a `.ipynb` notebook); `--syntax none` or `--syntax off` (any case) turns
+highlighting off, as does `View: Toggle Syntax Highlighting` in the palette.
+It is accepted now and applies once syntax highlighting ships.
 
 | Keys                                                | Action                                                 |
 | --------------------------------------------------- | ------------------------------------------------------ |
@@ -59,7 +60,9 @@ highlighting ships.
 | Wheel, `Ctrl+Up` / `Ctrl+Down`                      | Scroll lines                                           |
 | `Shift`+wheel                                       | Horizontal scrolling                                   |
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0`, `Ctrl`+wheel        | Zoom in / out / reset                                  |
-| `Ctrl+W`, `Ctrl+F4`, `Alt+F4`                       | Close; unsaved changes ask Save / Don't Save / Cancel  |
+| `Ctrl+W`, `Ctrl+F4`, `Alt+F4`                       | Close / quit; unsaved changes ask first                |
+| `Ctrl+Shift+P`, `F1`                                | Command Palette: all commands, fuzzy search            |
+| `Ctrl+P`                                            | Recent and favorite commands                           |
 
 Unsaved changes show `●` in the title strip. Saving replaces the file
 atomically; when another program changed the file, the editor asks before
@@ -69,9 +72,39 @@ New files are created only from the command line: a path that does not exist
 opens an empty document and the first save creates it. Without a path the
 editor opens an untitled scratch document that cannot be saved (amber marker).
 
+### Command Palette
+
+Commands are grouped in families: `Application:`, `File:`, `Edit:`,
+`Selection:`, `Go:` and `View:`. Type any part of a name (for example `fsave`),
+move with `Up` / `Down` / `PgUp` / `PgDn`, run with `Enter` or a click, close
+with `Esc`. The search field supports the usual editing keys, `Ctrl+A` and
+`Ctrl+V`.
+
+- Click the star of a command, or press `Ctrl+Space`, to add or remove it from
+  the favorites.
+- `Ctrl+P` lists the last commands run from the palette, then the favorites.
+- `Application: Keyboard Shortcuts` shows all keys; `Application: About` shows
+  the version and links; `Application: Documentation` opens the online
+  documentation; `Application: Quit` (`Alt+F4`) closes the editor.
+
+Favorites and recent commands are kept in `UserSettings/Palette.json` beside
+the executable. A file the editor cannot read or does not accept is left
+unchanged, and favorites then last for the session.
+
+### Configuration
+
+Optional `RoyiTextEditor.yaml` beside the executable, read at startup and never
+written by the editor. Problems are shown on the status line; invalid values
+keep their defaults.
+
+```yaml
+palette:
+  recentCount: 3   # recent commands listed by Ctrl+P, 0 to 20
+```
+
 ## Features
 
-- **Performance**: The start up time should be below 150 [Mili Sec] on modern PC. Each operation should feel instant.
+- **Performance**: The start up time should be below 100 [Mili Sec] on modern PC. Each operation should feel instant.
 
 > [!TIP]
 > Open an issue for new feature requests.  
@@ -99,8 +132,9 @@ Rust with the `x86_64-pc-windows-gnu` toolchain (`rust-toolchain.toml` installs
 (`.cargo/config.toml`). The application manifest is compiled by MinGW-w64
 `windres`, which must be on `PATH` (or set `WINDRES` to its path).
 
-The application name and version are set in `Meta/AppMeta.json`; the build fails
-when its version differs from the workspace version in `Cargo.toml`.
+The application name, file name and version are set in `Meta/AppMeta.json`; the
+build fails when its version differs from the workspace version in `Cargo.toml`
+or its file name differs from the executable name.
 
 The executable icon is built from `Meta/Icon.svg` (64 px and up) and `Meta/IconSmall.svg`
 (48 px and below, the names drawn as bars). The build script renders both with
@@ -153,3 +187,15 @@ workflow manually is a dry run: the ZIP and notes (from `## [Unreleased]`) are
 uploaded as a workflow artifact and nothing is published.
 
 ### Documentation
+
+[docs/src/index.md](docs/src/index.md) defines the sections and page hierarchy.
+Page content is separate, starting with
+[docs/src/introduction.md](docs/src/introduction.md).
+
+Build or preview through the script, which generates mdBook's required
+navigation file automatically:
+
+```powershell
+.\tools\Build-Docs.ps1
+.\tools\Build-Docs.ps1 -Serve
+```

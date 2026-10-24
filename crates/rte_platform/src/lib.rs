@@ -24,7 +24,7 @@ use windows_sys::Win32::Graphics::Gdi::{
     DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, HBITMAP, HDC, HGDIOBJ, InvalidateRect,
     PAINTSTRUCT, SRCCOPY, ScreenToClient, SelectObject, UpdateWindow,
 };
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
 use windows_sys::Win32::System::SystemInformation::GetSystemTimePreciseAsFileTime;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
@@ -41,16 +41,18 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     HTTOPRIGHT, IDC_ARROW, IDC_IBEAM, IMAGE_ICON, IsZoomed, LR_DEFAULTCOLOR, LoadCursorW,
     LoadImageW, MINMAXINFO, MSG, NCCALCSIZE_PARAMS, PostMessageW, PostQuitMessage,
     RegisterClassExW, SM_CXDOUBLECLK, SM_CXICON, SM_CXPADDEDBORDER, SM_CXSIZEFRAME, SM_CXSMICON,
-    SM_CYDOUBLECLK, SM_CYICON, SM_CYSIZEFRAME, SM_CYSMICON, SW_SHOW, SWP_FRAMECHANGED,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetCursor, SetWindowLongPtrW,
-    SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, WM_APP, WM_CAPTURECHANGED, WM_CHAR,
-    WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCACTIVATE,
-    WM_NCCALCSIZE, WM_NCHITTEST, WM_PAINT, WM_SETCURSOR, WM_SIZE, WM_SYSKEYDOWN, WNDCLASSEXW,
-    WS_OVERLAPPEDWINDOW,
+    SM_CYDOUBLECLK, SM_CYICON, SM_CYSIZEFRAME, SM_CYSMICON, SW_SHOW, SW_SHOWNORMAL,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetCursor,
+    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, WM_APP,
+    WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND,
+    WM_GETMINMAXINFO, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST, WM_PAINT, WM_SETCURSOR, WM_SIZE,
+    WM_SYSKEYDOWN, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 
 const WM_WAKE: u32 = WM_APP + 1;
+/// A scripted key (`Ctx::post_key`): `wParam` holds the key, see `encode_key`.
+const WM_SCRIPTED_KEY: u32 = WM_APP + 2;
 const CLASS_NAME: &str = "RoyiTextEditorWindow";
 /// Icon group embedded in the executable by `rte_app`'s build script.
 const APP_ICON: u16 = 1;
@@ -165,6 +167,8 @@ pub struct Ctx {
     redraw: bool,
     close: bool,
     title: Option<String>,
+    open_url: Option<String>,
+    posted_key: Option<Key>,
     hwnd: HWND,
     /// Clipboard of a headless context: text and private data.
     memory_clipboard: Option<(String, Vec<u8>)>,
@@ -181,13 +185,25 @@ impl Ctx {
             redraw: false,
             close: false,
             title: None,
+            open_url: None,
+            posted_key: None,
             hwnd: null_mut(),
             memory_clipboard: None,
         }
     }
 
+    /// Key posted during this call, if any.
+    pub fn posted_key(&self) -> Option<Key> {
+        self.posted_key
+    }
+
     pub fn close_requested(&self) -> bool {
         self.close
+    }
+
+    /// URL requested during this call, if any.
+    pub fn requested_url(&self) -> Option<&str> {
+        self.open_url.as_deref()
     }
 
     pub fn redraw_requested(&self) -> bool {
@@ -238,6 +254,34 @@ impl Ctx {
     pub fn set_title(&mut self, title: &str) {
         self.title = Some(title.to_owned());
     }
+
+    /// Opens an `https` URL in the default browser after the call returns.
+    pub fn open_url(&mut self, url: &str) {
+        if url.starts_with("https://") {
+            self.open_url = Some(url.to_owned());
+        }
+    }
+
+    /// Queues `key` as if typed, with exactly its modifiers (benchmarks).
+    pub fn post_key(&mut self, key: Key) {
+        self.posted_key = Some(key);
+    }
+}
+
+fn encode_key(key: Key) -> WPARAM {
+    usize::from(key.vk)
+        | usize::from(key.ctrl) << 16
+        | usize::from(key.shift) << 17
+        | usize::from(key.alt) << 18
+}
+
+fn decode_key(wparam: WPARAM) -> Key {
+    Key {
+        vk: (wparam & 0xFFFF) as u16,
+        ctrl: wparam & 1 << 16 != 0,
+        shift: wparam & 1 << 17 != 0,
+        alt: wparam & 1 << 18 != 0,
+    }
 }
 
 pub trait App {
@@ -247,6 +291,9 @@ pub trait App {
 
     /// Draws the whole client area into `pixels` (`0xAARRGGBB`, top-down rows).
     fn paint(&mut self, pixels: &mut [u32], width: u32, height: u32);
+
+    /// Called after a painted frame was copied to the window (`BitBlt`).
+    fn presented(&mut self, _ctx: &mut Ctx) {}
 
     /// True when the client point belongs to the draggable title strip.
     fn is_caption(&self, x: i32, y: i32) -> bool;
@@ -539,16 +586,7 @@ unsafe fn dispatch(hwnd: HWND, event: Event) -> Option<bool> {
     // SAFETY: called on the window thread with this window's handle.
     let current = unsafe { state(hwnd) }?;
     let mut app = current.app.take()?;
-    let mut ctx = Ctx {
-        width: current.width,
-        height: current.height,
-        dpi: current.dpi,
-        redraw: false,
-        close: false,
-        title: None,
-        hwnd,
-        memory_clipboard: None,
-    };
+    let mut ctx = window_ctx(hwnd, current);
     let handled = app.event(event, &mut ctx);
     // SAFETY: as above; the application is not re-entered while taken.
     unsafe {
@@ -560,11 +598,27 @@ unsafe fn dispatch(hwnd: HWND, event: Event) -> Option<bool> {
     Some(handled)
 }
 
+fn window_ctx(hwnd: HWND, state: &State) -> Ctx {
+    Ctx {
+        width: state.width,
+        height: state.height,
+        dpi: state.dpi,
+        hwnd,
+        ..Ctx::headless(0, 0, 0)
+    }
+}
+
 unsafe fn apply(hwnd: HWND, ctx: Ctx) {
     // SAFETY: window calls on a live window handle; the title is NUL-terminated.
     unsafe {
         if let Some(title) = ctx.title {
             SetWindowTextW(hwnd, wide(&title).as_ptr());
+        }
+        if let Some(url) = ctx.open_url {
+            shell_open(hwnd, &url);
+        }
+        if let Some(key) = ctx.posted_key {
+            PostMessageW(hwnd, WM_SCRIPTED_KEY, encode_key(key), 0);
         }
         if ctx.redraw {
             InvalidateRect(hwnd, null(), 0);
@@ -578,6 +632,58 @@ unsafe fn apply(hwnd: HWND, ctx: Ctx) {
 fn modifier(vk: u16) -> bool {
     // SAFETY: plain Win32 call.
     unsafe { GetKeyState(i32::from(vk)) < 0 }
+}
+
+/// Address of `name` in `library`, which is loaded on first use and stays loaded.
+fn library_proc(
+    library: &str,
+    name: &std::ffi::CStr,
+) -> Option<unsafe extern "system" fn() -> isize> {
+    // SAFETY: both names are NUL-terminated and outlive the calls.
+    unsafe {
+        let module = LoadLibraryW(wide(library).as_ptr());
+        if module.is_null() {
+            return None;
+        }
+        GetProcAddress(module, name.as_ptr().cast())
+    }
+}
+
+/// Opens `url` with its default handler. shell32 and ole32 are not imported
+/// at startup; they load on the first call.
+fn shell_open(hwnd: HWND, url: &str) {
+    type CoInitializeEx = unsafe extern "system" fn(*const c_void, u32) -> i32;
+    type ShellExecuteW = unsafe extern "system" fn(
+        HWND,
+        *const u16,
+        *const u16,
+        *const u16,
+        *const u16,
+        i32,
+    ) -> *mut c_void;
+    const COINIT_APARTMENTTHREADED: u32 = 0x2;
+    const COINIT_DISABLE_OLE1DDE: u32 = 0x4;
+    // SAFETY: the pointers come from GetProcAddress for functions with these
+    // documented signatures; the strings are NUL-terminated and outlive the call.
+    unsafe {
+        // ShellExecute may delegate to COM-based handlers.
+        if let Some(init) = library_proc("ole32.dll", c"CoInitializeEx") {
+            let init: CoInitializeEx = std::mem::transmute(init);
+            init(null(), COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        }
+        if let Some(execute) = library_proc("shell32.dll", c"ShellExecuteW") {
+            let execute: ShellExecuteW = std::mem::transmute(execute);
+            let (verb, url) = (wide("open"), wide(url));
+            execute(
+                hwnd,
+                verb.as_ptr(),
+                url.as_ptr(),
+                null(),
+                null(),
+                SW_SHOWNORMAL,
+            );
+        }
+    }
 }
 
 fn point_of(lparam: LPARAM) -> (i32, i32) {
@@ -733,6 +839,10 @@ unsafe extern "system" fn window_proc(
                 dispatch(hwnd, Event::Wake);
                 0
             }
+            WM_SCRIPTED_KEY => {
+                dispatch(hwnd, Event::Key(decode_key(wparam)));
+                0
+            }
             WM_LBUTTONDOWN => {
                 let (x, y) = point_of(lparam);
                 let Some(state) = state(hwnd) else {
@@ -840,6 +950,7 @@ unsafe fn paint(hwnd: HWND) {
     unsafe {
         let mut ps: PAINTSTRUCT = std::mem::zeroed();
         let hdc = BeginPaint(hwnd, &mut ps);
+        let mut requests = None;
         if let Some(state) = state(hwnd)
             && state.width > 0
             && state.height > 0
@@ -856,9 +967,45 @@ unsafe fn paint(hwnd: HWND) {
             if let (Some(dib), Some(mut app)) = (state.dib.as_mut(), state.app.take()) {
                 app.paint(dib.pixels(), w, h);
                 BitBlt(hdc, 0, 0, w as i32, h as i32, dib.dc, 0, 0, SRCCOPY);
+                let mut ctx = window_ctx(hwnd, state);
+                app.presented(&mut ctx);
                 state.app = Some(app);
+                requests = Some(ctx);
             }
         }
         EndPaint(hwnd, &ps);
+        if let Some(ctx) = requests {
+            apply(hwnd, ctx);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scripted_keys_keep_their_modifiers() {
+        for (ctrl, shift, alt) in [
+            (false, false, false),
+            (true, true, false),
+            (false, true, true),
+        ] {
+            let key = Key {
+                vk: 0x50,
+                ctrl,
+                shift,
+                alt,
+            };
+            assert_eq!(decode_key(encode_key(key)), key);
+        }
+        let mut ctx = Ctx::headless(10, 10, 96);
+        ctx.post_key(Key {
+            vk: 0x1B,
+            ctrl: false,
+            shift: false,
+            alt: false,
+        });
+        assert_eq!(ctx.posted_key().map(|k| k.vk), Some(0x1B));
     }
 }

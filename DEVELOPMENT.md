@@ -102,9 +102,12 @@ The first build downloads the five bundled font families into `assets/fonts`
 fetches pinned releases and verifies their SHA-256 hashes. Archives are cached
 in `target/font-cache`; verified files are reused offline.
 
-The application name and version live in `Meta/AppMeta.json`. The `rte_app`
-build script fails when its version differs from `[workspace.package]` in
-`Cargo.toml`. It also renders `Meta/Icon.svg` (64 px and up) and
+`Meta/AppMeta.json` holds the display `name` (window title, About, release and
+documentation titles), the `file name` (executable, configuration file and
+release archive), the version and the repository and documentation links. The
+`rte_app` build script fails when its version differs from `[workspace.package]`
+in `Cargo.toml` or its `file name` differs from the `[[bin]]` name. It also
+renders `Meta/Icon.svg` (64 px and up) and
 `Meta/IconSmall.svg` (48 px and below) into the executable's icon.
 
 Auxiliary tools that are not part of the build live in `tools/`; usage is at the
@@ -128,7 +131,7 @@ ordinary pushes and pull requests run no checks.
 `check-imports` fails when the release executable imports a MinGW runtime DLL
 (`libgcc_s_seh-1.dll`, `libwinpthread-1.dll`, `libstdc++-6.dll`) or lacks the
 embedded manifest. `package` builds the release, runs that check and writes
-`target/package/<name>-<version>-windows-x86_64.zip` (name and version from
+`target/package/<file name>-<version>-windows-x86_64.zip` (from
 `Meta/AppMeta.json`) with the executable, `Fonts`, `README.md` and
 `CHANGELOG.md`. It prints the archive path last.
 
@@ -217,12 +220,18 @@ first; the workflow refuses to replace an existing release.
 ### Documentation
 
 The user documentation is an [mdBook](https://rust-lang.github.io/mdBook/)
-under `docs/`: pages in `docs/src` (navigation in `docs/src/SUMMARY.md`),
+under `docs/`: pages in `docs/src` (navigation in `docs/src/index.md`),
 configuration in `docs/book.toml` and the Material-like dark theme in
 `docs/theme`. It is published to GitHub Pages by the `Pages` workflow on pushes
 to `main` that change the documentation. Publishing needs the repository's
 **Settings > Pages > Source** set to **GitHub Actions** (once); until then the
 workflow only builds the book and shows a warning.
+
+`docs/src/index.md` defines sections, page order and hierarchy. Content lives
+in separate files; the introduction is `docs/src/introduction.md`. The build
+temporarily generates mdBook's required `SUMMARY.md` from the index and removes
+it afterwards. Do not maintain a second navigation file. Live preview keeps
+the generated hierarchy synchronized when the index changes.
 
 Serve it locally with live reload:
 

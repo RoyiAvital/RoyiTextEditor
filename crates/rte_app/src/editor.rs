@@ -1,7 +1,9 @@
 //! The editor window: input, view state, prompts and saving around a
-//! [`Document`].
+//! [`Document`], plus the command palette and panels drawn above it.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};
@@ -11,46 +13,21 @@ use rte_platform::{App, Ctx, Event, Key};
 use rte_render::{Renderer, Target};
 use rte_text::{Encoding, LineEnding, Snapshot};
 use rte_view::{
-    CaretStyle, Chrome, DisplayList, Frame, Layout, Options, Scroll, Theme, ViewBuilder, hit_test,
+    CaretStyle, Cell, Chrome, DisplayList, Frame, Layout, Options, PaletteFrame, PaletteGeometry,
+    PaletteRow, PanelFrame, PanelGeometry, PanelLine, Scroll, Theme, Tone, ViewBuilder,
+    draw_palette, draw_panel, hit_test,
 };
+use unicode_width::UnicodeWidthStr;
 
+use crate::bench;
 use crate::clip;
+use crate::commands::{self, Action, COMMANDS, CommandDef, EDITING_KEYS, vk::*};
 use crate::document::{Document, Locks};
+use crate::favorites::{self, FileStorage, MAX_FAVORITES, Store};
 use crate::loader::{FileInfo, LoadEvent};
+use crate::palette::{Item, Mode, Motion, Palette};
 use crate::save::{self, Baseline, FileOps, SaveOutcome, SaveRequest};
 use crate::trace::Trace;
-
-const VK_BACK: u16 = 0x08;
-const VK_TAB: u16 = 0x09;
-const VK_RETURN: u16 = 0x0D;
-const VK_ESCAPE: u16 = 0x1B;
-const VK_PRIOR: u16 = 0x21;
-const VK_NEXT: u16 = 0x22;
-const VK_END: u16 = 0x23;
-const VK_HOME: u16 = 0x24;
-const VK_LEFT: u16 = 0x25;
-const VK_UP: u16 = 0x26;
-const VK_RIGHT: u16 = 0x27;
-const VK_DOWN: u16 = 0x28;
-const VK_INSERT: u16 = 0x2D;
-const VK_DELETE: u16 = 0x2E;
-const VK_0: u16 = 0x30;
-const VK_A: u16 = 0x41;
-const VK_C: u16 = 0x43;
-const VK_D: u16 = 0x44;
-const VK_N: u16 = 0x4E;
-const VK_O: u16 = 0x4F;
-const VK_S: u16 = 0x53;
-const VK_V: u16 = 0x56;
-const VK_W: u16 = 0x57;
-const VK_X: u16 = 0x58;
-const VK_Y: u16 = 0x59;
-const VK_Z: u16 = 0x5A;
-const VK_ADD: u16 = 0x6B;
-const VK_SUBTRACT: u16 = 0x6D;
-const VK_F4: u16 = 0x73;
-const VK_OEM_PLUS: u16 = 0xBB;
-const VK_OEM_MINUS: u16 = 0xBD;
 
 /// Font size in pixels at 96 DPI and zoom 0.
 pub const BASE_PX: f32 = 14.0;
@@ -75,6 +52,34 @@ pub struct Settings {
     pub read_only: bool,
     pub exit_after_first_frame: bool,
     pub exit_after_load: bool,
+    /// Recent commands listed by `Ctrl+P` (configuration).
+    pub recent_count: usize,
+    /// Folder of the palette state file; `None` keeps it in memory.
+    pub user_dir: Option<PathBuf>,
+    /// Shown on the status line at startup (configuration problems).
+    pub notice: Option<String>,
+    /// `false` after `--syntax none` / `--syntax off`.
+    pub highlighting: bool,
+    /// Scripted keys of an interaction benchmark.
+    pub bench: Option<bench::Script>,
+}
+
+/// Drawn above the text; takes the keyboard while open.
+enum Popup {
+    Palette(Palette),
+    Panel(Panel),
+}
+
+/// A read-only text panel (About, Keyboard Shortcuts).
+struct Panel {
+    title: &'static str,
+    footer: &'static str,
+    lines: Vec<PanelLine>,
+    /// URL opened by a click on each line.
+    links: Vec<Option<&'static str>>,
+    icon: bool,
+    /// First visible line.
+    first: usize,
 }
 
 /// A question shown in the status line until answered.
@@ -133,6 +138,20 @@ pub struct Editor {
     caret_column: RefCell<Option<(Snapshot, u64, u32, u64)>>,
     /// A frame was drawn (traced as `first_paint`).
     painted: bool,
+    /// Syntax highlighting is wanted (set per process; applies once it ships).
+    highlighting: bool,
+    bench: Option<bench::Driver>,
+    /// The first frame is on screen.
+    shown: bool,
+    popup: Option<Popup>,
+    /// Favorite and recent commands, read when the palette first opens.
+    store: Option<Store>,
+    /// Drops the space character that follows a handled `Ctrl+Space`.
+    skip_space: bool,
+    /// Popup font when the editor is zoomed: popups keep the size of zoom 0.
+    ui_renderer: Option<Renderer>,
+    /// About icon scaled to a side: (side, pixels).
+    about_icon: Option<(u32, Arc<[u32]>)>,
 }
 
 /// What a frame shows; a repaint is requested only when it changes.
@@ -146,10 +165,13 @@ struct Visible {
     notice: Option<String>,
     saving: bool,
     overtype: bool,
+    highlighting: bool,
     locks: Locks,
     /// Load state and shown percentage.
     status: (u8, u64),
     new_file: bool,
+    /// Fingerprint of what the popup shows.
+    popup: u64,
 }
 
 impl Visible {
@@ -163,14 +185,23 @@ impl Visible {
             && self.notice == other.notice
             && self.saving == other.saving
             && self.overtype == other.overtype
+            && self.highlighting == other.highlighting
             && self.locks == other.locks
             && self.status == other.status
             && self.new_file == other.new_file
+            && self.popup == other.popup
     }
 }
 
 /// Application name from `Meta/AppMeta.json` (exported by the build script).
 pub const APP_NAME: &str = env!("RTE_APP_NAME");
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+const REPOSITORY_URL: &str = env!("RTE_REPOSITORY_URL");
+const DOCUMENTATION_URL: &str = env!("RTE_DOCUMENTATION_URL");
+/// Square About icon from the build script: premultiplied `0xAARRGGBB`, little-endian.
+static ABOUT_ICON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/about_icon.bin"));
+/// "The Zen of Royi Text Editor", shown in the About panel.
+const MANIFEST: &str = include_str!("../../../Meta/Manifest.md");
 
 /// Window title for `path`, marked when the document has unsaved changes.
 pub fn window_title(path: Option<&Path>, dirty: bool) -> String {
@@ -195,7 +226,7 @@ impl Editor {
         loads: Option<Receiver<LoadEvent>>,
         renderer: Renderer,
         dpi: u32,
-        settings: Settings,
+        mut settings: Settings,
         trace: Trace,
         files: Arc<dyn FileOps>,
         wake: Wake,
@@ -204,6 +235,9 @@ impl Editor {
         let mut doc = Document::new(EditOptions::default());
         doc.locks.user = settings.read_only;
         doc.locks.loading = loads.is_some();
+        let notice = settings.notice.clone();
+        let highlighting = settings.highlighting;
+        let bench = settings.bench.take().map(bench::Driver::new);
         let mut editor = Editor {
             doc,
             path: path.map(Path::to_path_buf),
@@ -231,7 +265,7 @@ impl Editor {
             zoom: 0,
             wheel: (0, 0),
             trace,
-            notice: None,
+            notice,
             prompt: None,
             saving: None,
             save_queued: false,
@@ -242,6 +276,14 @@ impl Editor {
             shown_dirty: false,
             caret_column: RefCell::new(None),
             painted: false,
+            highlighting,
+            bench,
+            shown: false,
+            popup: None,
+            store: None,
+            skip_space: false,
+            ui_renderer: None,
+            about_icon: None,
         };
         if let Some(event) = first {
             editor.apply_load(event);
@@ -423,9 +465,11 @@ impl Editor {
             notice: self.notice.clone(),
             saving: self.saving.is_some(),
             overtype: self.doc.options.overtype,
+            highlighting: self.highlighting,
             locks: self.doc.locks,
             status,
             new_file: self.info.is_some_and(|i| i.new_file),
+            popup: self.popup_view(),
         }
     }
 
@@ -635,16 +679,83 @@ impl Editor {
         if self.closing {
             return true;
         }
-        let Key {
-            vk,
-            ctrl,
-            shift,
-            alt,
-        } = key;
-        if alt {
-            return false;
+        if key.alt {
+            // Unbound Alt keys keep their system behavior (window menu).
+            let Some(def) = commands::for_key(key) else {
+                return false;
+            };
+            self.perform(def.action, ctx);
+            return true;
+        }
+        self.skip_space = false;
+        match self.popup {
+            Some(Popup::Palette(_)) => return self.palette_key(key, ctx),
+            Some(Popup::Panel(_)) => return self.panel_key(key, ctx),
+            None => {}
         }
         self.notice = None;
+        if let Some(def) = commands::for_key(key) {
+            self.perform(def.action, ctx);
+            return true;
+        }
+        self.edit_key(key)
+    }
+
+    /// Runs a registry command (from a key or the palette).
+    fn perform(&mut self, action: Action, ctx: &mut Ctx) {
+        let (s, sels) = (&self.doc.snapshot, &self.doc.selections);
+        match action {
+            Action::Save => {
+                self.request_save();
+            }
+            Action::Close | Action::Quit => self.request_close(ctx),
+            Action::ToggleReadOnly => {
+                self.doc.locks.user = !self.doc.locks.user;
+                let state = if self.doc.locks.user { "on" } else { "off" };
+                self.notice = Some(format!("Read-only {state}"));
+            }
+            Action::Undo => self.undo_redo(false),
+            Action::Redo => self.undo_redo(true),
+            Action::Cut => self.copy(ctx, true),
+            Action::Copy => self.copy(ctx, false),
+            Action::Paste => self.paste(ctx),
+            Action::DeleteWordLeft => self.run(edit::delete_word_left(s, sels), None),
+            Action::DeleteWordRight => self.run(edit::delete_word_right(s, sels), None),
+            Action::Outdent => {
+                let cmd = edit::outdent(s, sels, &self.edit_options());
+                self.run(cmd, None);
+            }
+            Action::ToggleOvertype => self.doc.options.overtype = !self.doc.options.overtype,
+            Action::SelectAll => self.select_single(Selection::new(0, s.len())),
+            Action::GoToTop | Action::SelectToTop => {
+                self.move_heads(action == Action::SelectToTop, |_, _| (0, None));
+            }
+            Action::GoToBottom | Action::SelectToBottom => {
+                self.move_heads(action == Action::SelectToBottom, |s, _| (s.len(), None));
+            }
+            Action::ScrollLineUp => self.scroll_lines(-1),
+            Action::ScrollLineDown => self.scroll_lines(1),
+            Action::ZoomIn => self.set_zoom(self.zoom + 1),
+            Action::ZoomOut => self.set_zoom(self.zoom - 1),
+            Action::ZoomReset => self.set_zoom(0),
+            Action::ShowCommands => self.open_palette(Mode::All),
+            Action::ShowFavorites => self.open_palette(Mode::Favorites),
+            Action::About => self.popup = Some(Popup::Panel(about_panel())),
+            Action::KeyboardShortcuts => self.popup = Some(Popup::Panel(shortcuts_panel())),
+            Action::Documentation => ctx.open_url(DOCUMENTATION_URL),
+            Action::ToggleSyntax => {
+                self.highlighting = !self.highlighting;
+                let state = if self.highlighting { "on" } else { "off" };
+                self.notice = Some(format!("Syntax highlighting {state}"));
+            }
+        }
+    }
+
+    /// Movement and editing keys that are not registry commands.
+    fn edit_key(&mut self, key: Key) -> bool {
+        let Key {
+            vk, ctrl, shift, ..
+        } = key;
         let tab = self.options.tab_width;
         let opts = self.edit_options();
         match (vk, ctrl) {
@@ -703,7 +814,6 @@ impl Editor {
                     None,
                 )
             }),
-            (VK_A, true) => self.select_single(Selection::new(0, self.doc.snapshot.len())),
             (VK_ESCAPE, false) => {
                 let primary = self.doc.selections.primary();
                 let collapsed = if self.doc.selections.len() > 1 {
@@ -736,29 +846,9 @@ impl Editor {
                 self.run(Some(cmd), None);
             }
             (VK_TAB, false) => {
-                let (s, sels) = (&self.doc.snapshot, &self.doc.selections);
-                let cmd = if shift {
-                    edit::outdent(s, sels, &opts)
-                } else {
-                    Some(edit::tab(s, sels, &opts))
-                };
-                self.run(cmd, None);
+                let cmd = edit::tab(&self.doc.snapshot, &self.doc.selections, &opts);
+                self.run(Some(cmd), None);
             }
-            (VK_INSERT, false) if !shift => {
-                self.doc.options.overtype = !self.doc.options.overtype;
-            }
-            (VK_Z, true) => self.undo_redo(shift),
-            (VK_Y, true) => self.undo_redo(true),
-            (VK_C, true) => self.copy(ctx, false),
-            (VK_X, true) => self.copy(ctx, true),
-            (VK_V, true) => self.paste(ctx),
-            (VK_S, true) => {
-                self.request_save();
-            }
-            (VK_W | VK_F4, true) => self.request_close(ctx),
-            (VK_OEM_PLUS | VK_ADD, true) => self.set_zoom(self.zoom + 1),
-            (VK_OEM_MINUS | VK_SUBTRACT, true) => self.set_zoom(self.zoom - 1),
-            (VK_0, true) => self.set_zoom(0),
             _ => return false,
         }
         true
@@ -767,6 +857,20 @@ impl Editor {
     fn typed(&mut self, ch: char) {
         if self.prompt.is_some() || self.closing || ch < ' ' || ch == '\u{7F}' {
             return;
+        }
+        if std::mem::take(&mut self.skip_space) && ch == ' ' {
+            return;
+        }
+        match &mut self.popup {
+            Some(Popup::Palette(p)) => {
+                let mut buf = [0u8; 4];
+                if p.query.insert(ch.encode_utf8(&mut buf)) {
+                    self.refresh_palette();
+                }
+                return;
+            }
+            Some(Popup::Panel(_)) => return,
+            None => {}
         }
         self.notice = None;
         let opts = self.edit_options();
@@ -778,6 +882,401 @@ impl Editor {
             &opts,
         );
         self.run(Some(cmd), Some(ch));
+    }
+
+    /// Starts the favorites store on first use; its file is read by a worker.
+    fn load_store(&mut self) {
+        if self.store.is_some() {
+            return;
+        }
+        self.store = Some(match &self.settings.user_dir {
+            Some(dir) => {
+                let wake = self.wake.clone();
+                let file = FileStorage(dir.join(favorites::FILE_NAME));
+                Store::spawn(file, move || wake())
+            }
+            None => Store::memory(),
+        });
+    }
+
+    /// Applies the store worker's replies; a problem becomes the notice.
+    fn drain_store(&mut self) {
+        let Some(store) = &mut self.store else {
+            return;
+        };
+        let rev = store.rev();
+        if let Some(problem) = store.drain() {
+            self.notice = Some(problem);
+        }
+        if store.rev() != rev
+            && let Some(Popup::Palette(p)) = &mut self.popup
+        {
+            p.refresh_in_place(store, self.settings.recent_count);
+        }
+    }
+
+    /// Opens the palette, or switches the open one to `mode`.
+    fn open_palette(&mut self, mode: Mode) {
+        self.load_store();
+        let Some(store) = &self.store else {
+            return;
+        };
+        let recent = self.settings.recent_count;
+        match &mut self.popup {
+            Some(Popup::Palette(p)) => {
+                p.mode = mode;
+                p.refresh(store, recent);
+            }
+            _ => self.popup = Some(Popup::Palette(Palette::new(mode, store, recent))),
+        }
+    }
+
+    fn refresh_palette(&mut self) {
+        if let (Some(Popup::Palette(p)), Some(store)) = (&mut self.popup, &self.store) {
+            p.refresh(store, self.settings.recent_count);
+        }
+    }
+
+    /// Popups do not zoom: their font size is the one of zoom 0.
+    fn ui_px(&self) -> f32 {
+        (BASE_PX * self.dpi as f32 / 96.0).round()
+    }
+
+    /// Keeps the popup font at [`Self::ui_px`]; created when a popup opens
+    /// while the editor is zoomed.
+    fn sync_ui_renderer(&mut self) {
+        let px = self.ui_px();
+        if self.renderer.px() == px {
+            self.ui_renderer = None;
+        } else if let Some(renderer) = &mut self.ui_renderer {
+            renderer.set_size(px);
+        } else if self.popup.is_some() {
+            self.ui_renderer = Renderer::new(Cow::Borrowed(rte_assets::DEFAULT_FONT), px).ok();
+        }
+    }
+
+    fn ui_cell(&self) -> Cell {
+        self.ui_renderer.as_ref().unwrap_or(&self.renderer).cell()
+    }
+
+    fn palette_geometry(&self, p: &Palette) -> PaletteGeometry {
+        let (w, h) = self.size;
+        let top = self.layout().title.h as i32;
+        PaletteGeometry::new(w, h, top, self.ui_cell(), p.items.len())
+    }
+
+    fn panel_geometry(&self, panel: &Panel) -> PanelGeometry {
+        let (w, h) = self.size;
+        let top = self.layout().title.h as i32;
+        let cols = panel.lines.iter().map(PanelLine::cols).max().unwrap_or(0);
+        let icon = panel.icon.then(|| self.icon_side());
+        PanelGeometry::new(w, h, top, self.ui_cell(), cols, panel.lines.len(), icon)
+    }
+
+    fn icon_side(&self) -> u32 {
+        self.ui_cell().height * 4
+    }
+
+    /// Screen area of the open popup.
+    fn popup_area(&self) -> Option<rte_view::Rect> {
+        match &self.popup {
+            Some(Popup::Palette(p)) => Some(self.palette_geometry(p).panel),
+            Some(Popup::Panel(panel)) => Some(self.panel_geometry(panel).panel),
+            None => None,
+        }
+    }
+
+    /// Fingerprint of what the open popup shows (repaint check).
+    fn popup_view(&self) -> u64 {
+        let mut h = DefaultHasher::new();
+        match &self.popup {
+            None => 0u8.hash(&mut h),
+            Some(Popup::Palette(p)) => {
+                1u8.hash(&mut h);
+                (p.mode == Mode::All).hash(&mut h);
+                p.query.hash(&mut h);
+                (p.selected, p.first, p.items.len()).hash(&mut h);
+                self.store.as_ref().map(Store::rev).hash(&mut h);
+            }
+            Some(Popup::Panel(panel)) => {
+                2u8.hash(&mut h);
+                (panel.title, panel.first).hash(&mut h);
+            }
+        }
+        h.finish()
+    }
+
+    fn palette_key(&mut self, key: Key, ctx: &mut Ctx) -> bool {
+        let Some(Popup::Palette(p)) = &self.popup else {
+            return false;
+        };
+        let rows = self.palette_geometry(p).rows;
+        let selected = p.selected;
+        let Some(Popup::Palette(p)) = &mut self.popup else {
+            return false;
+        };
+        let (page, ctrl, shift) = (rows as isize, key.ctrl, key.shift);
+        let word = |word, char| if ctrl { word } else { char };
+        let mut edited = false;
+        match key.vk {
+            VK_ESCAPE => self.popup = None,
+            VK_RETURN if !ctrl => {
+                if let Some(item) = selected {
+                    self.run_palette_item(item, ctx);
+                }
+            }
+            VK_UP => p.move_selection(-1, rows),
+            VK_DOWN => p.move_selection(1, rows),
+            VK_PRIOR => p.move_selection(-page, rows),
+            VK_NEXT => p.move_selection(page, rows),
+            VK_LEFT => {
+                p.query
+                    .move_caret(word(Motion::WordLeft, Motion::Left), shift);
+            }
+            VK_RIGHT => {
+                p.query
+                    .move_caret(word(Motion::WordRight, Motion::Right), shift);
+            }
+            VK_HOME => {
+                p.query.move_caret(Motion::Home, shift);
+            }
+            VK_END => {
+                p.query.move_caret(Motion::End, shift);
+            }
+            VK_BACK => edited = p.query.delete(false, ctrl),
+            VK_DELETE => edited = p.query.delete(true, ctrl),
+            VK_A if ctrl && !shift => {
+                p.query.select_all();
+            }
+            VK_V if ctrl && !shift => {
+                // The first line of the clipboard text.
+                if let Some((text, _)) = ctx.clipboard(clip::FORMAT) {
+                    edited = p.query.insert(text.lines().next().unwrap_or_default());
+                }
+            }
+            VK_SPACE if ctrl && !shift => {
+                self.skip_space = true;
+                if let Some(item) = selected {
+                    self.toggle_favorite(item);
+                }
+            }
+            _ => self.popup_command(key, ctx),
+        }
+        if edited {
+            self.refresh_palette();
+        }
+        true
+    }
+
+    fn panel_key(&mut self, key: Key, ctx: &mut Ctx) -> bool {
+        let Some(Popup::Panel(panel)) = &self.popup else {
+            return false;
+        };
+        let page = self.panel_geometry(panel).lines.max(1);
+        let last = panel.lines.len().saturating_sub(page);
+        let first = match key.vk {
+            VK_ESCAPE => {
+                self.popup = None;
+                return true;
+            }
+            VK_UP => panel.first.saturating_sub(1),
+            VK_DOWN => panel.first + 1,
+            VK_PRIOR => panel.first.saturating_sub(page),
+            VK_NEXT => panel.first + page,
+            VK_HOME => 0,
+            VK_END => last,
+            _ => {
+                self.popup_command(key, ctx);
+                return true;
+            }
+        };
+        if let Some(Popup::Panel(panel)) = &mut self.popup {
+            panel.first = first.min(last);
+        }
+        true
+    }
+
+    /// Keys of popup commands keep working while a popup is open; other
+    /// commands wait until it closes.
+    fn popup_command(&mut self, key: Key, ctx: &mut Ctx) {
+        if let Some(def) = commands::for_key(key)
+            && matches!(
+                def.action,
+                Action::ShowCommands
+                    | Action::ShowFavorites
+                    | Action::About
+                    | Action::KeyboardShortcuts
+                    | Action::Quit
+            )
+        {
+            self.perform(def.action, ctx);
+        }
+    }
+
+    /// Closes the palette, records the command as recent and runs it. The
+    /// command runs before the state file is written.
+    fn run_palette_item(&mut self, item: usize, ctx: &mut Ctx) {
+        let Some(Popup::Palette(p)) = &self.popup else {
+            return;
+        };
+        let (Some(def), Some(index)) = (p.command_at(item), p.index_at(item)) else {
+            return;
+        };
+        self.popup = None;
+        if let Some(store) = &mut self.store {
+            store.push_recent(index);
+        }
+        self.perform(def.action, ctx);
+    }
+
+    fn toggle_favorite(&mut self, item: usize) {
+        let (Some(Popup::Palette(p)), Some(store)) = (&mut self.popup, &mut self.store) else {
+            return;
+        };
+        let Some(index) = p.index_at(item) else {
+            return;
+        };
+        if !store.set_favorite(index, !store.is_favorite(index)) {
+            self.notice = Some(format!("At most {MAX_FAVORITES} favorites are kept"));
+        }
+        if p.mode == Mode::Favorites {
+            p.refresh_in_place(store, self.settings.recent_count);
+        }
+    }
+
+    fn popup_click(&mut self, x: i32, y: i32, ctx: &mut Ctx) {
+        let cell = self.ui_cell();
+        match &self.popup {
+            Some(Popup::Palette(p)) => {
+                let g = self.palette_geometry(p);
+                if !g.panel.contains(x, y) {
+                    self.popup = None;
+                } else if let Some(row) = g.row_at(x, y) {
+                    let item = p.first + row;
+                    if g.star_area(row, cell).contains(x, y) {
+                        self.toggle_favorite(item);
+                    } else {
+                        self.run_palette_item(item, ctx);
+                    }
+                }
+            }
+            Some(Popup::Panel(panel)) => {
+                let g = self.panel_geometry(panel);
+                if !g.panel.contains(x, y) {
+                    self.popup = None;
+                } else if let Some(line) = g.line_at(x, y)
+                    && let Some(Some(url)) = panel.links.get(panel.first + line)
+                {
+                    ctx.open_url(url);
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn popup_wheel(&mut self, delta: i32) {
+        let steps = -delta.signum() as isize * WHEEL_LINES as isize;
+        match &self.popup {
+            Some(Popup::Palette(p)) => {
+                let rows = self.palette_geometry(p).rows;
+                if let Some(Popup::Palette(p)) = &mut self.popup {
+                    p.scroll(steps, rows);
+                }
+            }
+            Some(Popup::Panel(panel)) => {
+                let page = self.panel_geometry(panel).lines;
+                let last = panel.lines.len().saturating_sub(page);
+                if let Some(Popup::Panel(panel)) = &mut self.popup {
+                    panel.first = panel.first.saturating_add_signed(steps).min(last);
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn scale_about_icon(&mut self, side: u32) {
+        if self.about_icon.as_ref().is_some_and(|(s, _)| *s == side) {
+            return;
+        }
+        let source: Vec<u32> = ABOUT_ICON
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&b| u32::from_le_bytes(b))
+            .collect();
+        let from = (source.len() as f64).sqrt() as u32;
+        self.about_icon = Some((side, scale_image(&source, from, side).into()));
+    }
+
+    /// Adds the open popup to the display list.
+    fn draw_popup(&mut self) {
+        if matches!(&self.popup, Some(Popup::Panel(p)) if p.icon) {
+            self.scale_about_icon(self.icon_side());
+        }
+        let cell = self.ui_cell();
+        let theme = &self.theme;
+        match &self.popup {
+            Some(Popup::Palette(p)) => {
+                let g = self.palette_geometry(p);
+                let first = p.first.min(p.items.len());
+                let visible = &p.items[first..(first + g.rows).min(p.items.len())];
+                let (store, locks, has_path) = (&self.store, self.doc.locks, self.path.is_some());
+                let rows = visible.iter().map(|item| match item {
+                    Item::Header(text) => PaletteRow::Header(text),
+                    Item::Command { index, matched } => {
+                        let def = &COMMANDS[*index];
+                        PaletteRow::Command {
+                            label: def.label,
+                            matched: p.matched(matched),
+                            keys: commands::key_hint(*index),
+                            starred: store.as_ref().is_some_and(|s| s.is_favorite(*index)),
+                            enabled: enabled(def, locks, has_path),
+                        }
+                    }
+                });
+                let placeholder = match p.mode {
+                    Mode::All => "Type a command name",
+                    Mode::Favorites => "Search recent and favorite commands",
+                };
+                let empty = if p.mode == Mode::Favorites && p.query.as_str().is_empty() {
+                    "Star commands in Ctrl+Shift+P to add them here"
+                } else {
+                    "No matching commands"
+                };
+                let query = p.query.as_str();
+                let cols = |end: usize| query[..end].width() as u32;
+                let selection = p.query.selection();
+                let frame = PaletteFrame {
+                    cell,
+                    theme,
+                    query,
+                    caret: cols(p.query.caret()),
+                    selection: (cols(selection.start), cols(selection.end)),
+                    placeholder,
+                    empty,
+                    selected: p.selected.and_then(|s| s.checked_sub(first)),
+                };
+                draw_palette(&g, &frame, rows, &mut self.list.popup);
+            }
+            Some(Popup::Panel(panel)) => {
+                let g = self.panel_geometry(panel);
+                let first = panel.first.min(panel.lines.len());
+                let frame = PanelFrame {
+                    cell,
+                    theme,
+                    title: panel.title,
+                    footer: panel.footer,
+                    lines: &panel.lines[first..],
+                    image: self
+                        .about_icon
+                        .as_ref()
+                        .filter(|_| panel.icon)
+                        .map(|(_, pixels)| pixels),
+                };
+                draw_panel(&g, &frame, &mut self.list.popup);
+            }
+            None => {}
+        }
     }
 
     fn hit(&self, x: i32, y: i32) -> u64 {
@@ -917,6 +1416,9 @@ impl Editor {
         if self.doc.options.overtype {
             right.push("OVR".to_owned());
         }
+        if !self.highlighting {
+            right.push("Syntax off".to_owned());
+        }
         if !self.doc.locks.loading
             && let Some(reason) = self.doc.locks.edit_refusal()
         {
@@ -940,6 +1442,7 @@ impl App for Editor {
                 if self.settings.exit_after_first_frame {
                     ctx.close();
                 }
+                self.shown = true;
                 self.exit_if_loaded(ctx);
             }
             Event::Resized { .. } => {}
@@ -948,7 +1451,12 @@ impl App for Editor {
                 let px = self.px();
                 self.renderer.set_size(px);
             }
-            Event::Key(key) => handled = self.key(key, ctx),
+            Event::Key(key) => {
+                if let Some(bench) = &mut self.bench {
+                    bench.key_arrived(key);
+                }
+                handled = self.key(key, ctx);
+            }
             Event::Char(ch) => self.typed(ch),
             Event::Wheel {
                 delta,
@@ -956,7 +1464,9 @@ impl App for Editor {
                 shift,
                 ctrl,
             } => {
-                if ctrl && !horizontal {
+                if self.popup.is_some() {
+                    self.popup_wheel(delta);
+                } else if ctrl && !horizontal {
                     self.set_zoom(self.zoom + delta.signum());
                 } else if horizontal || shift {
                     // Positive horizontal wheel delta scrolls right; vertical with Shift mirrors it.
@@ -978,7 +1488,13 @@ impl App for Editor {
                 clicks,
                 shift,
                 ..
-            } => self.mouse_down(x, y, clicks, shift),
+            } => {
+                if self.popup.is_some() {
+                    self.popup_click(x, y, ctx);
+                } else {
+                    self.mouse_down(x, y, clicks, shift);
+                }
+            }
             Event::MouseMove { x, y } => {
                 if self.drag.is_some() {
                     let pos = self.hit(x, y);
@@ -990,6 +1506,7 @@ impl App for Editor {
             Event::Wake => {
                 self.drain_loads();
                 self.drain_saves(ctx);
+                self.drain_store();
                 self.exit_if_loaded(ctx);
             }
         }
@@ -998,9 +1515,20 @@ impl App for Editor {
             self.shown_dirty = dirty;
             ctx.set_title(&window_title(self.path.as_deref(), dirty));
         }
+        if self.prompt.is_some() {
+            self.popup = None;
+        }
+        self.sync_ui_renderer();
         let layout_changed = matches!(event, Event::Shown | Event::Resized { .. });
-        if layout_changed || !self.visible().same(&before) {
+        let redraw = layout_changed || !self.visible().same(&before);
+        if redraw {
             ctx.redraw();
+        }
+        if let Some(bench) = &mut self.bench {
+            bench.check_frame(redraw, ctx);
+            if self.shown && !matches!(self.status, LoadStatus::Loading { .. }) {
+                bench.send(ctx);
+            }
         }
         handled
     }
@@ -1043,17 +1571,24 @@ impl App for Editor {
             caret,
         };
         self.view.build(&frame, &mut self.list);
-        self.renderer.draw(
-            &self.list,
-            &mut Target {
-                pixels,
-                width,
-                height,
-            },
-        );
+        self.draw_popup();
+        let mut target = Target {
+            pixels,
+            width,
+            height,
+        };
+        self.renderer.draw(&self.list, &mut target);
+        let ui = self.ui_renderer.as_mut().unwrap_or(&mut self.renderer);
+        ui.draw_layer(&self.list.popup, &mut target);
         if !self.painted {
             self.painted = true;
             self.trace.mark("first_paint");
+        }
+    }
+
+    fn presented(&mut self, ctx: &mut Ctx) {
+        if let Some(bench) = &mut self.bench {
+            bench.presented(ctx);
         }
     }
 
@@ -1062,8 +1597,125 @@ impl App for Editor {
     }
 
     fn is_text(&self, x: i32, y: i32) -> bool {
-        self.layout().text.contains(x, y)
+        self.layout().text.contains(x, y) && !self.popup_area().is_some_and(|r| r.contains(x, y))
     }
+}
+
+/// Whether `def` can run under `locks`; Save also needs a path.
+fn enabled(def: &CommandDef, locks: Locks, has_path: bool) -> bool {
+    match def.action {
+        Action::Save => has_path && locks.save_refusal().is_none(),
+        _ => !def.mutates || locks.edit_refusal().is_none(),
+    }
+}
+
+/// The About panel: name, version, links and the manifest.
+fn about_panel() -> Panel {
+    let centered = |spans: &[(&str, Tone)]| PanelLine {
+        centered: true,
+        ..PanelLine::new(spans)
+    };
+    let mut lines = vec![
+        centered(&[(APP_NAME, Tone::Normal)]),
+        centered(&[("Version ", Tone::Dim), (VERSION, Tone::Normal)]),
+        PanelLine::default(),
+        PanelLine::new(&[("Repository     ", Tone::Dim), (REPOSITORY_URL, Tone::Link)]),
+        PanelLine::new(&[
+            ("Documentation  ", Tone::Dim),
+            (DOCUMENTATION_URL, Tone::Link),
+        ]),
+        PanelLine::default(),
+    ];
+    let mut links = vec![
+        None,
+        None,
+        None,
+        Some(REPOSITORY_URL),
+        Some(DOCUMENTATION_URL),
+    ];
+    for line in MANIFEST.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        lines.push(match line.strip_prefix('#') {
+            Some(title) => centered(&[(title.trim_start_matches('#').trim(), Tone::Heading)]),
+            None => centered(&[(line, Tone::Normal)]),
+        });
+    }
+    links.resize(lines.len(), None);
+    Panel {
+        title: "About",
+        footer: "Click a link to open it  \u{00B7}  Esc: Close",
+        lines,
+        links,
+        icon: true,
+        first: 0,
+    }
+}
+
+/// The Keyboard Shortcuts panel: every command with its keys, then the
+/// editing keys.
+fn shortcuts_panel() -> Panel {
+    let width = COMMANDS
+        .iter()
+        .map(|c| c.label.len())
+        .chain(EDITING_KEYS.iter().map(|(name, _)| name.len()))
+        .max()
+        .unwrap_or(0)
+        + 3;
+    let row = |name: &str, keys: &str, tone: Tone, keys_tone: Tone| {
+        PanelLine::new(&[(&format!("{name:<width$}"), tone), (keys, keys_tone)])
+    };
+    let mut lines = vec![row("Command", "Keys", Tone::Heading, Tone::Heading)];
+    for c in COMMANDS {
+        let keys = commands::keys_text(c);
+        lines.push(if keys.is_empty() {
+            row(c.label, "Palette only", Tone::Normal, Tone::Dim)
+        } else {
+            row(c.label, &keys, Tone::Normal, Tone::Normal)
+        });
+    }
+    lines.push(PanelLine::default());
+    lines.push(row("Editing", "Keys", Tone::Heading, Tone::Heading));
+    for (name, keys) in EDITING_KEYS {
+        lines.push(row(name, keys, Tone::Normal, Tone::Normal));
+    }
+    Panel {
+        title: "Keyboard Shortcuts",
+        footer: "Up, Down, PgUp, PgDn: Scroll  \u{00B7}  Esc: Close",
+        links: Vec::new(),
+        icon: false,
+        first: 0,
+        lines,
+    }
+}
+
+/// Resizes a square image of premultiplied pixels with a box filter.
+fn scale_image(source: &[u32], from: u32, to: u32) -> Vec<u32> {
+    let span = |i: u32| {
+        let start = i * from / to;
+        (start, ((i + 1) * from / to).max(start + 1))
+    };
+    let mut out = Vec::with_capacity((to * to) as usize);
+    for y in 0..to {
+        let (y0, y1) = span(y);
+        for x in 0..to {
+            let (x0, x1) = span(x);
+            let mut sum = [0u32; 4];
+            for sy in y0..y1 {
+                for sx in x0..x1 {
+                    let p = source[(sy * from + sx) as usize];
+                    for (k, s) in sum.iter_mut().enumerate() {
+                        *s += (p >> (24 - 8 * k)) & 0xFF;
+                    }
+                }
+            }
+            let n = (y1 - y0) * (x1 - x0);
+            let pixel = sum
+                .iter()
+                .enumerate()
+                .fold(0, |acc, (k, s)| acc | ((s + n / 2) / n) << (24 - 8 * k));
+            out.push(pixel);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1088,6 +1740,11 @@ mod tests {
             read_only,
             exit_after_first_frame: false,
             exit_after_load,
+            recent_count: 3,
+            user_dir: None,
+            notice: None,
+            highlighting: true,
+            bench: None,
         }
     }
 
@@ -1249,7 +1906,7 @@ mod tests {
         assert_eq!(text(&editor), "oneab cd\ntwo");
         assert_eq!(
             ctx.requested_title(),
-            Some("\u{25CF} test.txt - RoyiTextEditor")
+            Some(format!("\u{25CF} test.txt - {APP_NAME}").as_str())
         );
         editor.event(key(VK_DOWN, false, true), &mut ctx);
         assert_eq!(
@@ -1267,7 +1924,10 @@ mod tests {
         editor.event(key(VK_Z, true, false), &mut ctx);
         editor.event(key(VK_Z, true, false), &mut ctx);
         assert_eq!(text(&editor), "one\ntwo");
-        assert_eq!(ctx.requested_title(), Some("test.txt - RoyiTextEditor"));
+        assert_eq!(
+            ctx.requested_title(),
+            Some(format!("test.txt - {APP_NAME}").as_str())
+        );
         editor.event(key(VK_Y, true, false), &mut ctx);
         assert_eq!(text(&editor), "oneab \ntwo");
     }
@@ -1545,5 +2205,387 @@ mod tests {
         editor.event(down(at(1, 1), 1, true), &mut ctx);
         assert_eq!(editor.doc.selections.primary(), Selection::new(3, 12));
         assert!(editor.is_text(at(1, 1).0, at(1, 1).1));
+    }
+
+    fn click(x: i32, y: i32) -> Event {
+        Event::MouseDown {
+            x,
+            y,
+            clicks: 1,
+            shift: false,
+            ctrl: false,
+            alt: false,
+        }
+    }
+
+    fn palette(editor: &Editor) -> &Palette {
+        match &editor.popup {
+            Some(Popup::Palette(p)) => p,
+            _ => panic!("the palette is not open"),
+        }
+    }
+
+    fn panel(editor: &Editor) -> &Panel {
+        match &editor.popup {
+            Some(Popup::Panel(panel)) => panel,
+            _ => panic!("no panel is open"),
+        }
+    }
+
+    fn palette_labels(editor: &Editor) -> Vec<&'static str> {
+        palette(editor)
+            .items
+            .iter()
+            .map(|item| match item {
+                Item::Header(h) => h,
+                Item::Command { index, .. } => COMMANDS[*index].label,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn palette_runs_commands_and_ctrl_p_lists_recent_and_favorites() {
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, b"one two", false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(key(VK_P, true, true), &mut ctx);
+        assert!(ctx.redraw_requested());
+        type_text(&mut editor, &mut ctx, "select all");
+        assert_eq!(palette_labels(&editor)[0], "Selection: Select All");
+        editor.event(key(VK_RETURN, false, false), &mut ctx);
+        assert!(editor.popup.is_none());
+        assert_eq!(editor.doc.selections.primary(), Selection::new(0, 7));
+        assert_eq!(text(&editor), "one two", "typing went to the palette");
+
+        // Ctrl+Space stars the selected command; its space character is dropped.
+        editor.event(key(VK_F1, false, false), &mut ctx);
+        type_text(&mut editor, &mut ctx, "undo");
+        editor.event(key(VK_SPACE, true, false), &mut ctx);
+        editor.event(Event::Char(' '), &mut ctx);
+        assert_eq!(palette(&editor).query.as_str(), "undo");
+        editor.event(key(VK_BACK, false, false), &mut ctx);
+        assert_eq!(palette(&editor).query.as_str(), "und");
+        editor.event(key(VK_ESCAPE, false, false), &mut ctx);
+        assert!(editor.popup.is_none());
+
+        editor.event(key(VK_P, true, false), &mut ctx);
+        assert_eq!(
+            palette_labels(&editor),
+            vec![
+                "recently used",
+                "Selection: Select All",
+                "favorites",
+                "Edit: Undo"
+            ]
+        );
+        // Unstarring in the favorites view removes the row and keeps a selection.
+        editor.event(key(VK_DOWN, false, false), &mut ctx);
+        editor.event(key(VK_SPACE, true, false), &mut ctx);
+        assert_eq!(
+            palette_labels(&editor),
+            vec!["recently used", "Selection: Select All"]
+        );
+        assert_eq!(palette(&editor).selected, Some(1));
+    }
+
+    #[test]
+    fn palette_mouse_stars_runs_and_closes() {
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, b"abc", true);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(key(VK_P, true, true), &mut ctx);
+        type_text(&mut editor, &mut ctx, "cut");
+        let p = palette(&editor);
+        let cut = p.selected_command().unwrap();
+        assert_eq!(cut.id, "editor.action.clipboardCutAction");
+        assert!(
+            !enabled(cut, editor.doc.locks, true),
+            "read-only disables mutating commands"
+        );
+        let g = editor.palette_geometry(p);
+        let star = g.star_area(0, editor.ui_cell());
+        assert!(!editor.is_text(star.x + 2, star.y + 2));
+        editor.event(click(star.x + 2, star.y + 2), &mut ctx);
+        let cut_index = commands::index_of(cut.id).unwrap();
+        assert!(editor.store.as_ref().unwrap().is_favorite(cut_index));
+        assert!(editor.popup.is_some(), "the star keeps the palette open");
+        editor.event(click(g.list.x + 200, g.list.y + 2), &mut ctx);
+        assert!(editor.popup.is_none());
+        assert_eq!(editor.notice.as_deref(), Some("Not editable: read-only"));
+        assert_eq!(text(&editor), "abc");
+
+        editor.event(key(VK_P, true, false), &mut ctx);
+        assert_eq!(palette_labels(&editor), vec!["recently used", "Edit: Cut"]);
+        editor.event(click(1, 590), &mut ctx);
+        assert!(editor.popup.is_none(), "a click outside closes the palette");
+
+        // Toggle Read-Only from the palette makes the document editable.
+        editor.event(key(VK_P, true, true), &mut ctx);
+        type_text(&mut editor, &mut ctx, "toggle read");
+        editor.event(key(VK_RETURN, false, false), &mut ctx);
+        type_text(&mut editor, &mut ctx, "x");
+        assert_eq!(text(&editor), "xabc");
+    }
+
+    #[test]
+    fn alt_f4_quits_and_syntax_highlighting_toggles() {
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, b"", false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.perform(Action::ToggleSyntax, &mut ctx);
+        assert!(editor.status_text().1.contains("Syntax off"));
+        editor.perform(Action::ToggleSyntax, &mut ctx);
+        assert!(!editor.status_text().1.contains("Syntax"));
+        let alt = |vk| {
+            Event::Key(Key {
+                vk,
+                ctrl: false,
+                shift: false,
+                alt: true,
+            })
+        };
+        assert!(
+            !editor.event(alt(VK_SPACE), &mut ctx),
+            "the window menu stays"
+        );
+        assert!(!ctx.close_requested());
+        editor.event(key(VK_F1, false, false), &mut ctx);
+        assert!(editor.event(alt(VK_F4), &mut ctx));
+        assert!(ctx.close_requested(), "Quit works with the palette open");
+    }
+
+    #[test]
+    fn palette_query_supports_editing_keys_and_paste() {
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, b"text", false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        ctx.set_clipboard("redo\nsecond line", clip::FORMAT, &[]);
+        editor.event(key(VK_P, true, true), &mut ctx);
+        type_text(&mut editor, &mut ctx, "save");
+        editor.event(key(VK_A, true, false), &mut ctx);
+        type_text(&mut editor, &mut ctx, "undo");
+        assert_eq!(palette(&editor).query.as_str(), "undo");
+        editor.event(key(VK_A, true, false), &mut ctx);
+        editor.event(key(VK_V, true, false), &mut ctx);
+        assert_eq!(palette(&editor).query.as_str(), "redo");
+        assert_eq!(palette_labels(&editor)[0], "Edit: Redo");
+        editor.event(key(VK_HOME, false, false), &mut ctx);
+        editor.event(key(VK_DELETE, false, false), &mut ctx);
+        editor.event(key(VK_RIGHT, false, true), &mut ctx);
+        type_text(&mut editor, &mut ctx, "X");
+        assert_eq!(palette(&editor).query.as_str(), "Xdo");
+        editor.event(key(VK_END, false, false), &mut ctx);
+        editor.event(key(VK_LEFT, true, false), &mut ctx);
+        editor.event(key(VK_BACK, true, false), &mut ctx);
+        assert_eq!(
+            palette(&editor).query.as_str(),
+            "Xdo",
+            "nothing before the word"
+        );
+        editor.event(key(VK_ESCAPE, false, false), &mut ctx);
+        assert!(editor.popup.is_none());
+        assert_eq!(text(&editor), "text", "the document is unchanged");
+        assert_eq!(editor.doc.selections.primary(), Selection::caret(0));
+    }
+
+    #[test]
+    fn popups_fit_small_zoomed_and_high_dpi_windows() {
+        let files = Arc::new(FakeFiles::default());
+        for (width, height, dpi) in [(400, 240, 96), (800, 480, 192), (600, 360, 144)] {
+            let mut editor = editor_on(&files, b"text", false);
+            editor.dpi = dpi;
+            editor.set_zoom(16);
+            let mut ctx = Ctx::headless(width, height, dpi);
+            editor.event(key(VK_P, true, true), &mut ctx);
+            assert!(
+                editor.ui_cell().height < editor.renderer.cell().height,
+                "popups do not zoom"
+            );
+            let mut pixels = vec![0u32; (width * height) as usize];
+            for _ in 0..COMMANDS.len() {
+                let p = palette(&editor);
+                let g = editor.palette_geometry(p);
+                assert!(g.panel.y >= 0 && g.panel.y + g.panel.h as i32 <= height as i32);
+                assert!(g.input.y + g.input.h as i32 <= g.list.y);
+                let row = p.selected.unwrap() - p.first;
+                assert!(row < g.rows, "{width}x{height}: the selection is visible");
+                editor.event(key(VK_DOWN, false, false), &mut ctx);
+            }
+            assert_eq!(
+                palette(&editor).selected,
+                Some(0),
+                "every command was reached"
+            );
+            editor.paint(&mut pixels, width, height);
+            assert!(!editor.list.popup.glyphs.is_empty());
+            editor.event(key(VK_ESCAPE, false, false), &mut ctx);
+            editor.perform(Action::About, &mut ctx);
+            let g = editor.panel_geometry(panel(&editor));
+            assert!(g.panel.y >= 0 && g.panel.y + g.panel.h as i32 <= height as i32);
+            assert!(g.lines >= 1);
+        }
+    }
+
+    #[test]
+    fn unchanged_popup_events_request_no_repaint() {
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, b"text", false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(key(VK_P, true, true), &mut ctx);
+        for event in [
+            key(VK_LEFT, false, false),
+            key(VK_HOME, false, false),
+            key(VK_BACK, false, false),
+            key(0x7B, false, false),
+            Event::Char('\u{1}'),
+            Event::Wake,
+        ] {
+            let mut ctx = Ctx::headless(800, 600, 96);
+            editor.event(event, &mut ctx);
+            assert!(!ctx.redraw_requested(), "{event:?}");
+        }
+        for event in [
+            Event::Char('s'),
+            key(VK_DOWN, false, false),
+            key(VK_HOME, false, true),
+        ] {
+            let mut ctx = Ctx::headless(800, 600, 96);
+            editor.event(event, &mut ctx);
+            assert!(ctx.redraw_requested(), "{event:?}");
+        }
+    }
+
+    #[test]
+    fn palette_commands_run_before_their_state_is_saved() {
+        let dir = std::env::temp_dir().join(format!("rte_editor_palette_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, b"one two", false);
+        editor.settings.user_dir = Some(dir.clone());
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(key(VK_P, true, true), &mut ctx);
+        type_text(&mut editor, &mut ctx, "select all");
+        editor.event(key(VK_RETURN, false, false), &mut ctx);
+        assert_eq!(editor.doc.selections.primary(), Selection::new(0, 7));
+        assert_eq!(editor.store.as_mut().unwrap().settle(), None);
+        let saved = std::fs::read_to_string(dir.join(favorites::FILE_NAME)).unwrap();
+        assert!(saved.contains("editor.action.selectAll"), "{saved}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn about_links_open_and_shortcuts_list_every_command() {
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, b"", false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.size = ctx.size();
+        editor.perform(Action::About, &mut ctx);
+        let about = panel(&editor);
+        assert_eq!(about.lines[1].spans[1].0, VERSION);
+        let manifest_title = MANIFEST
+            .lines()
+            .next()
+            .unwrap()
+            .trim_start_matches('#')
+            .trim();
+        assert!(
+            about
+                .lines
+                .iter()
+                .any(|l| l.spans == [(manifest_title.to_owned(), Tone::Heading)]),
+            "the manifest is part of About"
+        );
+        assert_eq!(about.links.len(), about.lines.len());
+        let g = editor.panel_geometry(about);
+        let line = about
+            .links
+            .iter()
+            .position(|l| *l == Some(REPOSITORY_URL))
+            .unwrap();
+        editor.event(
+            click(g.body.x + 5, g.body.y + (line as u32 * g.line_h) as i32 + 1),
+            &mut ctx,
+        );
+        assert_eq!(ctx.requested_url(), Some(REPOSITORY_URL));
+        let mut pixels = vec![0u32; 800 * 600];
+        editor.paint(&mut pixels, 800, 600);
+        let images = &editor.list.popup.images;
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].width, editor.icon_side());
+        assert!(
+            images[0].pixels.iter().any(|p| p >> 24 == 0xFF),
+            "the icon is drawn"
+        );
+        editor.event(key(VK_ESCAPE, false, false), &mut ctx);
+        assert!(editor.popup.is_none());
+
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.perform(Action::Documentation, &mut ctx);
+        assert_eq!(ctx.requested_url(), Some(DOCUMENTATION_URL));
+
+        editor.perform(Action::KeyboardShortcuts, &mut ctx);
+        let rows: Vec<String> = panel(&editor)
+            .lines
+            .iter()
+            .map(|l| l.spans.iter().map(|(t, _)| t.as_str()).collect())
+            .collect();
+        for c in COMMANDS {
+            assert!(rows.iter().any(|r| r.starts_with(c.label)), "{}", c.label);
+        }
+        assert!(rows.iter().any(|r| r.ends_with("Ctrl+Shift+P, F1")));
+        editor.event(key(VK_END, false, false), &mut ctx);
+        let shortcuts = panel(&editor);
+        let visible = editor.panel_geometry(shortcuts).lines;
+        assert!(shortcuts.first > 0, "the list is longer than the window");
+        assert_eq!(shortcuts.first + visible, shortcuts.lines.len());
+    }
+
+    #[test]
+    fn scripted_keys_open_and_close_the_palette_then_exit() {
+        let files = Arc::new(FakeFiles::default());
+        files.put(&path(), b"x");
+        let mut settings = settings(false, false);
+        settings.bench = Some(bench::parse("Ctrl+Shift+P,Escape", "2").unwrap());
+        let mut editor = Editor::new(
+            Some(&path()),
+            Some(done(b"x")),
+            None,
+            renderer(),
+            96,
+            settings,
+            Trace::new(false),
+            files,
+            Arc::new(|| {}),
+        );
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(Event::Shown, &mut ctx);
+        let mut posted = ctx.posted_key();
+        let mut opened = 0;
+        while let Some(key) = posted {
+            let mut ctx = Ctx::headless(800, 600, 96);
+            editor.event(Event::Key(key), &mut ctx);
+            assert!(ctx.redraw_requested(), "{key:?} changes the frame");
+            assert!(!ctx.close_requested());
+            opened += usize::from(editor.popup.is_some());
+            let mut ctx = Ctx::headless(800, 600, 96);
+            editor.presented(&mut ctx);
+            posted = ctx.posted_key();
+            if posted.is_none() {
+                assert!(ctx.close_requested(), "the script ends the process");
+            }
+        }
+        assert_eq!(opened, 2);
+    }
+
+    #[test]
+    fn icon_scaling_averages_premultiplied_pixels() {
+        let source = [0xFF00_0000, 0, 0xFFFF_FFFF, 0];
+        assert_eq!(scale_image(&source, 2, 1), vec![0x8040_4040]);
+        let up = scale_image(&source, 2, 4);
+        assert_eq!(up.len(), 16);
+        assert_eq!(
+            (up[0], up[1], up[2], up[8]),
+            (source[0], source[0], 0, source[2])
+        );
     }
 }

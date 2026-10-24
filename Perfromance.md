@@ -1,6 +1,129 @@
 # Performance
 
-## 0.1.0 (Unreleased)
+## 0.2.0
+
+### Main Performance Oriented Changes
+
+- Command Palette loaded lazily: nothing palette-specific runs at startup. The
+  favorites file is read by a worker thread started on first open; a second
+  popup font exists only while the editor is zoomed.
+- Palette state I/O never blocks the UI: changes apply at once, the worker
+  persists them (bounded file: 64 KiB, 256 favorites).
+- Palette matching reuses its buffers; repaints only when the visible popup
+  state changes.
+
+### Performance Results
+
+Using the Performance Benchmark v`1` (`cargo xtask bench-perf`).
+
+Reference machine: AMD Ryzen 9 9950X, 94 GiB RAM, Windows 11 Pro for
+Workstations, 2560 × 1600 at 59 Hz, release build, warm file cache.
+
+| ID  | Test                                 | Metric                   | 0.2.0  | 0.1.0   | Prev. 2 | Prev. 3 |
+| --- | ------------------------------------ | ------------------------ | ------ | ------- | ------- | ------- |
+| L01 | Empty file                           | First paint [ms]         | 20.2   | 13.2    | —       | —       |
+| L01 | Empty file                           | Peak private [MiB]       | 5.0    | 4.6     | —       | —       |
+| L02 | Text, 64 KiB                         | First paint [ms]         | 20.6   | 13.6    | —       | —       |
+| L02 | Text, 64 KiB                         | Peak private [MiB]       | 5.3    | 4.9     | —       | —       |
+| L03 | Text, 256 MiB                        | First paint [ms]         | 21.5   | 13.6    | —       | —       |
+| L03 | Text, 256 MiB                        | File read [ms]           | 71.9   | 70.1    | —       | —       |
+| L03 | Text, 256 MiB                        | Peak private [MiB]       | 267.3  | 267.0   | —       | —       |
+| L04 | Python, 64 KiB                       | First paint [ms]         | 20.2 ¹ | 13.5 ¹  | —       | —       |
+| L04 | Python, 64 KiB                       | Peak private [MiB]       | 5.2    | 4.8     | —       | —       |
+| L05 | C, 64 KiB                            | First paint [ms]         | 20.3 ¹ | 13.6 ¹  | —       | —       |
+| L05 | C, 64 KiB                            | Peak private [MiB]       | 5.2    | 4.8     | —       | —       |
+| L06 | JSON, 64 KiB                         | First paint [ms]         | 20.4 ¹ | 13.7 ¹  | —       | —       |
+| L06 | JSON, 64 KiB                         | Peak private [MiB]       | 5.5    | 5.2     | —       | —       |
+| L07 | Markdown, 64 KiB                     | First paint [ms]         | 20.0 ¹ | 13.5 ¹  | —       | —       |
+| L07 | Markdown, 64 KiB                     | Peak private [MiB]       | 5.1    | 4.8     | —       | —       |
+| L08 | CSV, 64 KiB                          | First paint [ms]         | 19.9 ¹ | 13.8 ¹  | —       | —       |
+| L08 | CSV, 64 KiB                          | Peak private [MiB]       | 5.2    | 4.8     | —       | —       |
+| L09 | Python, 8 MiB                        | First paint [ms]         | 20.4 ¹ | 14.2 ¹  | —       | —       |
+| L09 | Python, 8 MiB                        | File read [ms]           | 8.5    | 7.9     | —       | —       |
+| L09 | Python, 8 MiB                        | Fully highlighted [ms]   | n/i    | n/i     | —       | —       |
+| L09 | Python, 8 MiB                        | Peak private [MiB]       | 13.5   | 13.1    | —       | —       |
+| L10 | C, 8 MiB                             | First paint [ms]         | 20.0 ¹ | 14.2 ¹  | —       | —       |
+| L10 | C, 8 MiB                             | File read [ms]           | 8.4    | 7.9     | —       | —       |
+| L10 | C, 8 MiB                             | Peak private [MiB]       | 13.4   | 13.2    | —       | —       |
+| L11 | JSON, 8 MiB                          | First paint [ms]         | 20.8 ¹ | 14.9 ¹  | —       | —       |
+| L11 | JSON, 8 MiB                          | File read [ms]           | 8.0    | 7.8     | —       | —       |
+| L11 | JSON, 8 MiB                          | Peak private [MiB]       | 13.5   | 13.2    | —       | —       |
+| L12 | Markdown, 8 MiB                      | First paint [ms]         | 20.1 ¹ | 14.2 ¹  | —       | —       |
+| L12 | Markdown, 8 MiB                      | File read [ms]           | 8.3    | 8.0     | —       | —       |
+| L12 | Markdown, 8 MiB                      | Peak private [MiB]       | 13.4   | 13.2    | —       | —       |
+| L13 | CSV, 8 MiB                           | First paint [ms]         | 20.0 ¹ | 14.1 ¹  | —       | —       |
+| L13 | CSV, 8 MiB                           | File read [ms]           | 8.2    | 7.9     | —       | —       |
+| L13 | CSV, 8 MiB                           | Peak private [MiB]       | 13.5   | 13.2    | —       | —       |
+| L14 | Read-only text, 256 MiB              | First paint [ms]         | 20.8   | 13.4    | —       | —       |
+| L14 | Read-only text, 256 MiB              | File read [ms]           | 72.7   | 71.5    | —       | —       |
+| L14 | Read-only text, 256 MiB              | Peak private [MiB]       | 267.4  | 267.0   | —       | —       |
+| L15 | Read-only Python, 64 KiB             | First paint [ms]         | 19.7 ¹ | 13.4 ¹  | —       | —       |
+| L15 | Read-only Python, 64 KiB             | Peak private [MiB]       | 5.2    | 4.8     | —       | —       |
+| L16 | Single line text, 64 MiB             | First paint [ms]         | 21.9   | 13.9    | —       | —       |
+| L16 | Single line text, 64 MiB             | File read [ms]           | 24.3   | 23.8    | —       | —       |
+| L16 | Single line text, 64 MiB             | Peak private [MiB]       | 72.1   | 71.7    | —       | —       |
+| L17 | Single line JSON, 8 MiB              | First paint [ms]         | 19.9 ¹ | 14.8 ¹  | —       | —       |
+| L17 | Single line JSON, 8 MiB              | File read [ms]           | 8.0    | 8.5     | —       | —       |
+| L17 | Single line JSON, 8 MiB              | Peak private [MiB]       | 13.5   | 13.2    | —       | —       |
+| L18 | Notebook as JSON, 8 MiB              | First paint [ms]         | 20.4 ¹ | 14.3 ¹  | —       | —       |
+| L18 | Notebook as JSON, 8 MiB              | File read [ms]           | 8.1    | 8.2     | —       | —       |
+| L18 | Notebook as JSON, 8 MiB              | Peak private [MiB]       | 13.4   | 13.1    | —       | —       |
+| L19 | Markdown, 128 MiB                    | First paint [ms]         | 21.4   | 13.7    | —       | —       |
+| L19 | Markdown, 128 MiB                    | File read [ms]           | 39.8   | 39.6    | —       | —       |
+| L19 | Markdown, 128 MiB                    | Peak private [MiB]       | 136.8  | 136.5   | —       | —       |
+| U01 | Show the Command Palette             | Key to frame [ms]        | 0.38   | n/i     | —       | —       |
+| U01 | Show the Command Palette             | Key to frame, p95 [ms]   | 0.61   | n/i     | —       | —       |
+| U02 | Show favorites                       | Key to frame [ms]        | 0.33   | n/i     | —       | —       |
+| U02 | Show favorites                       | Key to frame, p95 [ms]   | 0.58   | n/i     | —       | —       |
+| C01 | Copy 1 KiB                           | Key to clipboard [ms]    | n/m    | n/m     | —       | —       |
+| C02 | Copy 1 MiB                           | Key to clipboard [ms]    | n/m    | n/m     | —       | —       |
+| C03 | Copy 64 MiB                          | Key to clipboard [ms]    | n/m    | n/m     | —       | —       |
+| C04 | Paste 1 KiB into Python, 8 MiB       | Key to frame [ms]        | n/m    | n/m     | —       | —       |
+| C05 | Paste 1 MiB into Python, 8 MiB       | Key to frame [ms]        | n/m    | n/m     | —       | —       |
+| C06 | Paste 64 MiB into text               | Key to frame [ms]        | n/m    | n/m     | —       | —       |
+| C06 | Paste 64 MiB into text               | Peak private [MiB]       | n/m    | n/m     | —       | —       |
+| E01 | Typing in Python, 8 MiB              | Key to frame [ms]        | n/m    | n/m     | —       | —       |
+| E02 | Typing at the start of a 64 MiB line | Key to frame [ms]        | n/m    | n/m     | —       | —       |
+| E03 | End and Home on a 64 MiB line        | Key to frame [ms]        | n/m    | n/m     | —       | —       |
+| M01 | Add next occurrence                  | Key to frame [ms]        | n/i    | n/i     | —       | —       |
+| M02 | Select all occurrences               | Key to frame [ms]        | n/i    | n/i     | —       | —       |
+| M03 | Column selection, 1,000 lines        | Key to frame [ms]        | n/i    | n/i     | —       | —       |
+| M04 | Insert cursor below                  | Key to frame [ms]        | n/i    | n/i     | —       | —       |
+| M05 | Type at 10,000 carets                | Key to frame [ms]        | n/i    | n/i     | —       | —       |
+| M05 | Type at 10,000 carets                | Peak private [MiB]       | n/i    | n/i     | —       | —       |
+| M06 | Backspace at 10,000 carets           | Key to frame [ms]        | n/i    | n/i     | —       | —       |
+| M07 | Paste 10,000 pieces                  | Key to frame [ms]        | n/i    | n/i     | —       | —       |
+| M08 | Undo and redo, 10,000 carets         | Key to frame [ms]        | n/i    | n/i     | —       | —       |
+| S01 | Scroll and jump, Markdown, 64 KiB    | Key to frame, p95 [ms]   | n/m    | n/m     | —       | —       |
+| S01 | Scroll and jump, Markdown, 64 KiB    | Key to frame, max [ms]   | n/m    | n/m     | —       | —       |
+| S01 | Scroll and jump, Markdown, 64 KiB    | Missed refreshes [%]     | n/m    | n/m     | —       | —       |
+| S02 | Scroll and jump, Markdown, 8 MiB     | Key to frame, p95 [ms]   | n/m    | n/m     | —       | —       |
+| S02 | Scroll and jump, Markdown, 8 MiB     | Key to frame, max [ms]   | n/m    | n/m     | —       | —       |
+| S02 | Scroll and jump, Markdown, 8 MiB     | Missed refreshes [%]     | n/m    | n/m     | —       | —       |
+| S02 | Scroll and jump, Markdown, 8 MiB     | Jump to highlighted [ms] | n/i    | n/i     | —       | —       |
+| S03 | Scroll and jump, Markdown, 128 MiB   | Key to frame, p95 [ms]   | n/m    | n/m     | —       | —       |
+| S03 | Scroll and jump, Markdown, 128 MiB   | Key to frame, max [ms]   | n/m    | n/m     | —       | —       |
+| S03 | Scroll and jump, Markdown, 128 MiB   | Missed refreshes [%]     | n/m    | n/m     | —       | —       |
+| —   | Whole suite (implemented tests)      | Run time [s]             | 9.6    | 6.7     | —       | —       |
+
+Values are medians. — no earlier version; n/i: feature not implemented
+yet (multi-cursor: M5; highlighting: M6); n/m: not measured, the
+interaction harness does not cover the test yet.
+¹ Plain text: syntax highlighting is not implemented in 0.2.0.
+
+U01 and U02 use the editor's scripted input mode (`--bench-keys`,
+`--bench-runs`): after the fixture is loaded, the editor sends the key itself
+and times it from handling the key to the presented frame (after `BitBlt`),
+30 repetitions after one warm-up.
+
+This session ran at the slower environment level described under 0.1.0:
+about 20 ms first paint instead of 13 ms. 0.1.0, rebuilt from its tag and run
+alongside in the same session, measured the same as 0.2.0 (first paint −1.0 to
++0.8 ms, file read −2.0 to +1.1 ms, peak memory ±0.1 MiB; empty file 21.2 ms
+and 5.0 MiB). The differences to the 0.1.0 column come from the environment,
+not from the code.
+
+## 0.1.0
 
 ### Main Performance Oriented Changes
 
@@ -128,9 +251,11 @@ run directly from the VS Code terminal.
 
 ### v1
 
-Status: load tests (L01-L19) implemented in `cargo xtask bench-perf`
-([xtask/src/perf.rs](xtask/src/perf.rs)); they run in about 7 s. Interaction
-tests are specified and need a scripted input mode in the editor. The whole
+Status: load tests (L01-L19) and the Command Palette tests (U01-U02) are
+implemented in `cargo xtask bench-perf` ([xtask/src/perf.rs](xtask/src/perf.rs));
+they run in about 7-10 s. U01-U02 use the editor's scripted input mode
+(`--bench-keys <keys> --bench-runs <n>`); the other interaction tests are
+specified and need more scripted actions. The whole
 suite should not exceed 60 seconds on the reference machine, including
 fixture generation on a first run; faster is better.
 

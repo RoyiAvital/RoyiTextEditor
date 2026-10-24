@@ -2,7 +2,8 @@
 //! `windres` compiles a resource script into a COFF object linked into the
 //! binary. The icon is rendered from `Meta/Icon.svg` (64 px and up) and
 //! `Meta/IconSmall.svg` (48 px and below, where the names become bars).
-//! Fails when `Meta/AppMeta.json` and the Cargo package version differ.
+//! Fails when `Meta/AppMeta.json` and the Cargo package version differ, or when
+//! its `file name` is not the name of the `[[bin]]` target.
 //!
 //! `RTE_SEGMENT_HEAP=1` adds `<heapType>SegmentHeap</heapType>` (used to
 //! measure it; see Plan/Editing.md). `WINDRES` overrides the tool path.
@@ -20,6 +21,8 @@ const ICON_SMALL: &str = "../../Meta/IconSmall.svg";
 const ICON_SIZES: [u32; 10] = [16, 20, 24, 32, 40, 48, 64, 96, 128, 256];
 /// Largest size drawn from `IconSmall.svg`.
 const ICON_SMALL_MAX: u32 = 48;
+/// Side of the About panel icon (`about_icon.bin`: premultiplied `0xAARRGGBB`, little-endian).
+const ABOUT_ICON: u32 = 128;
 
 fn main() {
     println!("cargo:rerun-if-changed=RoyiTextEditor.exe.manifest");
@@ -28,11 +31,12 @@ fn main() {
     println!("cargo:rerun-if-changed={ICON_SMALL}");
     println!("cargo:rerun-if-env-changed=RTE_SEGMENT_HEAP");
     println!("cargo:rerun-if-env-changed=WINDRES");
-    check_version();
+    read_meta();
+    let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
+    std::fs::write(out.join("about_icon.bin"), about_icon()).expect("write about_icon.bin");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
-    let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
     let source = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("manifest dir"))
         .join("RoyiTextEditor.exe.manifest");
     let template = std::fs::read_to_string(&source).expect("read the application manifest");
@@ -78,12 +82,36 @@ fn main() {
     );
 }
 
-/// Checks the version against Cargo and exports the name as `RTE_APP_NAME`.
-fn check_version() {
+/// Checks `AppMeta.json` against Cargo and exports the display name, file name
+/// and links as `RTE_APP_NAME`, `RTE_FILE_NAME`, `RTE_REPOSITORY_URL` and
+/// `RTE_DOCUMENTATION_URL`.
+fn read_meta() {
     let text = std::fs::read_to_string(APP_META).expect("read AppMeta.json");
     let info: serde_json::Value = serde_json::from_str(&text).expect("AppMeta.json is JSON");
     let name = info["name"].as_str().expect("AppMeta.json has a name");
     println!("cargo:rustc-env=RTE_APP_NAME={name}");
+    let file_name = info["file name"]
+        .as_str()
+        .expect("AppMeta.json has a file name");
+    assert_eq!(
+        Some(file_name),
+        bin_name().as_deref(),
+        "AppMeta.json `file name` must equal the [[bin]] name in crates/rte_app/Cargo.toml"
+    );
+    println!("cargo:rustc-env=RTE_FILE_NAME={file_name}");
+    for (key, env) in [
+        ("repository", "RTE_REPOSITORY_URL"),
+        ("documentation", "RTE_DOCUMENTATION_URL"),
+    ] {
+        let url = info[key]
+            .as_str()
+            .unwrap_or_else(|| panic!("AppMeta.json has a {key} URL"));
+        assert!(
+            url.starts_with("https://"),
+            "AppMeta.json {key} must be an https URL"
+        );
+        println!("cargo:rustc-env={env}={url}");
+    }
     let version = info["version"]
         .as_str()
         .expect("AppMeta.json has a version");
@@ -92,6 +120,47 @@ fn check_version() {
         version, cargo,
         "AppMeta.json and the workspace version in Cargo.toml differ"
     );
+}
+
+/// `name` of the `[[bin]]` target in this package's `Cargo.toml`.
+fn bin_name() -> Option<String> {
+    let text = std::fs::read_to_string("Cargo.toml").ok()?;
+    let mut in_bin = false;
+    for line in text.lines().map(str::trim) {
+        if line.starts_with('[') {
+            in_bin = line == "[[bin]]";
+        } else if in_bin && let Some(value) = line.strip_prefix("name") {
+            let value = value.trim_start().strip_prefix('=')?;
+            return Some(value.trim().trim_matches('"').to_owned());
+        }
+    }
+    None
+}
+
+fn render(tree: &resvg::usvg::Tree, size: u32) -> Pixmap {
+    let scale = size as f32 / tree.size().width();
+    let mut pixmap = Pixmap::new(size, size).expect("icon size");
+    resvg::render(
+        tree,
+        Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+    pixmap
+}
+
+/// Pixels of the About panel icon.
+fn about_icon() -> Vec<u8> {
+    let pixmap = render(&svg_tree(ICON), ABOUT_ICON);
+    pixmap
+        .data()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|&p| {
+            let [r, g, b, a] = p.map(u32::from);
+            ((a << 24) | (r << 16) | (g << 8) | b).to_le_bytes()
+        })
+        .collect()
 }
 
 fn svg_tree(path: &str) -> resvg::usvg::Tree {
@@ -116,14 +185,10 @@ fn icon() -> Vec<u8> {
             } else {
                 &large
             };
-            let scale = size as f32 / tree.size().width();
-            let mut pixmap = Pixmap::new(size, size).expect("icon size");
-            resvg::render(
-                tree,
-                Transform::from_scale(scale, scale),
-                &mut pixmap.as_mut(),
-            );
-            (size, pixmap.encode_png().expect("encode icon PNG"))
+            (
+                size,
+                render(tree, size).encode_png().expect("encode icon PNG"),
+            )
         })
         .collect();
 

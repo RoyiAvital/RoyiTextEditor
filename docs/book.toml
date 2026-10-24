@@ -14,11 +14,16 @@ git-repository-url = "https://github.com/RoyiAvital/RoyiTextEditor"
 edit-url-template = "https://github.com/RoyiAvital/RoyiTextEditor/edit/main/docs/{path}"
 site-url = "/RoyiTextEditor/"
 additional-css = ["theme/pagetoc.css", "theme/royi.css"]
-additional-js = ["theme/pagetoc.js", "theme/royi.js"]
+additional-js = ["theme/pagetoc.js", "theme/royi.js", "theme/mermaid.min.js", "theme/mermaid-init.js"]
 no-section-label = true
 sidebar-header-nav = false
 search = { enable = true }
 
 [preprocessor.pagetoc]
 command = "mdbook-pagetoc"
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
+
+
 

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use xxhash_rust::xxh3::{Xxh3, xxh3_64};
 
-use crate::{build_release, median, parse_trace, release_exe, root, run_traced};
+use crate::{build_release, median, parse_trace, percentile, release_exe, root, run_traced};
 
 pub const VERSION: u32 = 1;
 const KIB: usize = 1024;
@@ -185,16 +185,48 @@ const LOAD_TESTS: &[LoadTest] = &[
     test("L19", "Markdown, 128 MiB", "large.md", 5, 1, true),
 ];
 
-/// Interaction tests of v1 that need the editor's scripted input mode.
-const PENDING: &str = "U01-U02, C01-C06, E01-E03, M01-M08, S01-S03";
-/// Sum of the interaction test caps, reserved within the total.
-const PENDING_CAPS: Duration = Duration::from_secs(35);
+/// An interaction test: one process loads the fixture, then sends a key
+/// sequence `runs` times (`--bench-keys`); the first key of each repetition is
+/// timed from its handling to the presented frame. One extra repetition warms up.
+struct InputTest {
+    id: &'static str,
+    label: &'static str,
+    fixture: &'static str,
+    keys: &'static str,
+    runs: usize,
+    cap: Duration,
+}
+
+const INPUT_TESTS: &[InputTest] = &[
+    InputTest {
+        id: "U01",
+        label: "Show the Command Palette",
+        fixture: "small.py",
+        keys: "Ctrl+Shift+P,Escape",
+        runs: 30,
+        cap: Duration::from_secs(1),
+    },
+    InputTest {
+        id: "U02",
+        label: "Show favorites",
+        fixture: "small.py",
+        keys: "Ctrl+P,Escape",
+        runs: 30,
+        cap: Duration::from_secs(1),
+    },
+];
+
+/// Interaction tests of v1 that are not implemented in the harness yet.
+const PENDING: &str = "C01-C06, E01-E03, M01-M08, S01-S03";
+/// Sum of the pending interaction test caps, reserved within the total.
+const PENDING_CAPS: Duration = Duration::from_secs(33);
 
 /// What a short-benchmark row reports.
 enum Measure {
     FirstPaint,
     FileRead,
     Peak,
+    KeyToFrame,
     /// The feature exists; the interaction harness does not yet.
     NotMeasured(&'static str),
     /// The feature itself is not implemented yet.
@@ -270,7 +302,7 @@ const SHORT: &[ShortRow] = &[
         "Are commands instant?",
         "Show the Command Palette",
         "U01",
-        Measure::NotImplemented("Key to frame"),
+        Measure::KeyToFrame,
     ),
     row(
         "Is typing instant in a big file?",
@@ -305,10 +337,8 @@ fn is_pending(measure: &Measure) -> bool {
     )
 }
 
-fn short_includes(t: &LoadTest) -> bool {
-    SHORT
-        .iter()
-        .any(|r| r.id == t.id && !is_pending(&r.measure))
+fn short_includes(id: &str) -> bool {
+    SHORT.iter().any(|r| r.id == id && !is_pending(&r.measure))
 }
 
 /// A Markdown table with aligned columns.
@@ -790,6 +820,60 @@ fn run_load(exe: &Path, t: &LoadTest) -> Result<Samples, String> {
     Ok(samples)
 }
 
+struct InputSamples {
+    /// Milliseconds from handling the first key to its presented frame.
+    key_to_frame: Vec<f64>,
+    elapsed: Duration,
+}
+
+fn run_input(exe: &Path, t: &InputTest) -> Result<InputSamples, String> {
+    let start = Instant::now();
+    let runs = (t.runs + 1).to_string();
+    let mut command = Command::new(exe);
+    command
+        .args(["--bench-keys", t.keys, "--bench-runs", &runs])
+        .arg(fixture_dir().join(t.fixture));
+    let out =
+        run_traced(&mut command, Duration::from_secs(10)).map_err(|e| format!("{}: {e}", t.id))?;
+    let mut first = Vec::new();
+    for line in out.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let (step, ms) = line
+            .strip_prefix("bench.")
+            .and_then(|l| l.split_once("_ms="))
+            .ok_or_else(|| format!("{}: unexpected output line {line:?}", t.id))?;
+        let ms = ms
+            .parse::<f64>()
+            .ok()
+            .filter(|ms| ms.is_finite() && *ms >= 0.0)
+            .ok_or_else(|| format!("{}: invalid value in {line:?}", t.id))?;
+        if step == "0" {
+            first.push(ms);
+        }
+    }
+    if first.len() != t.runs + 1 {
+        return Err(format!(
+            "{}: {} of {} repetitions reported",
+            t.id,
+            first.len(),
+            t.runs + 1
+        ));
+    }
+    first.remove(0);
+    let elapsed = start.elapsed();
+    if elapsed > t.cap {
+        return Err(format!(
+            "{} took {:.2} s, over its {} s cap",
+            t.id,
+            elapsed.as_secs_f64(),
+            t.cap.as_secs()
+        ));
+    }
+    Ok(InputSamples {
+        key_to_frame: first,
+        elapsed,
+    })
+}
+
 fn command_output(program: &str, args: &[&str]) -> String {
     Command::new(program)
         .args(args)
@@ -826,7 +910,7 @@ pub fn bench_perf(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let (app, version) = match crate::app_info() {
+    let info = match crate::app_info() {
         Ok(info) => info,
         Err(e) => {
             eprintln!("{e}");
@@ -834,7 +918,9 @@ pub fn bench_perf(args: &[String]) -> ExitCode {
         }
     };
     println!(
-        "{app} {version}, Performance Benchmark v{VERSION}{}, {}, {}",
+        "{} {}, Performance Benchmark v{VERSION}{}, {}, {}",
+        info.name,
+        info.version,
         if short { " (short)" } else { "" },
         command_output("rustc", &["--version"]),
         std::env::var("PROCESSOR_IDENTIFIER").unwrap_or_default(),
@@ -842,7 +928,7 @@ pub fn bench_perf(args: &[String]) -> ExitCode {
     println!();
     let exe = release_exe();
     let mut results = Vec::new();
-    for t in LOAD_TESTS.iter().filter(|t| !short || short_includes(t)) {
+    for t in LOAD_TESTS.iter().filter(|t| !short || short_includes(t.id)) {
         match run_load(&exe, t) {
             Ok(samples) => results.push((t, samples)),
             Err(e) => {
@@ -851,9 +937,22 @@ pub fn bench_perf(args: &[String]) -> ExitCode {
             }
         }
     }
+    let mut inputs = Vec::new();
+    for t in INPUT_TESTS
+        .iter()
+        .filter(|t| !short || short_includes(t.id))
+    {
+        match run_input(&exe, t) {
+            Ok(samples) => inputs.push((t, samples)),
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
     let total = started.elapsed();
     if short {
-        print_short(&results);
+        print_short(&results, &inputs);
         println!();
         println!("Medians. Total {:.1} s.", total.as_secs_f64());
         return ExitCode::SUCCESS;
@@ -882,6 +981,21 @@ pub fn bench_perf(args: &[String]) -> ExitCode {
         );
     }
     println!();
+    println!("| ID  | Test                     | Key to frame [ms] | p95 [ms] | Time [s] |");
+    println!("| --- | ------------------------ | ----------------- | -------- | -------- |");
+    for (t, samples) in &inputs {
+        let mut sorted = samples.key_to_frame.clone();
+        sorted.sort_by(f64::total_cmp);
+        println!(
+            "| {:<3} | {:<24} | {:>17.2} | {:>8.2} | {:>8.2} |",
+            t.id,
+            t.label,
+            median(&samples.key_to_frame),
+            percentile(&sorted, 0.95),
+            samples.elapsed.as_secs_f64()
+        );
+    }
+    println!();
     println!(
         "Medians. Fixtures {:.2} s; total {:.1} s (cap {} s, {} s reserved for interaction tests). Not run (need the scripted input mode): {PENDING}.",
         fixtures.as_secs_f64(),
@@ -896,12 +1010,19 @@ pub fn bench_perf(args: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn print_short(results: &[(&LoadTest, Samples)]) {
+fn print_short(results: &[(&LoadTest, Samples)], inputs: &[(&InputTest, InputSamples)]) {
     let rows: Vec<[String; 4]> = SHORT
         .iter()
         .map(|r| {
             let samples = results.iter().find(|(t, _)| t.id == r.id).map(|(_, s)| s);
+            let input = inputs.iter().find(|(t, _)| t.id == r.id).map(|(_, s)| s);
             let (measure, result) = match (&r.measure, samples) {
+                (Measure::KeyToFrame, _) => (
+                    "Key to frame".to_owned(),
+                    input.map_or_else(String::new, |s| {
+                        format!("{:.2} ms", median(&s.key_to_frame))
+                    }),
+                ),
                 (Measure::FirstPaint, Some(s)) => (
                     "Time to first frame".to_owned(),
                     format!("{:.1} ms", median(&s.first_paint)),
@@ -967,16 +1088,25 @@ mod tests {
     }
 
     #[test]
-    fn short_rows_measure_existing_load_tests() {
+    fn short_rows_measure_existing_tests() {
         for row in SHORT {
             let test = LOAD_TESTS.iter().find(|t| t.id == row.id);
+            let input = INPUT_TESTS.iter().find(|t| t.id == row.id);
             match row.measure {
                 Measure::NotMeasured(_) | Measure::NotImplemented(_) => {
-                    assert!(test.is_none(), "{} is implemented", row.id)
+                    assert!(
+                        test.is_none() && input.is_none(),
+                        "{} is implemented",
+                        row.id
+                    )
                 }
                 Measure::FileRead => assert!(test.is_some_and(|t| t.loaded), "{}", row.id),
+                Measure::KeyToFrame => assert!(input.is_some(), "{} is not an input test", row.id),
                 _ => assert!(test.is_some(), "{} is not a load test", row.id),
             }
+        }
+        for t in INPUT_TESTS {
+            assert!(t.keys.split(',').all(|k| !k.trim().is_empty()), "{}", t.id);
         }
         let table = markdown_table(
             ["A", "Bb", "C"],

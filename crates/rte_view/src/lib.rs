@@ -4,8 +4,17 @@
 //! All geometry is integer: every character occupies one or two cells of a
 //! fixed size (monospaced font, LTR, no shaping).
 
+mod popup;
+
+pub use popup::{
+    Image, Layer, PaletteFrame, PaletteGeometry, PaletteRow, PanelFrame, PanelGeometry, PanelLine,
+    Star, Tone, draw_palette, draw_panel,
+};
+
 use rte_edit::{Selection, column_of, content_range, offset_in_line};
 use rte_text::Snapshot;
+use std::fmt::Write;
+
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Color as `0x00RRGGBB`.
@@ -35,6 +44,15 @@ pub struct Theme {
     pub at_risk: Color,
     pub prompt_background: Color,
     pub prompt_text: Color,
+    pub popup_background: Color,
+    pub popup_border: Color,
+    pub popup_input: Color,
+    pub popup_dim: Color,
+    /// Matched characters of a filtered row.
+    pub popup_match: Color,
+    pub popup_selected: Color,
+    pub favorite: Color,
+    pub link: Color,
 }
 
 impl Theme {
@@ -53,6 +71,14 @@ impl Theme {
         at_risk: 0xE0A040,
         prompt_background: 0x5A3E14,
         prompt_text: 0xF0E0C0,
+        popup_background: 0x26282C,
+        popup_border: 0x3E4148,
+        popup_input: 0x1B1C1F,
+        popup_dim: 0x80858F,
+        popup_match: 0x5FB3F0,
+        popup_selected: 0x264F78,
+        favorite: 0xE8A33A,
+        link: 0x5FB3F0,
     };
 }
 
@@ -222,6 +248,8 @@ pub struct DisplayList {
     pub glyphs: Vec<Glyph>,
     /// Filled after the glyphs (carets).
     pub overlays: Vec<Fill>,
+    /// Drawn last, above everything else (palette, panels).
+    pub popup: Layer,
 }
 
 impl DisplayList {
@@ -229,6 +257,7 @@ impl DisplayList {
         self.fills.clear();
         self.glyphs.clear();
         self.overlays.clear();
+        self.popup.clear();
     }
 }
 
@@ -236,6 +265,8 @@ impl DisplayList {
 #[derive(Default)]
 pub struct ViewBuilder {
     line: Vec<u8>,
+    /// Line-number text, reused between rows and frames.
+    number: String,
 }
 
 /// Inputs of one frame.
@@ -284,7 +315,7 @@ impl ViewBuilder {
 
         let title_y = layout.title.y + (layout.title.h.saturating_sub(cell.height) / 2) as i32;
         let title_cols = text_run(
-            out,
+            &mut out.glyphs,
             chrome.title,
             cell.width as i32,
             title_y,
@@ -294,7 +325,15 @@ impl ViewBuilder {
         );
         if let Some(color) = chrome.title_mark {
             let x = (cell.width * (title_cols + 2)) as i32;
-            text_run(out, "\u{25CF}", x, title_y, cell, color, layout.title);
+            text_run(
+                &mut out.glyphs,
+                "\u{25CF}",
+                x,
+                title_y,
+                cell,
+                color,
+                layout.title,
+            );
         }
         // Title columns: margin, title, then a gap and the marker when shown.
         let title_end =
@@ -305,7 +344,7 @@ impl ViewBuilder {
         let divider_x = name_x - i64::from(2 * cell.width);
         if divider_x >= i64::from(title_end + cell.width) {
             text_run(
-                out,
+                &mut out.glyphs,
                 "\u{2502}",
                 divider_x as i32,
                 title_y,
@@ -314,7 +353,7 @@ impl ViewBuilder {
                 layout.title,
             );
             text_run(
-                out,
+                &mut out.glyphs,
                 chrome.app_name,
                 name_x as i32,
                 title_y,
@@ -325,7 +364,7 @@ impl ViewBuilder {
         }
         let status_y = layout.status.y + (layout.status.h.saturating_sub(cell.height) / 2) as i32;
         text_run(
-            out,
+            &mut out.glyphs,
             chrome.status_left,
             cell.width as i32,
             status_y,
@@ -336,7 +375,7 @@ impl ViewBuilder {
         let right_w = chrome.status_right.chars().count() as i32 * cell.width as i32;
         let right_x = layout.status.w as i32 - right_w - cell.width as i32;
         text_run(
-            out,
+            &mut out.glyphs,
             chrome.status_right,
             right_x,
             status_y,
@@ -345,7 +384,6 @@ impl ViewBuilder {
             layout.status,
         );
 
-        let mut number = String::new();
         for row in 0..layout.rows {
             let line = scroll.top_line + u64::from(row);
             let Some(range) = snapshot.line_range(line) else {
@@ -353,11 +391,20 @@ impl ViewBuilder {
             };
             let y = layout.text.y + (row * cell.height) as i32;
             if options.line_numbers {
+                let number = &mut self.number;
                 number.clear();
-                number.push_str(&(line + 1).to_string());
+                let _ = write!(number, "{}", line + 1);
                 let right = layout.gutter.x + layout.gutter.w as i32 - cell.width as i32;
                 let x = right - number.len() as i32 * cell.width as i32;
-                text_run(out, &number, x, y, cell, theme.line_number, layout.gutter);
+                text_run(
+                    &mut out.glyphs,
+                    number,
+                    x,
+                    y,
+                    cell,
+                    theme.line_number,
+                    layout.gutter,
+                );
             }
 
             let end = range.end.min(range.start + ROW_SCAN_LIMIT as u64);
@@ -554,7 +601,7 @@ pub fn hit_test(
 
 /// Draws `text` from `(x, y)` and returns the cells it occupies.
 fn text_run(
-    out: &mut DisplayList,
+    out: &mut Vec<Glyph>,
     text: &str,
     x: i32,
     y: i32,
@@ -570,7 +617,7 @@ fn text_run(
             && gx + (width * cell.width) as i32 <= clip.x + clip.w as i32
             && !ch.is_whitespace()
         {
-            out.glyphs.push(Glyph {
+            out.push(Glyph {
                 x: gx,
                 y,
                 ch,

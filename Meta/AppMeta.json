@@ -1,4 +1,7 @@
 {
-  "name": "RoyiTextEditor",
-  "version": "0.1.0"
+  "name": "Royi Text Editor",
+  "file name": "RoyiTextEditor",
+  "version": "0.2.0",
+  "repository": "https://github.com/RoyiAvital/RoyiTextEditor",
+  "documentation": "https://RoyiAvital.github.io/RoyiTextEditor"
 }

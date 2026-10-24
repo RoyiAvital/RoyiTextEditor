@@ -5,10 +5,16 @@
 
 #![windows_subsystem = "windows"]
 
+mod bench;
 mod clip;
+mod commands;
+mod config;
 mod document;
 mod editor;
+mod favorites;
+mod fuzzy;
 mod loader;
+mod palette;
 mod save;
 mod trace;
 
@@ -31,11 +37,15 @@ const WINDOW_SIZE: (u32, u32) = (1100, 750);
 struct Args {
     path: Option<PathBuf>,
     read_only: bool,
-    /// `--syntax <id>`: language id overriding detection by file name.
+    /// `--syntax <id>`: language id overriding detection by file name;
+    /// `none` or `off` (any case) disables highlighting.
     syntax: Option<String>,
     trace_startup: bool,
     exit_after_first_frame: bool,
     exit_after_load: bool,
+    /// `--bench-keys <keys>` and `--bench-runs <n>`: scripted input benchmark.
+    bench_keys: Option<String>,
+    bench_runs: Option<String>,
 }
 
 fn parse_args(raw: impl IntoIterator<Item = OsString>) -> Args {
@@ -46,6 +56,8 @@ fn parse_args(raw: impl IntoIterator<Item = OsString>) -> Args {
         trace_startup: false,
         exit_after_first_frame: false,
         exit_after_load: false,
+        bench_keys: None,
+        bench_runs: None,
     };
     let mut raw = raw.into_iter();
     while let Some(arg) = raw.next() {
@@ -55,14 +67,35 @@ fn parse_args(raw: impl IntoIterator<Item = OsString>) -> Args {
             Some("--trace-startup") => args.trace_startup = true,
             Some("--exit-after-first-frame") => args.exit_after_first_frame = true,
             Some("--exit-after-load") => args.exit_after_load = true,
+            Some("--bench-keys") => args.bench_keys = raw.next().and_then(|k| k.into_string().ok()),
+            Some("--bench-runs") => args.bench_runs = raw.next().and_then(|n| n.into_string().ok()),
             _ => args.path = Some(PathBuf::from(arg)),
         }
     }
     args
 }
 
+impl Args {
+    fn highlighting(&self) -> bool {
+        !self
+            .syntax
+            .as_deref()
+            .is_some_and(|id| id.eq_ignore_ascii_case("none") || id.eq_ignore_ascii_case("off"))
+    }
+}
+
 fn main() {
     let args = parse_args(std::env::args_os().skip(1));
+    let bench = match &args.bench_keys {
+        None => None,
+        Some(keys) => match bench::parse(keys, args.bench_runs.as_deref().unwrap_or("1")) {
+            Ok(script) => Some(script),
+            Err(e) => {
+                eprintln!("--bench-keys: {e}");
+                std::process::exit(2);
+            }
+        },
+    };
     let mut trace = Trace::new(args.trace_startup);
     trace.mark("main");
     let dpi = rte_platform::system_dpi();
@@ -82,6 +115,13 @@ fn main() {
     });
 
     let title = window_title(args.path.as_deref(), false);
+    // The configuration and user state live beside the executable (portable).
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(PathBuf::from));
+    let (config, config_problem) = exe_dir.as_ref().map_or_else(Default::default, |dir| {
+        config::load(&dir.join(config::FILE_NAME))
+    });
     let window = match Window::create(&WindowOptions {
         title: &title,
         width: WINDOW_SIZE.0 * dpi / 96,
@@ -108,6 +148,11 @@ fn main() {
             read_only: args.read_only,
             exit_after_first_frame: args.exit_after_first_frame,
             exit_after_load: args.exit_after_load,
+            recent_count: config.recent_count,
+            user_dir: exe_dir.map(|dir| dir.join("UserSettings")),
+            notice: config_problem,
+            highlighting: args.highlighting(),
+            bench,
         },
         trace,
         Arc::new(SystemFiles),
@@ -134,5 +179,14 @@ mod tests {
         let args = parse(&["a.ipynb", "--syntax"]);
         assert_eq!(args.syntax, None);
         assert_eq!(args.path, Some(PathBuf::from("a.ipynb")));
+    }
+
+    #[test]
+    fn syntax_none_or_off_disables_highlighting() {
+        assert!(parse(&["a.txt"]).highlighting());
+        assert!(parse(&["--syntax", "json"]).highlighting());
+        for id in ["none", "None", "OFF", "off"] {
+            assert!(!parse(&["--syntax", id, "a.txt"]).highlighting(), "{id}");
+        }
     }
 }

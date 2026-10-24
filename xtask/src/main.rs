@@ -13,7 +13,7 @@
 //!   `Perfromance.md`); `--print-hashes` regenerates the fixtures and prints
 //!   their hashes.
 //! - `package`: builds the release, checks imports and writes
-//!   `target/package/<name>-<version>-windows-x86_64.zip` (`Meta/AppMeta.json`); prints its path last.
+//!   `target/package/<file name>-<version>-windows-x86_64.zip` (`Meta/AppMeta.json`); prints its path last.
 
 mod perf;
 
@@ -27,6 +27,8 @@ use std::time::{Duration, Instant};
 const GATE_MS: f64 = 100.0;
 /// Upper bound of one traced application run.
 const RUN_TIMEOUT: Duration = Duration::from_secs(10);
+/// Cargo binary name; the `rte_app` build script checks it equals `file name`
+/// in `Meta/AppMeta.json`.
 const APP: &str = "RoyiTextEditor";
 const FORBIDDEN_DLLS: &[&str] = &[
     "libgcc_s_seh-1.dll",
@@ -72,8 +74,16 @@ fn release_exe() -> PathBuf {
         .join(format!("{APP}.exe"))
 }
 
-/// `(name, version)` from `Meta/AppMeta.json`.
-fn app_info() -> Result<(String, String), String> {
+/// Fields of `Meta/AppMeta.json`.
+pub struct AppInfo {
+    /// Display name.
+    pub name: String,
+    /// Executable and archive name.
+    pub file_name: String,
+    pub version: String,
+}
+
+fn app_info() -> Result<AppInfo, String> {
     let path = root().join("Meta").join("AppMeta.json");
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let info: serde_json::Value =
@@ -84,7 +94,11 @@ fn app_info() -> Result<(String, String), String> {
             .map(str::to_owned)
             .ok_or_else(|| format!("{}: no string field `{key}`", path.display()))
     };
-    Ok((field("name")?, field("version")?))
+    Ok(AppInfo {
+        name: field("name")?,
+        file_name: field("file name")?,
+        version: field("version")?,
+    })
 }
 
 fn build_release() -> bool {
@@ -180,14 +194,14 @@ fn package() -> ExitCode {
     if !check_imports(&exe) {
         return ExitCode::FAILURE;
     }
-    let (app, version) = match app_info() {
+    let info = match app_info() {
         Ok(info) => info,
         Err(e) => {
             eprintln!("{e}");
             return ExitCode::FAILURE;
         }
     };
-    let name = format!("{app}-{version}-windows-x86_64");
+    let name = format!("{}-{}-windows-x86_64", info.file_name, info.version);
     let out = root().join("target").join("package");
     let stage = out.join(&name);
     let _ = std::fs::remove_dir_all(&stage);
