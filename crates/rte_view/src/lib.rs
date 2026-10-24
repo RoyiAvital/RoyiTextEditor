@@ -4,14 +4,19 @@
 //! All geometry is integer: every character occupies one or two cells of a
 //! fixed size (monospaced font, LTR, no shaping).
 
+mod find;
 mod popup;
 
+pub use find::{
+    FIND_SYMBOLS, FindField, FindFrame, FindGeometry, FindHit, LINE_BREAK, ReplaceGeometry,
+    Severity, TOGGLES, draw_find,
+};
 pub use popup::{
     Image, Layer, PaletteFrame, PaletteGeometry, PaletteRow, PanelFrame, PanelGeometry, PanelLine,
     Star, Tone, draw_palette, draw_panel,
 };
 
-use rte_edit::{Selection, column_of, content_range, offset_in_line};
+use rte_edit::{Selection, column_after, column_of, content_range, offset_in_line};
 use rte_text::Snapshot;
 use std::fmt::Write;
 
@@ -53,6 +58,16 @@ pub struct Theme {
     pub popup_selected: Color,
     pub favorite: Color,
     pub link: Color,
+    /// Visible search matches other than the current one.
+    pub search_match: Color,
+    /// The current match (also the selection) and its border.
+    pub search_current: Color,
+    pub search_current_border: Color,
+    /// Find-in-selection range.
+    pub search_range: Color,
+    pub error_text: Color,
+    pub error_background: Color,
+    pub error_border: Color,
 }
 
 impl Theme {
@@ -79,6 +94,13 @@ impl Theme {
         popup_selected: 0x264F78,
         favorite: 0xE8A33A,
         link: 0x5FB3F0,
+        search_match: 0x603317,
+        search_current: 0x515C6A,
+        search_current_border: 0x8FA3BA,
+        search_range: 0x2A2D33,
+        error_text: 0xF48771,
+        error_background: 0x5A1D1D,
+        error_border: 0xE05252,
     };
 }
 
@@ -281,6 +303,16 @@ pub struct Frame<'a> {
     /// Sorted, non-overlapping selections.
     pub selections: &'a [Selection],
     pub caret: CaretStyle,
+    pub highlights: Highlights<'a>,
+}
+
+/// Search decorations of a frame.
+#[derive(Clone, Debug, Default)]
+pub struct Highlights<'a> {
+    /// Sorted, non-overlapping matches (at least the visible ones).
+    pub matches: &'a [std::ops::Range<u64>],
+    /// Find-in-selection range.
+    pub scope: Option<std::ops::Range<u64>>,
 }
 
 impl ViewBuilder {
@@ -296,6 +328,7 @@ impl ViewBuilder {
             options,
             selections: _,
             caret,
+            highlights: _,
         } = *frame;
         let fill = |out: &mut DisplayList, rect: Rect, color| out.fills.push(Fill { rect, color });
         let status_background = if chrome.prompt {
@@ -437,7 +470,17 @@ impl ViewBuilder {
                 h: cell.height,
             };
             let content = range.start..content_end;
+            let row_ranges = RowRanges {
+                row: row_rect,
+                bytes,
+                content: content.clone(),
+                has_break: crlf,
+            };
+            if let Some(scope) = &frame.highlights.scope {
+                row_ranges.fill(out, frame, std::slice::from_ref(scope), theme.search_range);
+            }
             selection_row(out, frame, row_rect, bytes, content.clone(), crlf);
+            row_ranges.matches(out, frame);
             let text_x = layout.text.x;
             let clip = layout.text;
             layout_line(
@@ -462,6 +505,138 @@ impl ViewBuilder {
             if caret != CaretStyle::Hidden {
                 caret_row(out, frame, row_rect, bytes, content);
             }
+        }
+    }
+}
+
+/// One visible row for drawing range fills.
+struct RowRanges<'b> {
+    row: Rect,
+    bytes: &'b [u8],
+    content: std::ops::Range<u64>,
+    has_break: bool,
+}
+
+impl RowRanges<'_> {
+    /// Screen rectangle of `range` on this row, if visible.
+    fn rect(&self, frame: &Frame<'_>, range: &std::ops::Range<u64>) -> Option<Rect> {
+        let content = &self.content;
+        if range.start > content.end || range.end < content.start || range.is_empty() {
+            return None;
+        }
+        let tab = frame.options.tab_width;
+        let column = |offset: u64| column_of(self.bytes, (offset - content.start) as usize, tab);
+        let start = column(range.start.max(content.start));
+        let end = column(range.end.min(content.end));
+        self.rect_cols(frame, range, start, end)
+    }
+
+    /// Rectangle of `range` given the columns of its visible part.
+    fn rect_cols(
+        &self,
+        frame: &Frame<'_>,
+        range: &std::ops::Range<u64>,
+        start: u64,
+        mut end: u64,
+    ) -> Option<Rect> {
+        if range.end > self.content.end && self.has_break {
+            end += 1;
+        }
+        let first_col = frame.scroll.first_col;
+        if end <= first_col || end <= start {
+            return None;
+        }
+        let max = u64::from(frame.layout.cols) + 2;
+        let s = start.saturating_sub(first_col).min(max) as u32;
+        let e = (end - first_col).min(max) as u32;
+        let cell_w = frame.cell.width;
+        let rect = Rect {
+            x: self.row.x + (s * cell_w) as i32,
+            y: self.row.y,
+            w: (e - s) * cell_w,
+            h: self.row.h,
+        };
+        rect.intersect(&frame.layout.text)
+    }
+
+    /// Fills the parts of sorted `ranges` on this row.
+    fn fill(
+        &self,
+        out: &mut DisplayList,
+        frame: &Frame<'_>,
+        ranges: &[std::ops::Range<u64>],
+        color: Color,
+    ) {
+        let first = ranges.partition_point(|r| r.end < self.content.start);
+        for range in &ranges[first..] {
+            if range.start > self.content.end {
+                break;
+            }
+            if let Some(rect) = self.rect(frame, range) {
+                out.fills.push(Fill { rect, color });
+            }
+        }
+    }
+
+    /// Match fills; a match equal to a selection is the current one and
+    /// gets a border. Columns are computed in one pass over the row.
+    fn matches(&self, out: &mut DisplayList, frame: &Frame<'_>) {
+        let theme = frame.theme;
+        let matches = frame.highlights.matches;
+        let content = &self.content;
+        let tab = frame.options.tab_width;
+        let last_col = frame.scroll.first_col + u64::from(frame.layout.cols) + 2;
+        let mut at = (0usize, 0u64);
+        let mut column = |offset: u64| {
+            let offset = (offset - content.start) as usize;
+            if offset < at.0 {
+                at = (0, 0);
+            }
+            at = (offset, column_after(self.bytes, at, offset, tab));
+            at.1
+        };
+        let first = matches.partition_point(|r| r.end < content.start);
+        for range in &matches[first..] {
+            if range.start > content.end {
+                break;
+            }
+            if range.end < content.start || range.is_empty() {
+                continue;
+            }
+            let start = column(range.start.max(content.start));
+            if start > last_col {
+                break;
+            }
+            let end = column(range.end.min(content.end));
+            let Some(rect) = self.rect_cols(frame, range, start, end) else {
+                continue;
+            };
+            let current = frame
+                .selections
+                .binary_search_by_key(&(range.start, range.end), |s| (s.start(), s.end()))
+                .is_ok();
+            if !current {
+                out.fills.push(Fill {
+                    rect,
+                    color: theme.search_match,
+                });
+                continue;
+            }
+            let border = theme.search_current_border;
+            out.fills.push(Fill {
+                rect,
+                color: border,
+            });
+            let inner = Rect {
+                x: rect.x + 1,
+                y: rect.y + 1,
+                w: rect.w.saturating_sub(2),
+                h: rect.h.saturating_sub(2),
+            };
+            out.fills.push(Fill {
+                rect: inner,
+                color: theme.search_current,
+            });
         }
     }
 }
@@ -798,6 +973,24 @@ mod tests {
         selections: &[Selection],
         caret: CaretStyle,
     ) -> (Layout, DisplayList) {
+        build_full(
+            bytes,
+            width,
+            height,
+            selections,
+            caret,
+            Highlights::default(),
+        )
+    }
+
+    fn build_full(
+        bytes: &[u8],
+        width: u32,
+        height: u32,
+        selections: &[Selection],
+        caret: CaretStyle,
+        highlights: Highlights<'_>,
+    ) -> (Layout, DisplayList) {
         let snapshot = Snapshot::from_bytes(bytes);
         let cell = Cell {
             width: 10,
@@ -824,6 +1017,7 @@ mod tests {
                 options: &options,
                 selections,
                 caret,
+                highlights,
             },
             &mut list,
         );
@@ -918,6 +1112,89 @@ mod tests {
             ]
         );
         assert!(list.overlays.is_empty());
+    }
+
+    #[test]
+    fn matches_scope_and_the_current_match_are_filled() {
+        let matches = [0..2, 3..5];
+        let highlights = Highlights {
+            matches: &matches,
+            scope: Some(0..7),
+        };
+        let sels = [Selection::new(3, 5)];
+        let (layout, list) = build_full(
+            b"ab\nab\nab",
+            400,
+            200,
+            &sels,
+            CaretStyle::Hidden,
+            highlights,
+        );
+        let t = Theme::DARK;
+        let rects = |color| -> Vec<Rect> {
+            list.fills
+                .iter()
+                .filter(|f| f.color == color)
+                .map(|f| f.rect)
+                .collect()
+        };
+        let (x, y) = (layout.text.x, layout.text.y);
+        assert_eq!(rects(t.search_match), vec![Rect { x, y, w: 20, h: 20 }]);
+        assert_eq!(rects(t.search_current_border).len(), 1);
+        assert_eq!(
+            rects(t.search_current),
+            vec![Rect {
+                x: x + 1,
+                y: y + 21,
+                w: 18,
+                h: 18
+            }]
+        );
+        assert_eq!(
+            rects(t.search_range).len(),
+            3,
+            "rows 0, 1 and the start of 2"
+        );
+    }
+
+    #[test]
+    fn dense_matches_on_a_long_row_draw_only_visible_columns() {
+        let text = "a\tb".repeat(ROW_SCAN_LIMIT / 3);
+        let matches: Vec<_> = (0..text.len() as u64).map(|i| i..i + 1).collect();
+        let highlights = Highlights {
+            matches: &matches,
+            scope: None,
+        };
+        let started = std::time::Instant::now();
+        let (layout, list) = build_full(
+            text.as_bytes(),
+            400,
+            200,
+            &[],
+            CaretStyle::Hidden,
+            highlights,
+        );
+        assert!(started.elapsed() < std::time::Duration::from_millis(200));
+        let fills: Vec<Rect> = list
+            .fills
+            .iter()
+            .filter(|f| f.color == Theme::DARK.search_match)
+            .map(|f| f.rect)
+            .collect();
+        let cols = layout.text.w / 10;
+        assert!(fills.len() as u32 <= cols + 2, "{}", fills.len());
+        // Tab stops follow the incremental columns: `a` 0, tab 1-3, `b` 4.
+        let x = layout.text.x;
+        assert_eq!(
+            fills[1],
+            Rect {
+                x: x + 10,
+                y: layout.text.y,
+                w: 30,
+                h: 20
+            }
+        );
+        assert_eq!(fills[2].x, x + 40);
     }
 
     #[test]

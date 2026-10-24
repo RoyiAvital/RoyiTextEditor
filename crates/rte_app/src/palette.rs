@@ -135,6 +135,40 @@ impl Query {
         (self.caret, self.anchor) != before
     }
 
+    /// Replaces the text (control characters except `\n` removed, up to
+    /// [`QUERY_MAX`] characters) and selects it all.
+    pub fn set(&mut self, text: &str) {
+        self.text.clear();
+        self.caret = 0;
+        self.anchor = 0;
+        self.insert_lines(text);
+        self.select_all();
+    }
+
+    /// Like [`Query::insert`], but keeps line breaks (`\r\n` and `\r`
+    /// become `\n`).
+    pub fn insert_lines(&mut self, text: &str) -> bool {
+        let removed = self.delete_selection();
+        let room = QUERY_MAX.saturating_sub(self.text.chars().count());
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        let mut added = false;
+        for ch in text
+            .chars()
+            .filter(|&c| c == '\n' || !c.is_control())
+            .take(room)
+        {
+            self.text.insert(self.caret, ch);
+            self.caret += ch.len_utf8();
+            added = true;
+        }
+        self.anchor = self.caret;
+        removed || added
+    }
+
+    pub fn selected_text(&self) -> &str {
+        &self.text[self.selection()]
+    }
+
     fn prev(&self) -> usize {
         self.text[..self.caret]
             .char_indices()

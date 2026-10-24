@@ -42,12 +42,12 @@ impl Layer {
         self.glyphs.clear();
     }
 
-    fn fill(&mut self, rect: Rect, color: Color) {
+    pub(crate) fn fill(&mut self, rect: Rect, color: Color) {
         self.fills.push(Fill { rect, color });
     }
 
     /// Border and background of a popup.
-    fn frame(&mut self, rect: Rect, theme: &Theme) {
+    pub(crate) fn frame(&mut self, rect: Rect, theme: &Theme) {
         self.fill(rect, theme.popup_border);
         if rect.w > 2 && rect.h > 2 {
             let inner = Rect {

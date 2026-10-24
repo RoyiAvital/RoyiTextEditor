@@ -9,6 +9,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "aho-corasick"
+version = "1.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c982642fa9e8606056828ee9a8505737230110bb1099153c79efe865c59d12ba"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "anstyle"
 version = "1.0.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -46,12 +55,27 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bit-set"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08807e080ed7f9d5433fa9b275196cfc35414f66a0c79d864dc51a0d825231a3"
+dependencies = [
+ "bit-vec 0.8.0",
+]
+
+[[package]]
+name = "bit-set"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "56d87354e4229f54a44f7bf2435906a4656dba36026ab6eaca629a2c436a691c"
 dependencies = [
- "bit-vec",
+ "bit-vec 0.10.1",
 ]
+
+[[package]]
+name = "bit-vec"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e764a1d40d510daf35e07be9eb06e75770908c27d411ee6c92109c9840eaaf7"
 
 [[package]]
 name = "bit-vec"
@@ -261,6 +285,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fancy-regex"
+version = "0.19.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d301f5bf187b3c295fce6468d3875037a0bccc5f6b151c63cac2f85babf21912"
+dependencies = [
+ "bit-set 0.8.0",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -460,8 +495,8 @@ version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8530004ccb15eae51c7e40009fbe317f341f804db54dc033eec1c50be28cfa0"
 dependencies = [
- "bit-set",
- "bit-vec",
+ "bit-set 0.11.1",
+ "bit-vec 0.10.1",
  "bitflags 2.13.2",
  "chacha20",
  "core_detect",
@@ -532,6 +567,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "regex-automata"
+version = "0.4.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad8553b9b26413251cbf30e620595c7a41b3887f03da04579c0e6b0d6a06b4b2"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-syntax",
+]
+
+[[package]]
+name = "regex-cursor"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0497c781d2f982ae8284d2932aee6a877e58a4541daa5e8fadc18cc75c23a61d"
+dependencies = [
+ "log",
+ "memchr",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
 name = "regex-lite"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -584,13 +642,14 @@ checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 
 [[package]]
 name = "rte_app"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "resvg",
  "rte_assets",
  "rte_edit",
  "rte_platform",
  "rte_render",
+ "rte_search",
  "rte_text",
  "rte_view",
  "saphyr-parser",
@@ -601,11 +660,11 @@ dependencies = [
 
 [[package]]
 name = "rte_assets"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "rte_edit"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "divan",
  "proptest",
@@ -615,14 +674,14 @@ dependencies = [
 
 [[package]]
 name = "rte_platform"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "windows-sys",
 ]
 
 [[package]]
 name = "rte_render"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "divan",
  "rte_assets",
@@ -633,8 +692,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rte_search"
+version = "0.3.0"
+dependencies = [
+ "fancy-regex",
+ "memchr",
+ "proptest",
+ "regex-cursor",
+ "rte_text",
+]
+
+[[package]]
 name = "rte_text"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "divan",
  "memchr",
@@ -644,7 +714,7 @@ dependencies = [
 
 [[package]]
 name = "rte_view"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "rte_edit",
  "rte_text",
@@ -1004,7 +1074,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde_json",
  "xxhash-rust",

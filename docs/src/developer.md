@@ -69,6 +69,7 @@ suite or performance suite unless requested; see [AGENTS.md](https://github.com/
 | Run the documentation build | `./tools/Build-Docs.ps1` |
 | Measure startup | `cargo xtask bench-startup` |
 | Run the short performance report | `cargo xtask bench-perf --short` |
+| Run selected performance tests | `cargo xtask bench-perf --only L01,F01` |
 | Package a release ZIP | `cargo xtask package` |
 
 The workspace and shipped behavior are documented in

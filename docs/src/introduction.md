@@ -56,11 +56,28 @@ opens an empty document and the first save creates it.
 | <kbd>Ctrl</kbd>+<kbd>W</kbd>, <kbd>Alt</kbd>+<kbd>F4</kbd>     | Close; unsaved changes ask first           |
 | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd>, <kbd>F1</kbd>   | Command Palette                            |
 | <kbd>Ctrl</kbd>+<kbd>P</kbd>                                   | Recent and favorite commands               |
+| <kbd>Ctrl</kbd>+<kbd>F</kbd> / <kbd>Ctrl</kbd>+<kbd>H</kbd>     | Find / replace                             |
+| <kbd>Ctrl</kbd>+<kbd>D</kbd>, <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd> | Add next occurrence, select all occurrences |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Up</kbd> / <kbd>Down</kbd>  | Add a cursor above / below                 |
+| <kbd>Alt</kbd>+click, <kbd>Shift</kbd>+<kbd>Alt</kbd>+drag     | Add a cursor, column selection             |
+
+All keys, including search options and replace, are listed in
+[Keyboard Shortcuts](keyboard-shortcuts.md).
+
+## Search
+
+<kbd>Ctrl</kbd>+<kbd>F</kbd> opens the search box, seeded with the selection
+or the word at the caret. Three modes: **Text** (default), **Glob**
+(<kbd>Alt</kbd>+<kbd>G</kbd>) and **RegEx** (<kbd>Alt</kbd>+<kbd>R</kbd>), with
+Match Case, Whole Word and Find in Selection. Large files are searched on a
+background thread: the count streams in and the editor keeps responding.
+<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Enter</kbd> replaces all matches in one
+undo step.
 
 ## Command Palette
 
 Every command is in the palette, grouped in families: `Application:`, `File:`,
-`Edit:`, `Selection:`, `Go:` and `View:`. Type any part of a name (for example
+`Edit:`, `Selection:`, `Search:`, `Go:` and `View:`. Type any part of a name (for example
 `fsave`), choose with <kbd>Up</kbd> / <kbd>Down</kbd>, run with
 <kbd>Enter</kbd> or a click, close with <kbd>Esc</kbd>.
 
@@ -83,9 +100,12 @@ values keep their defaults.
 
 ```yaml
 palette:
-  recentCount: 3   # recent commands listed by Ctrl+P, 0 to 20
+  recentCount: 3          # recent commands listed by Ctrl+P, 0 to 20
+editor:
+  multiCursorLimit: 10000 # most selections, 1 to 1,000,000
+search:
+  replaceAllMaxMiB: 512   # memory for one Replace All [MiB], 1 to 4096
 ```
 
 > [!NOTE]
-> Syntax highlighting, search and multi-cursor editing are planned for later
-> versions.
+> Syntax highlighting is planned for a later version.

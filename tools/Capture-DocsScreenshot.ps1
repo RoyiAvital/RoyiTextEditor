@@ -1,13 +1,20 @@
+[CmdletBinding()]
+param(
+    [switch] $SearchPanel
+)
+
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.Windows.Forms
 
 $Root = Split-Path -Parent $PSScriptRoot
 $EditorTarget = Join-Path $Root 'target\docs-app'
 $EditorExe = Join-Path $EditorTarget 'release\RoyiTextEditor.exe'
 $Fixture = Join-Path $Root 'docs\src\Untitled'
 $OutputDir = Join-Path $Root 'target\docs-assets'
-$Output = Join-Path $OutputDir 'editor-screenshot.png'
+$OutputName = if ($SearchPanel) { 'search-panel.png' } else { 'editor-screenshot.png' }
+$Output = Join-Path $OutputDir $OutputName
 
 $ActualText = [IO.File]::ReadAllText($Fixture, [Text.Encoding]::UTF8).Replace("`r`n", "`n")
 $ExpectedText = "Text is the optimal universal IO interface`nText is the final frontier of interfaces`n"
@@ -88,6 +95,9 @@ try {
     }
     if ([DocsBuildCaptureV2]::GetForegroundWindow() -ne $Window) {
         throw 'Windows did not bring the editor window to the foreground; refusing an unrelated screenshot.'
+    }
+    if ($SearchPanel) {
+        [System.Windows.Forms.SendKeys]::SendWait('^f')
     }
     [void][DocsBuildCaptureV2]::DwmFlush()
 

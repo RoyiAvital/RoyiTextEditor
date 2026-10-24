@@ -16,18 +16,23 @@ pub fn cell_width(ch: char) -> u64 {
 }
 
 /// Calls `f(offset, byte_len, cells_before, cells)` for the characters of
-/// `line` until it returns `false` or `limit` bytes are passed. Returns the
-/// offset and column reached.
+/// `line` from the character boundary `from` (offset, column) until it
+/// returns `false` or `limit` bytes are passed. Returns the offset and column
+/// reached.
 fn walk(
     line: &[u8],
+    from: (usize, u64),
     limit: usize,
     tab_width: u32,
     mut f: impl FnMut(usize, usize, u64, u64) -> bool,
 ) -> (usize, u64) {
     let tab = u64::from(tab_width.max(1));
-    let mut offset = 0;
-    let mut col = 0u64;
-    for chunk in line[..line.len().min(limit)].utf8_chunks() {
+    let (mut offset, mut col) = from;
+    let end = line.len().min(limit);
+    if offset >= end {
+        return (offset, col);
+    }
+    for chunk in line[offset..end].utf8_chunks() {
         for ch in chunk.valid().chars() {
             let cells = if ch == '\t' {
                 (col / tab + 1) * tab - col
@@ -54,8 +59,16 @@ fn walk(
 /// Display column of byte `offset` in `line` (a line's content or a prefix
 /// of it; offsets past the scanned bytes count one column per byte).
 pub fn column_of(line: &[u8], offset: usize, tab_width: u32) -> u64 {
+    column_after(line, (0, 0), offset, tab_width)
+}
+
+/// [`column_of`] continued from a known character boundary `from`
+/// (offset, column) at or before `offset`: sorted ranges of one row cost
+/// one pass over it.
+pub fn column_after(line: &[u8], from: (usize, u64), offset: usize, tab_width: u32) -> u64 {
     let (reached, col) = walk(
         line,
+        from,
         offset.min(COLUMN_SCAN_LIMIT),
         tab_width,
         |o, _, _, _| o < offset,
@@ -69,22 +82,28 @@ pub fn column_of(line: &[u8], offset: usize, tab_width: u32) -> u64 {
 pub fn offset_at_column(line: &[u8], col: u64, tab_width: u32) -> usize {
     let mut target = col;
     let mut found = None;
-    let (reached, end_col) = walk(line, COLUMN_SCAN_LIMIT, tab_width, |o, _, c, cells| {
-        if cells == 0 {
-            return true;
-        }
-        if target <= c {
-            found = Some(o);
-            return false;
-        }
-        if target < c + cells {
-            if (target - c) * 2 < cells {
+    let (reached, end_col) = walk(
+        line,
+        (0, 0),
+        COLUMN_SCAN_LIMIT,
+        tab_width,
+        |o, _, c, cells| {
+            if cells == 0 {
+                return true;
+            }
+            if target <= c {
                 found = Some(o);
                 return false;
             }
-            target = c + cells;
-        }
-        true
-    });
+            if target < c + cells {
+                if (target - c) * 2 < cells {
+                    found = Some(o);
+                    return false;
+                }
+                target = c + cells;
+            }
+            true
+        },
+    );
     found.unwrap_or_else(|| reached + target.saturating_sub(end_col) as usize)
 }

@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<!-- Mockup source for Design/SearchMockup.png (render with Edge headless, scale 2). -->
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+@font-face { font-family: JBM; src: url("../assets/fonts/JetBrainsMono/JetBrainsMono-Regular.ttf"); }
+html, body { margin: 0; background: #141517; }
+body { width: 1240px; padding: 22px 40px 26px; box-sizing: border-box; font-family: "Segoe UI", sans-serif; color: #C8CCD2; }
+h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; color: #E6E8EB; }
+h2 { font-size: 14px; font-weight: 600; margin: 0 0 8px; color: #E6E8EB; }
+p.sub { margin: 0 0 14px; font-size: 13px; color: #8B9099; }
+.cap { font-size: 12.5px; color: #A0A4AB; margin: 8px 0 0; line-height: 1.45; }
+.cap b { color: #D4D4D4; font-weight: 600; }
+kbd { font-family: JBM, Consolas, monospace; font-size: 11.5px; background: #26282C; border: 1px solid #3E4148; border-radius: 3px; padding: 0 4px; color: #D4D4D4; }
+
+.mono, .win, .find, .mini { font-family: JBM, "Cascadia Mono", Consolas, monospace; font-size: 14px; font-variant-ligatures: none; font-feature-settings: "calt" 0, "liga" 0; }
+.win { width: 1160px; background: #1E1F22; box-shadow: 0 8px 28px rgba(0,0,0,.55), 0 0 0 1px #2C2E33; }
+.title { height: 30px; line-height: 30px; background: #18191B; color: #A0A4AB; padding-left: 14px; font-size: 13px; }
+.body { position: relative; padding: 6px 0; }
+.ln { display: flex; height: 20px; line-height: 20px; white-space: pre; color: #D4D4D4; }
+.ln .no { width: 6ch; text-align: right; color: #5C6370; padding-right: 2.5ch; }
+.ln.curline .no { color: #A0A4AB; }
+.status { height: 26px; line-height: 26px; background: #18191B; color: #8B9099; font-size: 13px; display: flex; justify-content: space-between; padding: 0 14px; }
+
+/* Proposed search colors (dark theme). */
+.m   { background: #603317; }                         /* other match */
+.cur { background: #515C6A; outline: 1px solid #8FA3BA; } /* current match, also the selection */
+.sel { background: #264F78; }
+.rng { background: #2A2D33; }                         /* find-in-selection range */
+.caret { display: inline-block; width: 2px; height: 18px; background: #AEAFAD; vertical-align: -4px; margin-right: -2px; }
+
+.find { position: absolute; top: 0; right: 22px; background: #26282C; border: 1px solid #3E4148; border-top: none; box-shadow: 0 3px 10px rgba(0,0,0,.55); display: flex; padding: 5px 6px 5px 2px; font-size: 13.5px; color: #D4D4D4; }
+.find.free { position: relative; right: auto; top: auto; display: inline-flex; border-top: 1px solid #3E4148; }
+.fold { width: 18px; display: flex; align-items: flex-start; justify-content: center; color: #A0A4AB; padding-top: 4px; }
+.fold.open { align-items: center; padding-top: 0; }
+.rows { display: flex; flex-direction: column; gap: 4px; }
+.row { display: flex; align-items: center; gap: 4px; height: 26px; }
+.field { display: flex; align-items: center; width: 34ch; height: 24px; background: #1B1C1F; border: 1px solid #3E4148; padding: 0 2px 0 6px; box-sizing: border-box; }
+.field.focus { border-color: #5FB3F0; }
+.field.bad { border-color: #E05252; }
+.field.warn { border-color: #E0A040; }
+.field .txt { flex: 1; white-space: pre; overflow: hidden; }
+.field .ph { flex: 1; color: #5C6370; }
+.tg { width: 22px; height: 18px; margin-left: 2px; display: flex; align-items: center; justify-content: center; font-size: 12.5px; color: #A0A4AB; border: 1px solid transparent; box-sizing: border-box; }
+.tg.on { background: #264F78; border-color: #5FB3F0; color: #FFFFFF; }
+.tg.u { text-decoration: underline; text-underline-offset: 2px; }
+.count { min-width: 9ch; padding: 0 4px 0 6px; color: #A0A4AB; font-size: 13px; white-space: pre; }
+.count.none { color: #F48771; }
+.btn { width: 22px; height: 22px; display: flex; align-items: center; justify-content: center; color: #C8CCD2; }
+.btn.on { background: #264F78; outline: 1px solid #5FB3F0; color: #FFF; }
+.btn.off { color: #5C6370; }
+.tbtn { height: 22px; padding: 0 8px; display: flex; align-items: center; border: 1px solid #3E4148; color: #C8CCD2; font-size: 12.5px; }
+.msg { position: absolute; left: 20px; top: 34px; width: 34ch; box-sizing: border-box; padding: 3px 7px; font-size: 12.5px; z-index: 2; }
+.msg.bad { background: #5A1D1D; border: 1px solid #E05252; color: #F4D0D0; }
+.msg.warn { background: #5A3E14; border: 1px solid #E0A040; color: #F0E0C0; }
+.tip { position: absolute; background: #26282C; border: 1px solid #3E4148; color: #D4D4D4; padding: 3px 8px; font-size: 12.5px; white-space: nowrap; box-shadow: 0 2px 8px rgba(0,0,0,.5); z-index: 3; }
+
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px 18px; margin-top: 22px; }
+.tile { background: #1E1F22; box-shadow: 0 0 0 1px #2C2E33; padding: 12px 14px 12px; position: relative; }
+.tile .stage { position: relative; height: 84px; }
+.duo { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 22px; }
+.mini { background: #1E1F22; box-shadow: 0 0 0 1px #2C2E33; }
+.mini .body { padding: 4px 0; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 22px; margin-top: 10px; font-size: 12.5px; color: #A0A4AB; align-items: center; }
+.legend > span { white-space: nowrap; }
+.sw { display: inline-block; width: 26px; height: 14px; vertical-align: -2px; margin-right: 6px; }
+</style>
+</head>
+<body>
+
+<h1>Search and Multi-Cursor (M5) — mockup</h1>
+<p class="sub">Dark theme, current palette colors. The search box sits at the top right of the text, below the title strip, and keeps its size on zoom like the palette.</p>
+
+<div class="win">
+  <div class="title">config.rs - Royi Text Editor</div>
+  <div class="body">
+    <div class="find">
+      <div class="fold open">▾</div>
+      <div class="rows">
+        <div class="row">
+          <div class="field focus"><span class="txt">(\w+)_cfg\b</span><span class="tg">Aa</span><span class="tg u">ab</span><span class="tg">*?</span><span class="tg on">.*</span></div>
+          <span class="count">2 of 7</span>
+          <span class="btn">↑</span><span class="btn">↓</span><span class="btn">≡</span><span class="btn">✕</span>
+        </div>
+        <div class="row">
+          <div class="field"><span class="txt">$1_config</span><span class="tg">AB</span></div>
+          <span class="tbtn">Replace</span><span class="tbtn">Replace All</span>
+        </div>
+      </div>
+    </div>
+    <div class="ln"><span class="no">1</span>use std::path::Path;</div>
+    <div class="ln"><span class="no">2</span></div>
+    <div class="ln"><span class="no">3</span>use crate::theme::Theme;</div>
+    <div class="ln"><span class="no">4</span></div>
+    <div class="ln"><span class="no">5</span>pub struct Config {</div>
+    <div class="ln"><span class="no">6</span>    pub <span class="m">user_cfg</span>: String,</div>
+    <div class="ln"><span class="no">7</span>    pub theme: Theme,</div>
+    <div class="ln"><span class="no">8</span>}</div>
+    <div class="ln"><span class="no">9</span></div>
+    <div class="ln"><span class="no">10</span>pub fn load(path: &amp;Path) -&gt; Config {</div>
+    <div class="ln curline"><span class="no">11</span>    let text = <span class="cur">read_cfg</span><span class="caret"></span>(path);</div>
+    <div class="ln"><span class="no">12</span>    let <span class="m">user_cfg</span> = <span class="m">parse_cfg</span>(&amp;text);</div>
+    <div class="ln"><span class="no">13</span>    let theme = <span class="m">default_cfg</span>().theme;</div>
+    <div class="ln"><span class="no">14</span>    Config { <span class="m">user_cfg</span>, theme }</div>
+    <div class="ln"><span class="no">15</span>}</div>
+    <div class="ln"><span class="no">16</span></div>
+    <div class="ln"><span class="no">17</span>fn <span class="m">read_cfg</span>(path: &amp;Path) -&gt; String {</div>
+    <div class="ln"><span class="no">18</span>    std::fs::read_to_string(path).unwrap_or_default()</div>
+    <div class="ln"><span class="no">19</span>}</div>
+  </div>
+  <div class="status"><span>19 lines</span><span>Ln 11, Col 24  ·  8 selected  ·  UTF-8  ·  LF</span></div>
+</div>
+<div class="legend">
+  <span><span class="sw" style="background:#515C6A;outline:1px solid #8FA3BA"></span>Current match (selected)</span>
+  <span><span class="sw" style="background:#603317"></span>Other visible matches</span>
+  <span><span class="sw" style="background:#2A2D33"></span>Find-in-selection range</span>
+  <span><span class="sw" style="background:#264F78;outline:1px solid #5FB3F0"></span>Toggle on</span>
+  <span style="flex-basis:100%"><kbd>Ctrl+H</kbd> Replace open, RegEx on  ·  <kbd>Enter</kbd> next  ·  <kbd>Shift+Enter</kbd> previous  ·  <kbd>Alt+Enter</kbd> select all matches  ·  <kbd>Esc</kbd> close</span>
+  <span style="flex-basis:100%">In the replace field: <kbd>Enter</kbd> or <kbd>Ctrl+Shift+1</kbd> replace one and go to the next  ·  <kbd>Ctrl+Alt+Enter</kbd> Replace All (one undo step)  ·  <kbd>Alt+P</kbd> Preserve Case</span>
+</div>
+
+<div class="grid">
+  <div class="tile">
+    <h2>Text (default) — <kbd>Ctrl+F</kbd></h2>
+    <div class="stage"><div class="find free">
+      <div class="fold">▸</div>
+      <div class="rows"><div class="row">
+        <div class="field focus" style="width:24ch"><span class="txt">cfg</span><span class="tg">Aa</span><span class="tg u">ab</span><span class="tg">*?</span><span class="tg">.*</span></div>
+        <span class="count">2 of 9</span><span class="btn">↑</span><span class="btn">↓</span><span class="btn">≡</span><span class="btn">✕</span>
+      </div></div>
+    </div></div>
+    <p class="cap">Starts with the selection or the word at the caret. Text is found anywhere; <b>ab</b> limits to whole words.</p>
+  </div>
+
+  <div class="tile">
+    <h2>Glob — <kbd>Alt+G</kbd> or click <b>*?</b></h2>
+    <div class="stage"><div class="find free">
+      <div class="fold">▸</div>
+      <div class="rows"><div class="row">
+        <div class="field focus" style="width:24ch"><span class="txt">read_*(</span><span class="tg">Aa</span><span class="tg u">ab</span><span class="tg on">*?</span><span class="tg">.*</span></div>
+        <span class="count">1 of 2</span><span class="btn">↑</span><span class="btn">↓</span><span class="btn">≡</span><span class="btn">✕</span>
+      </div></div>
+    </div>
+    <div class="tip" style="left:150px;top:36px">Use Glob (Alt+G):  ? one char  ·  * any text in the line</div></div>
+    <p class="cap">Glob and RegEx exclude each other; both off is Text.</p>
+  </div>
+
+  <div class="tile">
+    <h2>Invalid RegEx</h2>
+    <div class="stage"><div class="find free">
+      <div class="fold">▸</div>
+      <div class="rows"><div class="row">
+        <div class="field bad" style="width:24ch"><span class="txt">(\w+_cfg</span><span class="tg">Aa</span><span class="tg u">ab</span><span class="tg">*?</span><span class="tg on">.*</span></div>
+        <span class="count none">No results</span><span class="btn off">↑</span><span class="btn off">↓</span><span class="btn">≡</span><span class="btn">✕</span>
+      </div></div>
+    </div>
+    <div class="msg bad" style="width:24ch">Unclosed group at 1</div></div>
+    <p class="cap">Errors come from the search thread; the editor never compiles a pattern.</p>
+  </div>
+
+  <div class="tile">
+    <h2>Counting a large file</h2>
+    <div class="stage"><div class="find free">
+      <div class="fold">▸</div>
+      <div class="rows"><div class="row">
+        <div class="field focus" style="width:24ch"><span class="txt">ERROR</span><span class="tg on">Aa</span><span class="tg u">ab</span><span class="tg">*?</span><span class="tg">.*</span></div>
+        <span class="count">2 of 1,204+</span><span class="btn">↑</span><span class="btn">↓</span><span class="btn">≡</span><span class="btn">✕</span>
+      </div></div>
+    </div></div>
+    <p class="cap">The count streams in (<b>+</b> while counting); next and previous work at once.</p>
+  </div>
+
+  <div class="tile">
+    <h2>Pattern too complex</h2>
+    <div class="stage"><div class="find free">
+      <div class="fold">▸</div>
+      <div class="rows"><div class="row">
+        <div class="field warn" style="width:24ch"><span class="txt">(a+)+$</span><span class="tg">Aa</span><span class="tg u">ab</span><span class="tg">*?</span><span class="tg on">.*</span></div>
+        <span class="count">3 of 3</span><span class="btn">↑</span><span class="btn">↓</span><span class="btn">≡</span><span class="btn">✕</span>
+      </div></div>
+    </div>
+    <div class="msg warn" style="width:32ch">2 lines skipped: too complex</div></div>
+    <p class="cap">Lookaround and backreferences use a bounded engine; it reports instead of hanging.</p>
+  </div>
+
+  <div class="tile">
+    <h2>Find in selection — <kbd>Alt+L</kbd></h2>
+    <div class="stage"><div class="find free">
+      <div class="fold">▸</div>
+      <div class="rows"><div class="row">
+        <div class="field focus" style="width:24ch"><span class="txt">theme</span><span class="tg">Aa</span><span class="tg u">ab</span><span class="tg">*?</span><span class="tg">.*</span></div>
+        <span class="count">1 of 2</span><span class="btn">↑</span><span class="btn">↓</span><span class="btn on">≡</span><span class="btn">✕</span>
+      </div></div>
+    </div>
+    <div class="mini" style="position:absolute;top:42px;left:0;box-shadow:none;font-size:13px;line-height:19px;white-space:pre">  <span class="rng">let <span class="cur">theme</span> = default_cfg().<span class="m">theme</span>;</span>
+  Config { user_cfg, theme }</div></div>
+    <p class="cap">Only the shaded range is searched. Close with <kbd>Esc</kbd>; the match stays selected.</p>
+  </div>
+</div>
+
+<div class="duo">
+  <div>
+    <h2>Add next occurrence — <kbd>Ctrl+D</kbd> three times</h2>
+    <div class="mini"><div class="body">
+      <div class="ln"><span class="no">6</span>    pub <span class="sel">user_cfg</span><span class="caret"></span>: String,</div>
+      <div class="ln"><span class="no">7</span>    pub theme: Theme,</div>
+      <div class="ln"><span class="no">…</span></div>
+      <div class="ln"><span class="no">12</span>    let <span class="sel">user_cfg</span><span class="caret"></span> = parse_cfg(&amp;text);</div>
+      <div class="ln"><span class="no">13</span>    let theme = default_cfg().theme;</div>
+      <div class="ln curline"><span class="no">14</span>    Config { <span class="sel">user_cfg</span><span class="caret"></span>, theme }</div>
+    </div>
+    <div class="status"><span></span><span>Ln 14, Col 21  ·  3 selections  ·  UTF-8  ·  LF</span></div></div>
+    <p class="cap">VS Code keys: <kbd>Ctrl+K Ctrl+D</kbd> skip, <kbd>Ctrl+U</kbd> undo cursor, <kbd>Ctrl+Shift+L</kbd> all, <kbd>Alt+Click</kbd>, <kbd>Ctrl+Alt+Up/Down</kbd>, <kbd>Shift+Alt+I</kbd>. Typing edits every selection.</p>
+  </div>
+  <div>
+    <h2>Column selection — <kbd>Shift+Alt+Drag</kbd></h2>
+    <div class="mini"><div class="body">
+      <div class="ln"><span class="no">10</span>pub fn load(path: &amp;Path) -&gt; Config {</div>
+      <div class="ln"><span class="no">11</span><span>    </span><span class="sel">let </span><span class="caret"></span>text = read_cfg(path);</div>
+      <div class="ln"><span class="no">12</span><span>    </span><span class="sel">let </span><span class="caret"></span>user_cfg = parse_cfg(&amp;text);</div>
+      <div class="ln"><span class="no">13</span><span>    </span><span class="sel">let </span><span class="caret"></span>theme = default_cfg().theme;</div>
+      <div class="ln"><span class="no">14</span><span>    </span><span class="sel">Conf</span><span class="caret"></span>ig { user_cfg, theme }</div>
+      <div class="ln"><span class="no">15</span>}</div>
+    </div>
+    <div class="status"><span></span><span>Ln 14, Col 9  ·  4 selections  ·  UTF-8  ·  LF</span></div></div>
+    <p class="cap">One selection per line, same columns. Also <kbd>Ctrl+Shift+Alt+Arrows</kbd> and <kbd>Ctrl+Shift+Alt+PgUp/PgDn</kbd>.</p>
+  </div>
+</div>
+
+</body>
+</html>

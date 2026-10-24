@@ -1,6 +1,9 @@
 //! The editor window: input, view state, prompts and saving around a
 //! [`Document`], plus the command palette and panels drawn above it.
 
+mod cursors;
+mod find;
+
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -13,21 +16,25 @@ use rte_platform::{App, Ctx, Event, Key};
 use rte_render::{Renderer, Target};
 use rte_text::{Encoding, LineEnding, Snapshot};
 use rte_view::{
-    CaretStyle, Cell, Chrome, DisplayList, Frame, Layout, Options, PaletteFrame, PaletteGeometry,
-    PaletteRow, PanelFrame, PanelGeometry, PanelLine, Scroll, Theme, Tone, ViewBuilder,
-    draw_palette, draw_panel, hit_test,
+    CaretStyle, Cell, Chrome, DisplayList, Frame, Highlights, Layout, Options, PaletteFrame,
+    PaletteGeometry, PaletteRow, PanelFrame, PanelGeometry, PanelLine, Scroll, Theme, Tone,
+    ViewBuilder, draw_palette, draw_panel, hit_test,
 };
 use unicode_width::UnicodeWidthStr;
 
 use crate::bench;
 use crate::clip;
-use crate::commands::{self, Action, COMMANDS, CommandDef, EDITING_KEYS, vk::*};
+use crate::commands::{self, Action, COMMANDS, CommandDef, EDITING_KEYS, key_name, vk::*};
 use crate::document::{Document, Locks};
 use crate::favorites::{self, FileStorage, MAX_FAVORITES, Store};
 use crate::loader::{FileInfo, LoadEvent};
 use crate::palette::{Item, Mode, Motion, Palette};
 use crate::save::{self, Baseline, FileOps, SaveOutcome, SaveRequest};
+use crate::search::SearchThread;
 use crate::trace::Trace;
+
+use cursors::Column;
+use find::{FindBox, PendingOp};
 
 /// Font size in pixels at 96 DPI and zoom 0.
 pub const BASE_PX: f32 = 14.0;
@@ -54,6 +61,10 @@ pub struct Settings {
     pub exit_after_load: bool,
     /// Recent commands listed by `Ctrl+P` (configuration).
     pub recent_count: usize,
+    /// Most cursors select-all may create (configuration).
+    pub multi_cursor_limit: usize,
+    /// Memory Replace All may use, in MiB (configuration).
+    pub replace_all_max_mib: u64,
     /// Folder of the palette state file; `None` keeps it in memory.
     pub user_dir: Option<PathBuf>,
     /// Shown on the status line at startup (configuration problems).
@@ -102,6 +113,17 @@ enum Unit {
 struct Drag {
     unit: Unit,
     origin: (u64, u64),
+    mode: DragMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DragMode {
+    /// One selection replaces all others.
+    Single,
+    /// `Alt+Click`: the drag changes only the added (primary) selection.
+    Add,
+    /// `Shift+Alt` or middle-button drag from the anchor cell.
+    Column((u64, u64)),
 }
 
 pub struct Editor {
@@ -152,6 +174,20 @@ pub struct Editor {
     ui_renderer: Option<Renderer>,
     /// About icon scaled to a side: (side, pixels).
     about_icon: Option<(u32, Arc<[u32]>)>,
+    /// The search box, created on first use.
+    find: Option<Box<FindBox>>,
+    /// The search thread, started on first use.
+    search: Option<SearchThread>,
+    /// Generation of operation requests (occurrences, replace, select all).
+    op_generation: u64,
+    pending_op: Option<PendingOp>,
+    /// First key of a chord waiting for its second key.
+    chord: Option<Key>,
+    /// Selections before cursor commands, for `Ctrl+U`.
+    cursor_history: std::collections::VecDeque<(Snapshot, Selections)>,
+    column: Option<Column>,
+    /// Word whose occurrences match whole words (`Ctrl+D` from a caret).
+    occurrence_word: Option<String>,
 }
 
 /// What a frame shows; a repaint is requested only when it changes.
@@ -284,6 +320,14 @@ impl Editor {
             skip_space: false,
             ui_renderer: None,
             about_icon: None,
+            find: None,
+            search: None,
+            op_generation: 0,
+            pending_op: None,
+            chord: None,
+            cursor_history: std::collections::VecDeque::new(),
+            column: None,
+            occurrence_word: None,
         };
         if let Some(event) = first {
             editor.apply_load(event);
@@ -679,6 +723,22 @@ impl Editor {
         if self.closing {
             return true;
         }
+        if let Some(first) = self.chord.take() {
+            match commands::for_chord(first, key) {
+                Some(def) => {
+                    self.notice = None;
+                    self.perform(def.action, ctx);
+                }
+                None => {
+                    self.notice = Some(format!(
+                        "The key combination {} {} is not a command",
+                        key_name(first),
+                        key_name(key)
+                    ));
+                }
+            }
+            return true;
+        }
         if key.alt {
             // Unbound Alt keys keep their system behavior (window menu).
             let Some(def) = commands::for_key(key) else {
@@ -693,7 +753,22 @@ impl Editor {
             Some(Popup::Panel(_)) => return self.panel_key(key, ctx),
             None => {}
         }
+        if self.find_focused() {
+            return self.find_key(key, ctx);
+        }
         self.notice = None;
+        if self.find_open() && key.vk == VK_ESCAPE && !key.ctrl && !key.shift {
+            self.close_find();
+            return true;
+        }
+        if commands::starts_chord(key) {
+            self.chord = Some(key);
+            self.notice = Some(format!(
+                "({}) was pressed. Waiting for the second key of the chord\u{2026}",
+                key_name(key)
+            ));
+            return true;
+        }
         if let Some(def) = commands::for_key(key) {
             self.perform(def.action, ctx);
             return true;
@@ -748,6 +823,35 @@ impl Editor {
                 let state = if self.highlighting { "on" } else { "off" };
                 self.notice = Some(format!("Syntax highlighting {state}"));
             }
+            Action::Find => self.open_find(false),
+            Action::Replace => self.open_find(true),
+            Action::FindNext => self.find_next(false),
+            Action::FindPrevious => self.find_next(true),
+            Action::ReplaceOne => self.replace_one(),
+            Action::ReplaceAll => self.replace_all(),
+            Action::SelectAllMatches => self.select_all_matches(),
+            Action::ToggleMatchCase
+            | Action::ToggleWholeWord
+            | Action::ToggleRegex
+            | Action::ToggleGlob
+            | Action::TogglePreserveCase => self.toggle_find_option(action),
+            Action::ToggleFindInSelection => self.toggle_find_in_selection(),
+            Action::AddNextOccurrence => self.add_next_occurrence(false),
+            Action::MoveToNextOccurrence => self.add_next_occurrence(true),
+            Action::SelectAllOccurrences | Action::ChangeAllOccurrences => {
+                self.select_all_occurrences();
+            }
+            Action::AddCursorAbove => self.add_cursor_vertical(-1),
+            Action::AddCursorBelow => self.add_cursor_vertical(1),
+            Action::CursorsAtLineEnds => self.cursors_at_line_ends(),
+            Action::ExpandLineSelection => self.expand_line_selection(),
+            Action::CursorUndo => self.cursor_undo(),
+            Action::ColumnSelectUp => self.column_select(-1, 0),
+            Action::ColumnSelectDown => self.column_select(1, 0),
+            Action::ColumnSelectLeft => self.column_select(0, -1),
+            Action::ColumnSelectRight => self.column_select(0, 1),
+            Action::ColumnSelectPageUp => self.column_select(-(self.page() as i64), 0),
+            Action::ColumnSelectPageDown => self.column_select(self.page() as i64, 0),
         }
     }
 
@@ -872,6 +976,10 @@ impl Editor {
             Some(Popup::Panel(_)) => return,
             None => {}
         }
+        if self.find_focused() {
+            self.find_typed(ch);
+            return;
+        }
         self.notice = None;
         let opts = self.edit_options();
         let mut buf = [0u8; 4];
@@ -950,7 +1058,7 @@ impl Editor {
             self.ui_renderer = None;
         } else if let Some(renderer) = &mut self.ui_renderer {
             renderer.set_size(px);
-        } else if self.popup.is_some() {
+        } else if self.popup.is_some() || self.find_open() {
             self.ui_renderer = Renderer::new(Cow::Borrowed(rte_assets::DEFAULT_FONT), px).ok();
         }
     }
@@ -1003,6 +1111,7 @@ impl Editor {
                 (panel.title, panel.first).hash(&mut h);
             }
         }
+        self.find_view(&mut h);
         h.finish()
     }
 
@@ -1275,7 +1384,7 @@ impl Editor {
                 };
                 draw_panel(&g, &frame, &mut self.list.popup);
             }
-            None => {}
+            None => self.draw_find(),
         }
     }
 
@@ -1304,14 +1413,42 @@ impl Editor {
         (r.start, r.end)
     }
 
-    fn mouse_down(&mut self, x: i32, y: i32, clicks: u32, shift: bool) {
+    fn mouse_down(&mut self, x: i32, y: i32, clicks: u32, shift: bool, alt: bool, middle: bool) {
+        if self.prompt.is_some() || self.closing {
+            return;
+        }
+        if self.find_open() && self.find_click(x, y) {
+            return;
+        }
         let layout = self.layout();
         let body = layout.text.contains(x, y) || layout.gutter.contains(x, y);
-        if !body || self.prompt.is_some() || self.closing {
+        if !body {
             return;
         }
         self.notice = None;
+        if let Some(f) = &mut self.find {
+            f.focus = None;
+        }
+        if middle || (alt && shift) {
+            let anchor = self.cell_at(x, y);
+            self.drag = Some(Drag {
+                unit: Unit::Char,
+                origin: (0, 0),
+                mode: DragMode::Column(anchor),
+            });
+            self.select_column(anchor, anchor);
+            return;
+        }
         let pos = self.hit(x, y);
+        if alt && clicks == 1 {
+            self.toggle_cursor(pos);
+            self.drag = Some(Drag {
+                unit: Unit::Char,
+                origin: (pos, pos),
+                mode: DragMode::Add,
+            });
+            return;
+        }
         let (unit, origin) = match clicks {
             1 if shift => {
                 let anchor = self.doc.selections.primary().anchor;
@@ -1321,12 +1458,30 @@ impl Editor {
             2 => (Unit::Word, self.word_span(pos)),
             _ => (Unit::Line, self.line_span(pos)),
         };
-        self.drag = Some(Drag { unit, origin });
+        self.drag = Some(Drag {
+            unit,
+            origin,
+            mode: DragMode::Single,
+        });
         self.drag_to(pos);
     }
 
+    fn drag_move(&mut self, x: i32, y: i32) {
+        match self.drag.map(|d| d.mode) {
+            Some(DragMode::Column(anchor)) => {
+                let head = self.cell_at(x, y);
+                self.place_column(anchor, head, false);
+            }
+            Some(_) => {
+                let pos = self.hit(x, y);
+                self.drag_to(pos);
+            }
+            None => {}
+        }
+    }
+
     fn drag_to(&mut self, pos: u64) {
-        let Some(Drag { unit, origin }) = self.drag else {
+        let Some(Drag { unit, origin, mode }) = self.drag else {
             return;
         };
         let span = match unit {
@@ -1339,7 +1494,15 @@ impl Editor {
         } else {
             Selection::new(origin.0, span.1.max(origin.1).max(pos))
         };
-        self.select_single(selection);
+        if mode == DragMode::Add {
+            let sels = &self.doc.selections;
+            let mut all = sels.as_slice().to_vec();
+            all[sels.primary_index()] = selection;
+            let primary = sels.primary_index();
+            self.doc.select(Selections::new(all, primary));
+        } else {
+            self.select_single(selection);
+        }
         self.reveal();
     }
 
@@ -1453,11 +1616,16 @@ impl App for Editor {
             }
             Event::Key(key) => {
                 if let Some(bench) = &mut self.bench {
-                    bench.key_arrived(key);
+                    bench.arrived(bench::Step::Key(key));
                 }
                 handled = self.key(key, ctx);
             }
-            Event::Char(ch) => self.typed(ch),
+            Event::Char(ch) => {
+                if let Some(bench) = &mut self.bench {
+                    bench.arrived(bench::Step::Char(ch));
+                }
+                self.typed(ch);
+            }
             Event::Wheel {
                 delta,
                 horizontal,
@@ -1487,18 +1655,21 @@ impl App for Editor {
                 y,
                 clicks,
                 shift,
+                alt,
+                middle,
                 ..
             } => {
                 if self.popup.is_some() {
-                    self.popup_click(x, y, ctx);
+                    if !middle {
+                        self.popup_click(x, y, ctx);
+                    }
                 } else {
-                    self.mouse_down(x, y, clicks, shift);
+                    self.mouse_down(x, y, clicks, shift, alt, middle);
                 }
             }
             Event::MouseMove { x, y } => {
                 if self.drag.is_some() {
-                    let pos = self.hit(x, y);
-                    self.drag_to(pos);
+                    self.drag_move(x, y);
                 }
             }
             Event::MouseUp => self.drag = None,
@@ -1507,6 +1678,7 @@ impl App for Editor {
                 self.drain_loads();
                 self.drain_saves(ctx);
                 self.drain_store();
+                self.drain_search();
                 self.exit_if_loaded(ctx);
             }
         }
@@ -1518,15 +1690,26 @@ impl App for Editor {
         if self.prompt.is_some() {
             self.popup = None;
         }
+        self.sync_find();
         self.sync_ui_renderer();
         let layout_changed = matches!(event, Event::Shown | Event::Resized { .. });
         let redraw = layout_changed || !self.visible().same(&before);
         if redraw {
             ctx.redraw();
         }
+        let busy = self.bench.is_some() && self.search_busy();
+        let ready = self.shown && !matches!(self.status, LoadStatus::Loading { .. });
+        if ready && let Some(r) = self.bench.as_mut().and_then(bench::Driver::take_select) {
+            let len = self.doc.snapshot.len();
+            self.doc.select(Selections::single(Selection::new(
+                r.start.min(len),
+                r.end.min(len),
+            )));
+            ctx.redraw();
+        }
         if let Some(bench) = &mut self.bench {
-            bench.check_frame(redraw, ctx);
-            if self.shown && !matches!(self.status, LoadStatus::Loading { .. }) {
+            bench.check_frame(redraw, busy, ctx);
+            if ready {
                 bench.send(ctx);
             }
         }
@@ -1569,6 +1752,10 @@ impl App for Editor {
             options: &self.options,
             selections: self.doc.selections.as_slice(),
             caret,
+            highlights: {
+                let (matches, scope) = find::highlights(self.find.as_deref(), &self.doc.snapshot);
+                Highlights { matches, scope }
+            },
         };
         self.view.build(&frame, &mut self.list);
         self.draw_popup();
@@ -1587,8 +1774,9 @@ impl App for Editor {
     }
 
     fn presented(&mut self, ctx: &mut Ctx) {
+        let busy = self.bench.is_some() && self.search_busy();
         if let Some(bench) = &mut self.bench {
-            bench.presented(ctx);
+            bench.presented(busy, ctx);
         }
     }
 
@@ -1597,7 +1785,11 @@ impl App for Editor {
     }
 
     fn is_text(&self, x: i32, y: i32) -> bool {
-        self.layout().text.contains(x, y) && !self.popup_area().is_some_and(|r| r.contains(x, y))
+        self.layout().text.contains(x, y)
+            && !self.popup_area().is_some_and(|r| r.contains(x, y))
+            && !self
+                .find_geometry()
+                .is_some_and(|g| g.panel.contains(x, y) || g.message.contains(x, y))
     }
 }
 
@@ -1719,6 +1911,7 @@ fn scale_image(source: &[u32], from: u32, to: u32) -> Vec<u32> {
 }
 
 #[cfg(test)]
+#[allow(clippy::single_range_in_vec_init)]
 mod tests {
     use super::*;
     use std::borrow::Cow;
@@ -1741,6 +1934,8 @@ mod tests {
             exit_after_first_frame: false,
             exit_after_load,
             recent_count: 3,
+            multi_cursor_limit: 10_000,
+            replace_all_max_mib: 512,
             user_dir: None,
             notice: None,
             highlighting: true,
@@ -2191,6 +2386,7 @@ mod tests {
             shift,
             ctrl: false,
             alt: false,
+            middle: false,
         };
         editor.event(down(at(7, 0), 2, false), &mut ctx);
         assert_eq!(editor.doc.selections.primary(), Selection::new(6, 10));
@@ -2215,6 +2411,7 @@ mod tests {
             shift: false,
             ctrl: false,
             alt: false,
+            middle: false,
         }
     }
 
@@ -2250,7 +2447,7 @@ mod tests {
         let mut ctx = Ctx::headless(800, 600, 96);
         editor.event(key(VK_P, true, true), &mut ctx);
         assert!(ctx.redraw_requested());
-        type_text(&mut editor, &mut ctx, "select all");
+        type_text(&mut editor, &mut ctx, "selection select all");
         assert_eq!(palette_labels(&editor)[0], "Selection: Select All");
         editor.event(key(VK_RETURN, false, false), &mut ctx);
         assert!(editor.popup.is_none());
@@ -2464,7 +2661,7 @@ mod tests {
         editor.settings.user_dir = Some(dir.clone());
         let mut ctx = Ctx::headless(800, 600, 96);
         editor.event(key(VK_P, true, true), &mut ctx);
-        type_text(&mut editor, &mut ctx, "select all");
+        type_text(&mut editor, &mut ctx, "selection select all");
         editor.event(key(VK_RETURN, false, false), &mut ctx);
         assert_eq!(editor.doc.selections.primary(), Selection::new(0, 7));
         assert_eq!(editor.store.as_mut().unwrap().settle(), None);
@@ -2545,7 +2742,7 @@ mod tests {
         let files = Arc::new(FakeFiles::default());
         files.put(&path(), b"x");
         let mut settings = settings(false, false);
-        settings.bench = Some(bench::parse("Ctrl+Shift+P,Escape", "2").unwrap());
+        settings.bench = Some(bench::parse("Ctrl+Shift+P,Escape", "2", "").unwrap());
         let mut editor = Editor::new(
             Some(&path()),
             Some(done(b"x")),
@@ -2575,6 +2772,548 @@ mod tests {
             }
         }
         assert_eq!(opened, 2);
+    }
+
+    #[test]
+    fn scripted_text_types_at_every_selected_match() {
+        let files = Arc::new(FakeFiles::default());
+        let mut settings = settings(false, false);
+        settings.bench =
+            Some(bench::parse("'x'", "2", r"Ctrl+F,Alt+R,'a\d',Alt+Enter,Escape,Right").unwrap());
+        let mut editor = Editor::new(
+            Some(&path()),
+            Some(done(b"a1 a2 b3 a4")),
+            None,
+            renderer(),
+            96,
+            settings,
+            Trace::new(false),
+            files,
+            Arc::new(|| {}),
+        );
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(Event::Shown, &mut ctx);
+        for _ in 0..5000 {
+            if ctx.close_requested() {
+                break;
+            }
+            let (posted_key, posted_char) = (ctx.posted_key(), ctx.posted_char());
+            ctx = Ctx::headless(800, 600, 96);
+            if let Some(key) = posted_key {
+                editor.event(Event::Key(key), &mut ctx);
+            } else if let Some(ch) = posted_char {
+                editor.event(Event::Char(ch), &mut ctx);
+            } else {
+                std::thread::sleep(Duration::from_millis(1));
+                editor.event(Event::Wake, &mut ctx);
+            }
+            if ctx.redraw_requested() {
+                editor.presented(&mut ctx);
+            }
+        }
+        assert!(ctx.close_requested(), "the script ends the process");
+        assert_eq!(text(&editor), "a1xx a2xx b3 a4xx");
+    }
+
+    fn mods(vk: u16, ctrl: bool, shift: bool, alt: bool) -> Event {
+        Event::Key(Key {
+            vk,
+            ctrl,
+            shift,
+            alt,
+        })
+    }
+
+    /// Delivers wake-ups until `done` holds.
+    fn pump(editor: &mut Editor, ctx: &mut Ctx, done: impl Fn(&Editor) -> bool) {
+        for _ in 0..5000 {
+            if done(editor) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+            editor.event(Event::Wake, ctx);
+        }
+        panic!("the search thread did not answer");
+    }
+
+    fn counter(editor: &Editor) -> String {
+        let f = editor.find.as_ref().unwrap();
+        f.counter(editor.doc.selections.primary().range()).0
+    }
+
+    fn ranges(editor: &Editor) -> Vec<std::ops::Range<u64>> {
+        editor
+            .doc
+            .selections
+            .as_slice()
+            .iter()
+            .map(Selection::range)
+            .collect()
+    }
+
+    #[test]
+    fn search_starts_nothing_until_used() {
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, b"  cat", false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(Event::Wake, &mut ctx);
+        assert!(editor.find.is_none() && editor.search.is_none());
+        editor.event(key(VK_F, true, false), &mut ctx);
+        assert!(editor.find_focused());
+        assert!(editor.search.is_none(), "an empty query starts no thread");
+        type_text(&mut editor, &mut ctx, "c");
+        assert!(editor.search.is_some());
+    }
+
+    #[test]
+    fn search_box_finds_counts_navigates_and_closes() {
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, b"Cat dog cat\ncat", false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(key(VK_F, true, false), &mut ctx);
+        type_text(&mut editor, &mut ctx, "cat");
+        pump(&mut editor, &mut ctx, |e| counter(e) == "1 of 3");
+        assert_eq!(ranges(&editor), [0..3]);
+        assert_eq!(text(&editor), "Cat dog cat\ncat", "typing went to the box");
+        editor.event(key(VK_RETURN, false, false), &mut ctx);
+        pump(&mut editor, &mut ctx, |e| counter(e) == "2 of 3");
+        assert_eq!(ranges(&editor), [8..11]);
+        editor.event(key(VK_RETURN, false, true), &mut ctx);
+        pump(&mut editor, &mut ctx, |e| ranges(e) == [0..3]);
+        editor.event(key(VK_F3, false, true), &mut ctx);
+        pump(&mut editor, &mut ctx, |e| ranges(e) == [12..15]);
+        assert!(
+            !find::highlights(editor.find.as_deref(), &editor.doc.snapshot)
+                .0
+                .is_empty()
+        );
+
+        // Match Case uses the UI scan: no wait for the next match.
+        editor.event(mods(VK_C, false, false, true), &mut ctx);
+        editor.event(key(VK_F3, false, false), &mut ctx);
+        assert_eq!(ranges(&editor), [8..11]);
+        pump(&mut editor, &mut ctx, |e| counter(e) == "1 of 2");
+
+        editor.event(key(VK_ESCAPE, false, false), &mut ctx);
+        assert!(!editor.find_open());
+        assert_eq!(ranges(&editor), [8..11], "the match stays selected");
+        editor.event(key(VK_F3, false, false), &mut ctx);
+        assert_eq!(ranges(&editor), [12..15], "F3 works with the box closed");
+    }
+
+    #[test]
+    fn modes_are_exclusive_and_errors_are_reported() {
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, b"a1 b22 a333", false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(key(VK_F, true, false), &mut ctx);
+        editor.event(mods(VK_R, false, false, true), &mut ctx);
+        type_text(&mut editor, &mut ctx, "(");
+        pump(&mut editor, &mut ctx, |e| {
+            e.find.as_ref().unwrap().error.is_some()
+        });
+        assert_eq!(counter(&editor), "No results");
+        assert!(!editor.search_busy(), "an invalid pattern ends the search");
+        editor.event(key(VK_BACK, false, false), &mut ctx);
+        type_text(&mut editor, &mut ctx, r"a\d+");
+        pump(&mut editor, &mut ctx, |e| counter(e) == "1 of 2");
+        editor.event(mods(VK_G, false, false, true), &mut ctx);
+        let f = editor.find.as_ref().unwrap();
+        assert_eq!(f.mode, rte_search::Mode::Glob);
+        editor.event(key(VK_A, true, false), &mut ctx);
+        type_text(&mut editor, &mut ctx, "b?2");
+        pump(&mut editor, &mut ctx, |e| counter(e) == "1 of 1");
+        assert_eq!(ranges(&editor), [3..6]);
+        editor.event(mods(VK_R, false, false, true), &mut ctx);
+        assert_eq!(editor.find.as_ref().unwrap().mode, rte_search::Mode::Regex);
+    }
+
+    #[test]
+    fn replace_one_replace_all_and_undo() {
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, b"cat dog cat\ncat", false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(key(VK_H, true, false), &mut ctx);
+        editor.event(key(VK_TAB, false, false), &mut ctx);
+        type_text(&mut editor, &mut ctx, "cat");
+        editor.event(key(VK_TAB, false, false), &mut ctx);
+        type_text(&mut editor, &mut ctx, "cow");
+        pump(&mut editor, &mut ctx, |e| ranges(e) == [0..3]);
+        editor.event(key(VK_RETURN, false, false), &mut ctx);
+        pump(&mut editor, &mut ctx, |e| ranges(e) == [8..11]);
+        assert_eq!(text(&editor), "cow dog cat\ncat");
+        editor.event(mods(VK_RETURN, true, false, true), &mut ctx);
+        pump(&mut editor, &mut ctx, |e| text(e) == "cow dog cow\ncow");
+        assert_eq!(editor.notice.as_deref(), Some("Replaced 2 occurrences"));
+        editor.event(key(VK_ESCAPE, false, false), &mut ctx);
+        editor.event(key(VK_Z, true, false), &mut ctx);
+        assert_eq!(
+            text(&editor),
+            "cow dog cat\ncat",
+            "Replace All is one undo step"
+        );
+
+        editor.doc.locks.user = true;
+        editor.event(mods(VK_RETURN, true, false, true), &mut ctx);
+        assert!(
+            editor
+                .notice
+                .as_deref()
+                .unwrap()
+                .starts_with("Not editable")
+        );
+        assert!(editor.pending_op.is_none());
+    }
+
+    #[test]
+    fn stale_replace_all_reruns_on_the_current_text() {
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, b"cat cat", false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(Event::Wake, &mut ctx);
+        editor.event(key(VK_H, true, false), &mut ctx);
+        type_text(&mut editor, &mut ctx, "dog");
+        editor.event(mods(VK_RETURN, true, false, true), &mut ctx);
+        // The text changes before the reply arrives.
+        let tx = rte_text::Transaction::single(rte_text::Edit::insert(7, b" cat".to_vec()));
+        editor.doc.snapshot = editor.doc.snapshot.apply(&tx).unwrap().0;
+        pump(&mut editor, &mut ctx, |e| text(e) == "dog dog dog");
+    }
+
+    #[test]
+    fn occurrences_cursor_undo_and_select_all() {
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, b"foo bar foo foobar foo", false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(Event::Wake, &mut ctx);
+        editor.event(key(VK_D, true, false), &mut ctx);
+        assert_eq!(
+            ranges(&editor),
+            [0..3],
+            "an empty selection selects its word"
+        );
+        editor.event(key(VK_D, true, false), &mut ctx);
+        assert_eq!(ranges(&editor), [0..3, 8..11], "whole words only");
+        editor.event(key(VK_K, true, false), &mut ctx);
+        assert!(editor.notice.as_deref().unwrap().contains("Ctrl+K"));
+        editor.event(key(VK_D, true, false), &mut ctx);
+        assert_eq!(ranges(&editor), [0..3, 19..22]);
+        editor.event(key(VK_U, true, false), &mut ctx);
+        assert_eq!(ranges(&editor), [0..3, 8..11]);
+        editor.event(key(VK_L, true, true), &mut ctx);
+        pump(&mut editor, &mut ctx, |e| e.doc.selections.len() == 3);
+        type_text(&mut editor, &mut ctx, "x");
+        assert_eq!(text(&editor), "x bar x foobar x");
+        editor.event(key(VK_K, true, false), &mut ctx);
+        editor.event(key(VK_X, true, false), &mut ctx);
+        assert!(
+            editor
+                .notice
+                .as_deref()
+                .unwrap()
+                .contains("is not a command")
+        );
+    }
+
+    #[test]
+    fn select_all_above_the_limit_changes_nothing() {
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, b"a a a", false);
+        editor.settings.multi_cursor_limit = 2;
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(Event::Wake, &mut ctx);
+        editor.event(key(VK_D, true, false), &mut ctx);
+        editor.event(key(VK_L, true, true), &mut ctx);
+        pump(&mut editor, &mut ctx, |e| e.notice.is_some());
+        assert!(editor.notice.as_deref().unwrap().starts_with("More than 2"));
+        assert_eq!(ranges(&editor), [0..1]);
+    }
+
+    /// Lets the search thread answer, then delivers its replies.
+    fn let_search_answer(editor: &mut Editor, ctx: &mut Ctx) {
+        for _ in 0..5 {
+            std::thread::sleep(Duration::from_millis(20));
+            editor.event(Event::Wake, ctx);
+        }
+    }
+
+    /// `cat cat` with the replace box open: find `cat`, replace with `dog`.
+    fn replace_box(text: &[u8]) -> (Editor, Ctx) {
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, text, false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(key(VK_H, true, false), &mut ctx);
+        editor.event(key(VK_TAB, false, false), &mut ctx);
+        type_text(&mut editor, &mut ctx, "cat");
+        editor.event(key(VK_TAB, false, false), &mut ctx);
+        type_text(&mut editor, &mut ctx, "dog");
+        pump(&mut editor, &mut ctx, |e| ranges(e) == [0..3]);
+        (editor, ctx)
+    }
+
+    #[test]
+    fn changed_search_input_revokes_pending_replacements_and_selections() {
+        // Replace All, then the query changes before the reply.
+        let (mut editor, mut ctx) = replace_box(b"cat cat");
+        editor.event(mods(VK_RETURN, true, false, true), &mut ctx);
+        editor.event(key(VK_TAB, false, false), &mut ctx);
+        type_text(&mut editor, &mut ctx, "x");
+        let_search_answer(&mut editor, &mut ctx);
+        assert_eq!(text(&editor), "cat cat");
+        assert!(editor.pending_op.is_none());
+
+        // Replace One, then Match Case changes.
+        let (mut editor, mut ctx) = replace_box(b"cat cat");
+        editor.event(key(VK_RETURN, false, false), &mut ctx);
+        editor.event(mods(VK_C, false, false, true), &mut ctx);
+        let_search_answer(&mut editor, &mut ctx);
+        assert_eq!(text(&editor), "cat cat");
+
+        // Replace All, then the replacement changes.
+        let (mut editor, mut ctx) = replace_box(b"cat cat");
+        editor.event(mods(VK_RETURN, true, false, true), &mut ctx);
+        type_text(&mut editor, &mut ctx, "s");
+        let_search_answer(&mut editor, &mut ctx);
+        assert_eq!(text(&editor), "cat cat");
+
+        // Select all matches, then Find in Selection changes the scope.
+        let (mut editor, mut ctx) = replace_box(b"cat cat");
+        editor.event(mods(VK_RETURN, false, false, true), &mut ctx);
+        editor.event(mods(VK_L, false, false, true), &mut ctx);
+        let_search_answer(&mut editor, &mut ctx);
+        assert_eq!(ranges(&editor), [0..3]);
+        assert!(
+            editor
+                .notice
+                .as_deref()
+                .unwrap()
+                .contains("nothing was selected")
+        );
+
+        // Unchanged input still applies.
+        let (mut editor, mut ctx) = replace_box(b"cat cat");
+        editor.event(mods(VK_RETURN, true, false, true), &mut ctx);
+        pump(&mut editor, &mut ctx, |e| text(e) == "dog dog");
+    }
+
+    #[test]
+    fn cursor_undo_never_restores_offsets_of_an_older_text() {
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, b"ab ab", false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(Event::Wake, &mut ctx);
+        editor.event(key(VK_D, true, false), &mut ctx);
+        editor.event(key(VK_D, true, false), &mut ctx);
+        assert_eq!(ranges(&editor), [0..2, 3..5]);
+        editor.event(Event::Char('\u{e9}'), &mut ctx);
+        let after = ranges(&editor);
+        editor.event(key(VK_U, true, false), &mut ctx);
+        assert_eq!(ranges(&editor), after, "states of the old text are dropped");
+        type_text(&mut editor, &mut ctx, "X");
+        assert_eq!(text(&editor), "\u{e9}X \u{e9}X");
+        // States recorded on the current text still restore.
+        editor.event(key(VK_HOME, false, false), &mut ctx);
+        editor.event(mods(VK_I, false, true, true), &mut ctx);
+        let before = ranges(&editor);
+        editor.event(key(VK_L, true, false), &mut ctx);
+        editor.event(key(VK_U, true, false), &mut ctx);
+        assert_eq!(ranges(&editor), before);
+    }
+
+    #[test]
+    fn dense_long_line_highlights_are_bounded_and_released_on_close() {
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, &vec![b'a'; 1 << 20], false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(Event::Wake, &mut ctx);
+        editor.event(key(VK_F, true, false), &mut ctx);
+        editor.event(mods(VK_C, false, false, true), &mut ctx);
+        let started = std::time::Instant::now();
+        type_text(&mut editor, &mut ctx, "a");
+        let ui = started.elapsed();
+        let shown = find::highlights(editor.find.as_deref(), &editor.doc.snapshot)
+            .0
+            .len();
+        assert_eq!(
+            shown,
+            rte_view::ROW_SCAN_LIMIT,
+            "one row as the view lays it out"
+        );
+        assert!(ui < Duration::from_millis(500), "{ui:?}");
+        editor.event(key(VK_ESCAPE, false, false), &mut ctx);
+        assert_eq!(editor.find.as_ref().unwrap().match_capacity(), 0);
+    }
+
+    #[test]
+    fn next_and_previous_step_over_an_empty_current_match() {
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, b"a\nb", false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(key(VK_F, true, false), &mut ctx);
+        editor.event(mods(VK_R, false, false, true), &mut ctx);
+        type_text(&mut editor, &mut ctx, "^");
+        pump(&mut editor, &mut ctx, |e| counter(e) == "1 of 2");
+        assert_eq!(ranges(&editor), [0..0]);
+        editor.event(key(VK_F3, false, false), &mut ctx);
+        pump(&mut editor, &mut ctx, |e| ranges(e) == [2..2]);
+        editor.event(key(VK_RETURN, false, false), &mut ctx);
+        pump(&mut editor, &mut ctx, |e| ranges(e) == [0..0]);
+        editor.event(key(VK_F3, false, true), &mut ctx);
+        pump(&mut editor, &mut ctx, |e| ranges(e) == [2..2]);
+        editor.event(key(VK_RETURN, false, true), &mut ctx);
+        pump(&mut editor, &mut ctx, |e| ranges(e) == [0..0]);
+    }
+
+    #[test]
+    fn an_old_index_reply_does_not_label_a_new_selection() {
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, b"cat cat cat", false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(key(VK_F, true, false), &mut ctx);
+        type_text(&mut editor, &mut ctx, "cat");
+        pump(&mut editor, &mut ctx, |e| counter(e) == "1 of 3");
+        editor.event(key(VK_F3, false, false), &mut ctx);
+        pump(&mut editor, &mut ctx, |e| ranges(e) == [4..7]);
+        editor.event(key(VK_F3, false, false), &mut ctx);
+        pump(&mut editor, &mut ctx, |e| ranges(e) == [8..11]);
+        let f = editor.find.as_ref().unwrap();
+        let reply = crate::search::Reply {
+            lane: crate::search::Lane::Find,
+            generation: f.generation,
+            snapshot: editor.doc.snapshot.clone(),
+            outcome: crate::search::Outcome::Index {
+                at: 0,
+                index: Some(0),
+            },
+        };
+        editor.find_reply(reply);
+        assert_ne!(counter(&editor), "1 of 3");
+        pump(&mut editor, &mut ctx, |e| counter(e) == "3 of 3");
+    }
+
+    #[test]
+    fn add_next_occurrence_passes_already_selected_matches() {
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, b"cat cat cat", false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(Event::Wake, &mut ctx);
+        editor.doc.select(Selections::new(
+            vec![Selection::new(0, 3), Selection::new(4, 7)],
+            0,
+        ));
+        editor.event(key(VK_D, true, false), &mut ctx);
+        assert_eq!(ranges(&editor), [0..3, 4..7, 8..11]);
+        editor.event(key(VK_D, true, false), &mut ctx);
+        assert_eq!(ranges(&editor), [0..3, 4..7, 8..11]);
+        assert_eq!(editor.notice.as_deref(), Some("No more occurrences"));
+    }
+
+    #[test]
+    fn highlights_stay_inside_find_in_selection() {
+        for match_case in [false, true] {
+            let files = Arc::new(FakeFiles::default());
+            let mut editor = editor_on(&files, b"cat cat", false);
+            let mut ctx = Ctx::headless(800, 600, 96);
+            editor.event(Event::Wake, &mut ctx);
+            editor.event(key(VK_D, true, false), &mut ctx);
+            editor.event(key(VK_F, true, false), &mut ctx);
+            editor.event(mods(VK_L, false, false, true), &mut ctx);
+            if match_case {
+                editor.event(mods(VK_C, false, false, true), &mut ctx);
+            }
+            pump(&mut editor, &mut ctx, |e| !e.search_busy());
+            let shown = find::highlights(editor.find.as_deref(), &editor.doc.snapshot).0;
+            assert_eq!(shown, [0..3], "match case {match_case}");
+        }
+    }
+
+    #[test]
+    fn line_ends_and_column_drags_refuse_above_the_limit_early() {
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, "x\n".repeat(50_000).as_bytes(), false);
+        editor.settings.multi_cursor_limit = 2;
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(Event::Wake, &mut ctx);
+        editor.event(key(VK_A, true, false), &mut ctx);
+        let started = std::time::Instant::now();
+        editor.event(mods(VK_I, false, true, true), &mut ctx);
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert!(editor.notice.as_deref().unwrap().starts_with("At most 2"));
+        assert_eq!(editor.doc.selections.len(), 1);
+        editor.event(key(VK_HOME, true, false), &mut ctx);
+        for _ in 0..3 {
+            editor.event(mods(VK_DOWN, true, true, true), &mut ctx);
+        }
+        assert_eq!(editor.doc.selections.len(), 2, "the third line is refused");
+    }
+
+    #[test]
+    fn cursors_above_below_line_ends_and_columns() {
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, b"abc\nabc\nabc", false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(Event::Wake, &mut ctx);
+        editor.event(key(VK_RIGHT, false, false), &mut ctx);
+        editor.event(mods(VK_DOWN, true, false, true), &mut ctx);
+        editor.event(mods(VK_DOWN, true, false, true), &mut ctx);
+        assert_eq!(ranges(&editor), [1..1, 5..5, 9..9]);
+        type_text(&mut editor, &mut ctx, "-");
+        assert_eq!(text(&editor), "a-bc\na-bc\na-bc");
+        editor.event(key(VK_ESCAPE, false, false), &mut ctx);
+        assert_eq!(editor.doc.selections.len(), 1);
+
+        editor.event(key(VK_HOME, true, false), &mut ctx);
+        editor.event(mods(VK_DOWN, true, true, true), &mut ctx);
+        editor.event(mods(VK_RIGHT, true, true, true), &mut ctx);
+        editor.event(mods(VK_RIGHT, true, true, true), &mut ctx);
+        assert_eq!(ranges(&editor), [0..2, 5..7]);
+        editor.event(key(VK_A, true, false), &mut ctx);
+        editor.event(mods(VK_I, false, true, true), &mut ctx);
+        assert_eq!(ranges(&editor), [4..4, 9..9, 14..14]);
+        editor.event(key(VK_L, true, false), &mut ctx);
+        assert_eq!(ranges(&editor), [0..5, 5..10, 10..14]);
+    }
+
+    #[test]
+    fn alt_click_adds_and_removes_carets_and_middle_drag_selects_columns() {
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, b"one two\nthree four\nfive", false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(Event::Shown, &mut ctx);
+        let layout = editor.layout();
+        let cell = editor.renderer.cell();
+        let at = |col: i32, row: i32| {
+            (
+                layout.text.x + col * cell.width as i32,
+                layout.text.y + row * cell.height as i32 + 2,
+            )
+        };
+        let down = |(x, y): (i32, i32), alt: bool, middle: bool| Event::MouseDown {
+            x,
+            y,
+            clicks: 1,
+            shift: false,
+            ctrl: false,
+            alt,
+            middle,
+        };
+        editor.event(down(at(1, 0), false, false), &mut ctx);
+        editor.event(Event::MouseUp, &mut ctx);
+        editor.event(down(at(2, 1), true, false), &mut ctx);
+        editor.event(Event::MouseUp, &mut ctx);
+        assert_eq!(ranges(&editor), [1..1, 10..10]);
+        assert_eq!(editor.doc.selections.primary().head, 10);
+        editor.event(down(at(2, 1), true, false), &mut ctx);
+        editor.event(Event::MouseUp, &mut ctx);
+        assert_eq!(ranges(&editor), [1..1]);
+
+        editor.event(down(at(1, 0), false, true), &mut ctx);
+        let (x, y) = at(3, 2);
+        editor.event(Event::MouseMove { x, y }, &mut ctx);
+        editor.event(Event::MouseUp, &mut ctx);
+        assert_eq!(ranges(&editor), [1..3, 9..11, 20..22]);
+        editor.event(key(VK_U, true, false), &mut ctx);
+        assert_eq!(ranges(&editor), [1..1], "a drag is one cursor-undo step");
     }
 
     #[test]

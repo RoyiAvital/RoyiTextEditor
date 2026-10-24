@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Search box (`Ctrl+F`) at the top right, seeded with the selection or the
+  word at the caret. Modes Text (default), Glob (`Alt+G`; `?` one character,
+  `*` the shortest text within a line, a trailing `*` the rest of the line)
+  and RegEx (`Alt+R`), with Match Case (`Alt+C`), Whole Word (`Alt+W`) and
+  Find in Selection (`Alt+L`). Next and previous with `Enter` / `Shift+Enter`
+  and `F3` / `Shift+F3`; `Alt+Enter` selects all matches.
+- Large files are searched on a background thread: the match count streams in
+  (`2 of 1,204+`), visible matches are highlighted, and typing cancels stale
+  work. Invalid patterns and lines skipped by the bounded look-around and
+  backreference engine are reported below the field.
+- Replace (`Ctrl+H`): `Enter` or `Ctrl+Shift+1` replaces one match,
+  `Ctrl+Alt+Enter` replaces all in one undo step, `Alt+P` toggles Preserve
+  Case. RegEx replacements use the VS Code syntax (`$1`, `$<name>`, `$0`,
+  `$$`, `\n`, `\t`, `\u`, `\l`, `\U`, `\L`).
+- Multiple cursors with VS Code keys: `Ctrl+D`, `Ctrl+K Ctrl+D`,
+  `Ctrl+Shift+L`, `Ctrl+F2`, `Ctrl+Alt+Up` / `Down`, `Shift+Alt+I`, `Ctrl+L`,
+  `Ctrl+U` (cursor undo) and `Alt`+click. Pasting text with one line per
+  cursor puts one line at each.
+- Column selection with `Shift+Alt`+drag, middle-drag and
+  `Ctrl+Shift+Alt` + arrows / `PgUp` / `PgDn`.
+- `Search:` command family in the Command Palette; two-key chords such as
+  `Ctrl+K Ctrl+D`.
+- Configuration keys `editor.multiCursorLimit` (default 10,000) and
+  `search.replaceAllMaxMiB` (default 512).
+- Benchmark option `--bench-setup <keys>` runs untimed keys before the
+  measured ones; scripts accept quoted text (`'abc'`), typed one character
+  per step, and repeated keys (`Down*40`). `--bench-select <start>..<end>`,
+  `--bench-handled` (copies) and `--bench-paced` (one key per display
+  refresh) cover the clipboard, typing and scrolling tests; the results
+  report peak memory.
+
+### Performance
+
+| Question                                  | Scenario                                  | Measure             | Result                      |
+| ----------------------------------------- | ----------------------------------------- | ------------------- | --------------------------- |
+| How fast does it start?                   | Open an empty file                        | Time to first frame | 21.3 ms                     |
+| How light is it?                          | Open an empty file                        | Peak memory         | 5.0 MiB                     |
+| How fast does a normal code file open?    | Open an 8 MiB Python file                 | Time to first frame | 21.4 ms                     |
+| Does a huge file still open instantly?    | Open a 256 MiB log file                   | Time to first frame | 23.3 ms                     |
+| How long until all of it is loaded?       | Open a 256 MiB log file                   | Time to load fully  | 77.7 ms                     |
+| What memory does a huge file cost?        | Open a 256 MiB log file                   | Peak memory         | 267.4 MiB                   |
+| Does a pathological file break it?        | Open a 64 MiB file with one line          | Time to first frame | 23.0 ms                     |
+| Are commands instant?                     | Show the Command Palette                  | Key to frame        | 0.38 ms                     |
+| Is typing instant in a big file?          | Type in an 8 MiB Python file              | Key to frame        | 0.35 ms                     |
+| Is pasting a lot of text fast?            | Paste 1 MiB into an 8 MiB Python file     | Key to frame        | 2.02 ms                     |
+| Is scrolling smooth?                      | Scroll and jump in an 8 MiB Markdown file | Missed refreshes    | 0.0 %                       |
+| Is multi-cursor editing instant at scale? | Type at 10,000 carets                     | Key to frame        | 3.64 ms                     |
+
+Medians of the Performance Benchmark v1 on an AMD Ryzen 9 9950X (Windows 11);
+full results in `Perfromance.md`.
+
+- The search box and the search thread are created on first use; nothing of
+  search or multi-cursor runs at startup. Startup is unchanged against 0.2.0 (empty
+  file, 30 interleaved launches: first paint 21.0 ms vs 21.3 ms, peak memory
+  5.0 MiB for both). The executable grows from 2.0 MiB to 4.0 MiB (regular
+  expression engines).
+
 ## [0.2.0] - 2026-10-24
 
 This release added the _Command Palette_ / _Command Center_.

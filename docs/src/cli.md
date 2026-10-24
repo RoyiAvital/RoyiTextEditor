@@ -3,7 +3,7 @@
 ## Command-Line Options
 
 ```text
-RoyiTextEditor.exe [--read-only] [--syntax <id>] [--trace-startup] [--exit-after-first-frame | --exit-after-load] [--bench-keys <sequence>] [--bench-runs <count>] [file]
+RoyiTextEditor.exe [--read-only] [--syntax <id>] [--trace-startup] [--exit-after-first-frame | --exit-after-load] [--bench-setup <sequence>] [--bench-keys <sequence>] [--bench-runs <count>] [--bench-select <start>..<end>] [--bench-handled] [--bench-paced] [file]
 ```
 
 | Option | Purpose |
@@ -14,7 +14,11 @@ RoyiTextEditor.exe [--read-only] [--syntax <id>] [--trace-startup] [--exit-after
 | `--trace-startup` | Print startup timing and memory measurements to standard output. |
 | `--exit-after-first-frame` | Exit after drawing the first frame. Intended for startup measurements. |
 | `--exit-after-load` | Exit after the file finishes loading. Intended for performance measurements. |
-| `--bench-keys <sequence>` | Run a scripted key sequence after loading, for example `"Ctrl+Shift+P,Escape"`. Developer benchmark option. |
+| `--bench-setup <sequence>` | Run an untimed key sequence once before the scripted repetitions, for example `"Ctrl+F"`. Used with `--bench-keys`. |
+| `--bench-select <start>..<end>` | Select these bytes once the file is loaded, before the setup. Used with `--bench-keys`. |
+| `--bench-handled` | Time steps that draw nothing (copies) until they are handled. Used with `--bench-keys`. |
+| `--bench-paced` | Send one step per display refresh, like a held key. Used with `--bench-keys`. |
+| `--bench-keys <sequence>` | Run a scripted sequence after loading, for example `"Ctrl+Shift+P,Escape"`. Quoted text such as `'abc'` is typed one character at a time; `Down*40` repeats a key. Developer benchmark option. |
 | `--bench-runs <count>` | Set the number of scripted repetitions. Used with `--bench-keys`. |
 
 Examples:

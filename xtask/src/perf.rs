@@ -185,41 +185,256 @@ const LOAD_TESTS: &[LoadTest] = &[
     test("L19", "Markdown, 128 MiB", "large.md", 5, 1, true),
 ];
 
-/// An interaction test: one process loads the fixture, then sends a key
-/// sequence `runs` times (`--bench-keys`); the first key of each repetition is
-/// timed from its handling to the presented frame. One extra repetition warms up.
+/// An interaction test: one process loads the fixture, sends the untimed
+/// `setup` steps (`setup_repeat` times), then the steps `runs` times
+/// (`--bench-keys`); the first step of each repetition (every step with
+/// `all_steps`) is timed from its handling to the last frame of its work. One
+/// extra repetition warms up unless `warmup` is off. Steps are keys
+/// (`Down*40` repeats) or quoted text (`'abc'`). `select` (`start..end`) is
+/// selected before the setup; `handled` times steps that draw nothing (copies)
+/// until handled; `paced` sends one step per display refresh.
 struct InputTest {
+    id: &'static str,
+    label: &'static str,
+    fixture: &'static str,
+    setup: &'static str,
+    setup_repeat: usize,
+    keys: &'static str,
+    runs: usize,
+    all_steps: bool,
+    select: &'static str,
+    handled: bool,
+    paced: bool,
+    warmup: bool,
+    cap: Duration,
+}
+
+const fn input(
     id: &'static str,
     label: &'static str,
     fixture: &'static str,
     keys: &'static str,
     runs: usize,
-    cap: Duration,
+    cap_secs: u64,
+) -> InputTest {
+    InputTest {
+        id,
+        label,
+        fixture,
+        setup: "",
+        setup_repeat: 0,
+        keys,
+        runs,
+        all_steps: false,
+        select: "",
+        handled: false,
+        paced: false,
+        warmup: true,
+        cap: Duration::from_secs(cap_secs),
+    }
+}
+
+/// Copies `select` of `large.log`; timed until the clipboard is written.
+const fn copy(
+    id: &'static str,
+    label: &'static str,
+    select: &'static str,
+    runs: usize,
+) -> InputTest {
+    InputTest {
+        select,
+        handled: true,
+        ..input(id, label, "large.log", "Ctrl+C", runs, 2)
+    }
+}
+
+/// Copies `select` of `fixture`, then pastes it after the selection.
+const fn paste(
+    id: &'static str,
+    label: &'static str,
+    fixture: &'static str,
+    select: &'static str,
+    runs: usize,
+) -> InputTest {
+    InputTest {
+        select,
+        setup: "Ctrl+C,Right",
+        setup_repeat: 1,
+        ..input(id, label, fixture, "Ctrl+V", runs, 2)
+    }
+}
+
+/// Scroll and jump, one key per display refresh (140 keys).
+const SCROLL_KEYS: &str = concat!(
+    "Down*40,Up*40,PgDn*20,PgUp*20,",
+    "End,Home,End,Home,End,Home,End,Home,End,Home,",
+    "Ctrl+End,Ctrl+Home,Ctrl+End,Ctrl+Home,Ctrl+End,Ctrl+Home,Ctrl+End,Ctrl+Home,Ctrl+End,Ctrl+Home"
+);
+
+const fn scroll(id: &'static str, label: &'static str, fixture: &'static str) -> InputTest {
+    InputTest {
+        all_steps: true,
+        paced: true,
+        warmup: false,
+        ..input(id, label, fixture, SCROLL_KEYS, 1, 3)
+    }
+}
+
+/// Selects `sum_0(` to `sum_9999(` in `medium.c`: exactly 10,000 selections.
+macro_rules! select_10k {
+    () => {
+        r"Ctrl+F,Alt+R,'sum_\d{1,4}\(',Alt+Enter,Escape"
+    };
+}
+/// A caret at the end of each of the 10,000 selections.
+const CARETS_10K: &str = concat!(select_10k!(), ",Right");
+
+const fn carets(
+    id: &'static str,
+    label: &'static str,
+    setup: &'static str,
+    keys: &'static str,
+    runs: usize,
+    cap_secs: u64,
+) -> InputTest {
+    InputTest {
+        setup,
+        setup_repeat: 1,
+        ..input(id, label, "medium.c", keys, runs, cap_secs)
+    }
 }
 
 const INPUT_TESTS: &[InputTest] = &[
+    input(
+        "U01",
+        "Show the Command Palette",
+        "small.py",
+        "Ctrl+Shift+P,Escape",
+        30,
+        1,
+    ),
+    input("U02", "Show favorites", "small.py", "Ctrl+P,Escape", 30, 1),
+    copy("C01", "Copy 1 KiB", "0..1024", 20),
+    copy("C02", "Copy 1 MiB", "0..1048576", 5),
+    copy("C03", "Copy 64 MiB", "0..67108864", 3),
+    paste(
+        "C04",
+        "Paste 1 KiB, Python 8 MiB",
+        "medium.py",
+        "0..1024",
+        20,
+    ),
+    paste(
+        "C05",
+        "Paste 1 MiB, Python 8 MiB",
+        "medium.py",
+        "0..1048576",
+        5,
+    ),
+    paste("C06", "Paste 64 MiB, text", "large.log", "0..67108864", 3),
+    input("E01", "Type, Python 8 MiB", "medium.py", "'x'", 200, 2),
+    input(
+        "E02",
+        "Type at a 64 MiB line start",
+        "line.txt",
+        "'x'",
+        50,
+        1,
+    ),
     InputTest {
-        id: "U01",
-        label: "Show the Command Palette",
-        fixture: "small.py",
-        keys: "Ctrl+Shift+P,Escape",
-        runs: 30,
-        cap: Duration::from_secs(1),
+        all_steps: true,
+        ..input(
+            "E03",
+            "End and Home, 64 MiB line",
+            "line.txt",
+            "End,Home",
+            20,
+            1,
+        )
+    },
+    input("M01", "Add next occurrence", "medium.c", "Ctrl+D", 100, 1),
+    InputTest {
+        setup: "Ctrl+D",
+        setup_repeat: 1,
+        ..input(
+            "M02",
+            "Select all occurrences",
+            "medium.c",
+            "Ctrl+Shift+L",
+            5,
+            1,
+        )
     },
     InputTest {
-        id: "U02",
-        label: "Show favorites",
-        fixture: "small.py",
-        keys: "Ctrl+P,Escape",
-        runs: 30,
-        cap: Duration::from_secs(1),
+        setup: "Ctrl+Shift+Alt+PgDn",
+        setup_repeat: 30,
+        ..input(
+            "M03",
+            "Column selection, 1,000 lines",
+            "medium.c",
+            "Ctrl+Shift+Alt+Right,Ctrl+Shift+Alt+Left",
+            5,
+            1,
+        )
     },
+    input(
+        "M04",
+        "Insert cursor below",
+        "medium.c",
+        "Ctrl+Alt+Down",
+        100,
+        1,
+    ),
+    carets("M05", "Type at 10,000 carets", CARETS_10K, "'x'", 20, 1),
+    carets(
+        "M06",
+        "Backspace at 10,000 carets",
+        CARETS_10K,
+        "Backspace",
+        20,
+        1,
+    ),
+    carets(
+        "M07",
+        "Paste 10,000 pieces",
+        concat!(select_10k!(), ",Ctrl+C,Right"),
+        "Ctrl+V",
+        3,
+        1,
+    ),
+    InputTest {
+        all_steps: true,
+        ..carets(
+            "M08",
+            "Undo and redo, 10,000 carets",
+            concat!(select_10k!(), ",Right,'x'"),
+            "Ctrl+Z,Ctrl+Y",
+            10,
+            1,
+        )
+    },
+    InputTest {
+        setup: "Ctrl+F",
+        setup_repeat: 1,
+        ..input("F01", "Find next, 256 MiB", "large.log", "F3", 30, 1)
+    },
+    input(
+        "F02",
+        "Count matches, 256 MiB",
+        "large.log",
+        "Ctrl+F,Escape",
+        3,
+        2,
+    ),
+    InputTest {
+        setup: "Ctrl+Right,Ctrl+F",
+        setup_repeat: 1,
+        ..input("F03", "Toggle RegEx, 8 MiB", "medium.py", "Alt+R", 30, 1)
+    },
+    scroll("S01", "Scroll and jump, MD 64 KiB", "small.md"),
+    scroll("S02", "Scroll and jump, MD 8 MiB", "medium.md"),
+    scroll("S03", "Scroll and jump, MD 128 MiB", "large.md"),
 ];
-
-/// Interaction tests of v1 that are not implemented in the harness yet.
-const PENDING: &str = "C01-C06, E01-E03, M01-M08, S01-S03";
-/// Sum of the pending interaction test caps, reserved within the total.
-const PENDING_CAPS: Duration = Duration::from_secs(33);
 
 /// What a short-benchmark row reports.
 enum Measure {
@@ -227,10 +442,7 @@ enum Measure {
     FileRead,
     Peak,
     KeyToFrame,
-    /// The feature exists; the interaction harness does not yet.
-    NotMeasured(&'static str),
-    /// The feature itself is not implemented yet.
-    NotImplemented(&'static str),
+    MissedRefreshes,
 }
 
 /// The short benchmark (`--short`): the user-facing story for release notes.
@@ -308,37 +520,30 @@ const SHORT: &[ShortRow] = &[
         "Is typing instant in a big file?",
         "Type in an 8 MiB Python file",
         "E01",
-        Measure::NotMeasured("Key to frame"),
+        Measure::KeyToFrame,
     ),
     row(
         "Is pasting a lot of text fast?",
         "Paste 1 MiB into an 8 MiB Python file",
         "C05",
-        Measure::NotMeasured("Key to frame"),
+        Measure::KeyToFrame,
     ),
     row(
         "Is scrolling smooth?",
         "Scroll and jump in an 8 MiB Markdown file",
         "S02",
-        Measure::NotMeasured("Missed refreshes"),
+        Measure::MissedRefreshes,
     ),
     row(
         "Is multi-cursor editing instant at scale?",
         "Type at 10,000 carets",
         "M05",
-        Measure::NotImplemented("Key to frame"),
+        Measure::KeyToFrame,
     ),
 ];
 
-fn is_pending(measure: &Measure) -> bool {
-    matches!(
-        measure,
-        Measure::NotMeasured(_) | Measure::NotImplemented(_)
-    )
-}
-
 fn short_includes(id: &str) -> bool {
-    SHORT.iter().any(|r| r.id == id && !is_pending(&r.measure))
+    SHORT.iter().any(|r| r.id == id)
 }
 
 /// A Markdown table with aligned columns.
@@ -823,42 +1028,81 @@ fn run_load(exe: &Path, t: &LoadTest) -> Result<Samples, String> {
 struct InputSamples {
     /// Milliseconds from handling the first key to its presented frame.
     key_to_frame: Vec<f64>,
+    peak: f64,
+    /// Display refresh period of paced tests.
+    refresh: Option<f64>,
     elapsed: Duration,
+}
+
+impl InputSamples {
+    /// Share of keys whose frame took longer than one refresh, in percent.
+    fn missed(&self) -> f64 {
+        let refresh = self.refresh.unwrap_or(1000.0 / 60.0);
+        let missed = self.key_to_frame.iter().filter(|&&ms| ms > refresh).count();
+        100.0 * missed as f64 / self.key_to_frame.len().max(1) as f64
+    }
 }
 
 fn run_input(exe: &Path, t: &InputTest) -> Result<InputSamples, String> {
     let start = Instant::now();
-    let runs = (t.runs + 1).to_string();
+    let warmup = usize::from(t.warmup);
+    let runs = (t.runs + warmup).to_string();
+    let setup = vec![t.setup; t.setup_repeat].join(",");
     let mut command = Command::new(exe);
     command
         .args(["--bench-keys", t.keys, "--bench-runs", &runs])
-        .arg(fixture_dir().join(t.fixture));
+        .args(["--bench-setup", &setup]);
+    if !t.select.is_empty() {
+        command.args(["--bench-select", t.select]);
+    }
+    if t.handled {
+        command.arg("--bench-handled");
+    }
+    if t.paced {
+        command.arg("--bench-paced");
+    }
+    command.arg(fixture_dir().join(t.fixture));
     let out =
         run_traced(&mut command, Duration::from_secs(10)).map_err(|e| format!("{}: {e}", t.id))?;
-    let mut first = Vec::new();
+    let mut all = Vec::new();
+    let mut first = 0;
+    let (mut peak, mut refresh) = (None, None);
     for line in out.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        let (step, ms) = line
+        let (name, value) = line
             .strip_prefix("bench.")
-            .and_then(|l| l.split_once("_ms="))
+            .and_then(|l| l.split_once('='))
             .ok_or_else(|| format!("{}: unexpected output line {line:?}", t.id))?;
-        let ms = ms
+        let value = value
             .parse::<f64>()
             .ok()
-            .filter(|ms| ms.is_finite() && *ms >= 0.0)
+            .filter(|v| v.is_finite() && *v >= 0.0)
             .ok_or_else(|| format!("{}: invalid value in {line:?}", t.id))?;
-        if step == "0" {
-            first.push(ms);
+        match name {
+            "peak_private_mib" => peak = Some(value),
+            "refresh_ms" => refresh = Some(value),
+            _ => {
+                let step = name
+                    .strip_suffix("_ms")
+                    .ok_or_else(|| format!("{}: unexpected output line {line:?}", t.id))?;
+                if step == "0" {
+                    first += 1;
+                }
+                if step == "0" || t.all_steps {
+                    all.push(value);
+                }
+            }
         }
     }
-    if first.len() != t.runs + 1 {
+    if first != t.runs + warmup {
         return Err(format!(
             "{}: {} of {} repetitions reported",
             t.id,
-            first.len(),
-            t.runs + 1
+            first,
+            t.runs + warmup
         ));
     }
-    first.remove(0);
+    // Lines are in run order; the first run is the warm-up.
+    all.drain(..all.len() / (t.runs + warmup) * warmup);
     let elapsed = start.elapsed();
     if elapsed > t.cap {
         return Err(format!(
@@ -869,7 +1113,9 @@ fn run_input(exe: &Path, t: &InputTest) -> Result<InputSamples, String> {
         ));
     }
     Ok(InputSamples {
-        key_to_frame: first,
+        key_to_frame: all,
+        peak: peak.unwrap_or(0.0),
+        refresh,
         elapsed,
     })
 }
@@ -888,6 +1134,16 @@ fn command_output(program: &str, args: &[&str]) -> String {
 pub fn bench_perf(args: &[String]) -> ExitCode {
     let print_hashes = args.iter().any(|a| a == "--print-hashes");
     let short = args.iter().any(|a| a == "--short");
+    // `--only L01,M01`: a focused subset; the total cap is not checked.
+    let only: Option<Vec<String>> = args
+        .iter()
+        .position(|a| a == "--only")
+        .and_then(|i| args.get(i + 1))
+        .map(|ids| ids.split(',').map(|id| id.trim().to_owned()).collect());
+    let selected = |id: &str| {
+        only.as_ref().is_none_or(|ids| ids.iter().any(|i| i == id))
+            && (!short || short_includes(id))
+    };
     if !print_hashes && !build_release() {
         eprintln!("release build failed");
         return ExitCode::FAILURE;
@@ -928,7 +1184,7 @@ pub fn bench_perf(args: &[String]) -> ExitCode {
     println!();
     let exe = release_exe();
     let mut results = Vec::new();
-    for t in LOAD_TESTS.iter().filter(|t| !short || short_includes(t.id)) {
+    for t in LOAD_TESTS.iter().filter(|t| selected(t.id)) {
         match run_load(&exe, t) {
             Ok(samples) => results.push((t, samples)),
             Err(e) => {
@@ -938,10 +1194,7 @@ pub fn bench_perf(args: &[String]) -> ExitCode {
         }
     }
     let mut inputs = Vec::new();
-    for t in INPUT_TESTS
-        .iter()
-        .filter(|t| !short || short_includes(t.id))
-    {
+    for t in INPUT_TESTS.iter().filter(|t| selected(t.id)) {
         match run_input(&exe, t) {
             Ok(samples) => inputs.push((t, samples)),
             Err(e) => {
@@ -981,29 +1234,56 @@ pub fn bench_perf(args: &[String]) -> ExitCode {
         );
     }
     println!();
-    println!("| ID  | Test                     | Key to frame [ms] | p95 [ms] | Time [s] |");
-    println!("| --- | ------------------------ | ----------------- | -------- | -------- |");
-    for (t, samples) in &inputs {
+    println!(
+        "| ID  | Test                          | Key to frame [ms] | p95 [ms] | Peak private [MiB] | Time [s] |"
+    );
+    println!(
+        "| --- | ----------------------------- | ----------------- | -------- | ------------------ | -------- |"
+    );
+    for (t, samples) in inputs.iter().filter(|(t, _)| !t.paced) {
         let mut sorted = samples.key_to_frame.clone();
         sorted.sort_by(f64::total_cmp);
         println!(
-            "| {:<3} | {:<24} | {:>17.2} | {:>8.2} | {:>8.2} |",
+            "| {:<3} | {:<29} | {:>17.2} | {:>8.2} | {:>18.1} | {:>8.2} |",
             t.id,
             t.label,
             median(&samples.key_to_frame),
             percentile(&sorted, 0.95),
+            samples.peak,
             samples.elapsed.as_secs_f64()
         );
     }
+    if inputs.iter().any(|(t, _)| t.paced) {
+        println!();
+        println!(
+            "| ID  | Test                          | p95 [ms] | Max [ms] | Missed refreshes [%] | Refresh [ms] | Time [s] |"
+        );
+        println!(
+            "| --- | ----------------------------- | -------- | -------- | -------------------- | ------------ | -------- |"
+        );
+        for (t, samples) in inputs.iter().filter(|(t, _)| t.paced) {
+            let mut sorted = samples.key_to_frame.clone();
+            sorted.sort_by(f64::total_cmp);
+            println!(
+                "| {:<3} | {:<29} | {:>8.2} | {:>8.2} | {:>20.1} | {:>12.2} | {:>8.2} |",
+                t.id,
+                t.label,
+                percentile(&sorted, 0.95),
+                sorted.last().copied().unwrap_or(0.0),
+                samples.missed(),
+                samples.refresh.unwrap_or(0.0),
+                samples.elapsed.as_secs_f64()
+            );
+        }
+    }
     println!();
     println!(
-        "Medians. Fixtures {:.2} s; total {:.1} s (cap {} s, {} s reserved for interaction tests). Not run (need the scripted input mode): {PENDING}.",
+        "Medians. Fixtures {:.2} s; total {:.1} s (cap {} s).",
         fixtures.as_secs_f64(),
         total.as_secs_f64(),
         TOTAL_CAP.as_secs(),
-        PENDING_CAPS.as_secs()
     );
-    if total + PENDING_CAPS > TOTAL_CAP {
+    if only.is_none() && total > TOTAL_CAP {
         eprintln!("the run exceeded its {} s cap", TOTAL_CAP.as_secs());
         return ExitCode::FAILURE;
     }
@@ -1023,6 +1303,10 @@ fn print_short(results: &[(&LoadTest, Samples)], inputs: &[(&InputTest, InputSam
                         format!("{:.2} ms", median(&s.key_to_frame))
                     }),
                 ),
+                (Measure::MissedRefreshes, _) => (
+                    "Missed refreshes".to_owned(),
+                    input.map_or_else(String::new, |s| format!("{:.1} %", s.missed())),
+                ),
                 (Measure::FirstPaint, Some(s)) => (
                     "Time to first frame".to_owned(),
                     format!("{:.1} ms", median(&s.first_paint)),
@@ -1035,10 +1319,6 @@ fn print_short(results: &[(&LoadTest, Samples)], inputs: &[(&InputTest, InputSam
                     "Peak memory".to_owned(),
                     format!("{:.1} MiB", median(&s.peak)),
                 ),
-                (Measure::NotMeasured(m), _) => ((*m).to_owned(), "Not measured yet".to_owned()),
-                (Measure::NotImplemented(m), _) => {
-                    ((*m).to_owned(), "Feature not implemented yet".to_owned())
-                }
                 (_, None) => unreachable!("short rows of load tests are run"),
             };
             [
@@ -1093,15 +1373,11 @@ mod tests {
             let test = LOAD_TESTS.iter().find(|t| t.id == row.id);
             let input = INPUT_TESTS.iter().find(|t| t.id == row.id);
             match row.measure {
-                Measure::NotMeasured(_) | Measure::NotImplemented(_) => {
-                    assert!(
-                        test.is_none() && input.is_none(),
-                        "{} is implemented",
-                        row.id
-                    )
-                }
                 Measure::FileRead => assert!(test.is_some_and(|t| t.loaded), "{}", row.id),
                 Measure::KeyToFrame => assert!(input.is_some(), "{} is not an input test", row.id),
+                Measure::MissedRefreshes => {
+                    assert!(input.is_some_and(|t| t.paced), "{} is not paced", row.id)
+                }
                 _ => assert!(test.is_some(), "{} is not a load test", row.id),
             }
         }

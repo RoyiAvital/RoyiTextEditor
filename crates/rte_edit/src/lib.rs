@@ -10,9 +10,10 @@ mod commands;
 mod cursor;
 mod history;
 mod motion;
+mod multi;
 mod selection;
 
-pub use columns::{COLUMN_SCAN_LIMIT, cell_width, column_of, offset_at_column};
+pub use columns::{COLUMN_SCAN_LIMIT, cell_width, column_after, column_of, offset_at_column};
 pub use commands::{
     Clip, Command, EditKind, EditOptions, apply, backspace, copy, cut, delete_forward,
     delete_word_left, delete_word_right, insert, newline, outdent, paste, tab,
@@ -22,6 +23,7 @@ pub use motion::{
     MOTION_SCAN_LIMIT, column_at, content_range, line_end, line_home, next_boundary,
     offset_in_line, prev_boundary, snap_to_boundary, vertical, word_at, word_left, word_right,
 };
+pub use multi::{add_cursors_vertical, box_select, cell_of, cursors_at_line_ends, select_lines};
 pub use selection::{Selection, Selections};
 
 #[cfg(test)]

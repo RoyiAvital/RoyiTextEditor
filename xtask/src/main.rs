@@ -445,6 +445,68 @@ mod tests {
     use super::*;
 
     #[test]
+    fn docs_mermaid_staging_preserves_existing_assets_and_cleanup_ownership() {
+        let script = r#"
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$parseErrors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile(
+    $env:RTE_DOCS_BUILD_SCRIPT, [ref]$tokens, [ref]$parseErrors)
+if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
+$loop = $ast.Find({ param($node)
+    $node -is [Management.Automation.Language.ForEachStatementAst] -and
+    $node.Extent.Text -match '^foreach \(\$File in @\(''mermaid\.min\.js'', ''mermaid-init\.js''\)\)'
+}, $true)
+if (-not $loop) { throw 'Mermaid staging loop not found.' }
+$stage = [scriptblock]::Create($loop.Extent.Text)
+$folder = Join-Path ([IO.Path]::GetTempPath()) ('rte-mermaid-test-' + [Guid]::NewGuid().ToString('N'))
+try {
+    foreach ($existingCount in 0..2) {
+        $DocsDir = Join-Path $folder "case-$existingCount\docs"
+        $MermaidStage = Join-Path $folder "case-$existingCount\incoming"
+        $null = [IO.Directory]::CreateDirectory((Join-Path $DocsDir 'theme'))
+        $null = [IO.Directory]::CreateDirectory($MermaidStage)
+        $StagedFiles = New-Object 'System.Collections.Generic.List[string]'
+        $names = @('mermaid.min.js', 'mermaid-init.js')
+        foreach ($name in $names) {
+            [IO.File]::WriteAllText((Join-Path $MermaidStage $name), "generated-$name")
+        }
+        for ($index = 0; $index -lt $existingCount; $index++) {
+            [IO.File]::WriteAllText((Join-Path $DocsDir "theme\$($names[$index])"), "tracked-$($names[$index])")
+        }
+        & $stage
+        if ($StagedFiles.Count -ne 2 - $existingCount) { throw 'Wrong cleanup ownership count.' }
+        for ($index = 0; $index -lt $names.Count; $index++) {
+            $destination = Join-Path $DocsDir "theme\$($names[$index])"
+            $expected = if ($index -lt $existingCount) { "tracked-$($names[$index])" } else { "generated-$($names[$index])" }
+            if ([IO.File]::ReadAllText($destination) -cne $expected) { throw 'Asset was overwritten or not staged.' }
+        }
+        foreach ($created in $StagedFiles) { Remove-Item -LiteralPath $created -Force }
+        for ($index = 0; $index -lt $names.Count; $index++) {
+            $destination = Join-Path $DocsDir "theme\$($names[$index])"
+            if ((Test-Path $destination) -ne ($index -lt $existingCount)) { throw 'Cleanup affected the wrong assets.' }
+        }
+    }
+}
+finally {
+    if (Test-Path $folder) { Remove-Item -LiteralPath $folder -Recurse -Force }
+}
+"#;
+        let output = Command::new("powershell.exe")
+            .env_remove("PSModulePath")
+            .env("RTE_DOCS_BUILD_SCRIPT", root().join("tools/Build-Docs.ps1"))
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .output()
+            .expect("run the documentation staging regression");
+        assert!(
+            output.status.success(),
+            "Mermaid staging failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
     fn pages_installs_screenshot_toolchain_before_building_documentation() {
         let workflow = include_str!("../../.github/workflows/pages.yml");
         let toolchain = include_str!("../../rust-toolchain.toml");

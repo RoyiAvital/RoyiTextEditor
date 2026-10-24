@@ -16,6 +16,7 @@ mod fuzzy;
 mod loader;
 mod palette;
 mod save;
+mod search;
 mod trace;
 
 use std::borrow::Cow;
@@ -43,9 +44,15 @@ struct Args {
     trace_startup: bool,
     exit_after_first_frame: bool,
     exit_after_load: bool,
-    /// `--bench-keys <keys>` and `--bench-runs <n>`: scripted input benchmark.
+    /// `--bench-keys <keys>`, `--bench-runs <n>`, `--bench-setup <keys>`,
+    /// `--bench-select <start>..<end>`, `--bench-handled` and `--bench-paced`:
+    /// scripted input benchmark.
     bench_keys: Option<String>,
     bench_runs: Option<String>,
+    bench_setup: Option<String>,
+    bench_select: Option<String>,
+    bench_handled: bool,
+    bench_paced: bool,
 }
 
 fn parse_args(raw: impl IntoIterator<Item = OsString>) -> Args {
@@ -58,6 +65,10 @@ fn parse_args(raw: impl IntoIterator<Item = OsString>) -> Args {
         exit_after_load: false,
         bench_keys: None,
         bench_runs: None,
+        bench_setup: None,
+        bench_select: None,
+        bench_handled: false,
+        bench_paced: false,
     };
     let mut raw = raw.into_iter();
     while let Some(arg) = raw.next() {
@@ -69,6 +80,14 @@ fn parse_args(raw: impl IntoIterator<Item = OsString>) -> Args {
             Some("--exit-after-load") => args.exit_after_load = true,
             Some("--bench-keys") => args.bench_keys = raw.next().and_then(|k| k.into_string().ok()),
             Some("--bench-runs") => args.bench_runs = raw.next().and_then(|n| n.into_string().ok()),
+            Some("--bench-setup") => {
+                args.bench_setup = raw.next().and_then(|k| k.into_string().ok());
+            }
+            Some("--bench-select") => {
+                args.bench_select = raw.next().and_then(|r| r.into_string().ok());
+            }
+            Some("--bench-handled") => args.bench_handled = true,
+            Some("--bench-paced") => args.bench_paced = true,
             _ => args.path = Some(PathBuf::from(arg)),
         }
     }
@@ -88,7 +107,21 @@ fn main() {
     let args = parse_args(std::env::args_os().skip(1));
     let bench = match &args.bench_keys {
         None => None,
-        Some(keys) => match bench::parse(keys, args.bench_runs.as_deref().unwrap_or("1")) {
+        Some(keys) => match bench::parse(
+            keys,
+            args.bench_runs.as_deref().unwrap_or("1"),
+            args.bench_setup.as_deref().unwrap_or(""),
+        )
+        .and_then(|mut script| {
+            script.select = args
+                .bench_select
+                .as_deref()
+                .map(bench::parse_range)
+                .transpose()?;
+            script.handled = args.bench_handled;
+            script.paced = args.bench_paced;
+            Ok(script)
+        }) {
             Ok(script) => Some(script),
             Err(e) => {
                 eprintln!("--bench-keys: {e}");
@@ -149,6 +182,8 @@ fn main() {
             exit_after_first_frame: args.exit_after_first_frame,
             exit_after_load: args.exit_after_load,
             recent_count: config.recent_count,
+            multi_cursor_limit: config.multi_cursor_limit,
+            replace_all_max_mib: config.replace_all_max_mib,
             user_dir: exe_dir.map(|dir| dir.join("UserSettings")),
             notice: config_problem,
             highlighting: args.highlighting(),

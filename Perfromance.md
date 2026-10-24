@@ -1,5 +1,143 @@
 # Performance
 
+## 0.3.0
+
+### Main Performance Oriented Changes
+
+- Search and multi-cursor cost nothing at startup: the search box, the search
+  thread and the count thread are created on first use.
+- Search never blocks typing: only bounded literal scans run on the UI
+  thread. Counts run as one exact enumeration on their own thread, so
+  navigation and highlights are answered while a count runs; a newer query
+  cancels older work.
+- Highlights are bounded by what is visible: at most 64 KiB per row, 1 MiB
+  and 65,536 ranges per request; the view places them in one pass per row.
+- Literal search scans the text pieces in place; look-around patterns read
+  and validate each line once.
+- Limits are checked before work: the cursor limit before selections are
+  built, the Replace All memory cap before each allocation and expansion.
+
+### Performance Results
+
+Using the Performance Benchmark v`1` (`cargo xtask bench-perf`).
+
+Reference machine: AMD Ryzen 9 9950X, 94 GiB RAM, Windows 11 Pro for
+Workstations, 2560 × 1600 at 59 Hz, release build, warm file cache.
+
+| ID  | Test                                 | Metric                   | 0.3.0  | 0.2.0  | 0.1.0  | Prev. 3 |
+| --- | ------------------------------------ | ------------------------ | ------ | ------ | ------ | ------- |
+| L01 | Empty file                           | First paint [ms]         | 21.3   | 20.2   | 13.2   | —       |
+| L01 | Empty file                           | Peak private [MiB]       | 5.0    | 5.0    | 4.6    | —       |
+| L02 | Text, 64 KiB                         | First paint [ms]         | 21.4   | 20.6   | 13.6   | —       |
+| L02 | Text, 64 KiB                         | Peak private [MiB]       | 5.3    | 5.3    | 4.9    | —       |
+| L03 | Text, 256 MiB                        | First paint [ms]         | 23.3   | 21.5   | 13.6   | —       |
+| L03 | Text, 256 MiB                        | File read [ms]           | 77.7   | 71.9   | 70.1   | —       |
+| L03 | Text, 256 MiB                        | Peak private [MiB]       | 267.4  | 267.3  | 267.0  | —       |
+| L04 | Python, 64 KiB                       | First paint [ms]         | 21.2 ¹ | 20.2 ¹ | 13.5 ¹ | —       |
+| L04 | Python, 64 KiB                       | Peak private [MiB]       | 5.2    | 5.2    | 4.8    | —       |
+| L05 | C, 64 KiB                            | First paint [ms]         | 21.1 ¹ | 20.3 ¹ | 13.6 ¹ | —       |
+| L05 | C, 64 KiB                            | Peak private [MiB]       | 5.2    | 5.2    | 4.8    | —       |
+| L06 | JSON, 64 KiB                         | First paint [ms]         | 21.8 ¹ | 20.4 ¹ | 13.7 ¹ | —       |
+| L06 | JSON, 64 KiB                         | Peak private [MiB]       | 5.6    | 5.5    | 5.2    | —       |
+| L07 | Markdown, 64 KiB                     | First paint [ms]         | 21.1 ¹ | 20.0 ¹ | 13.5 ¹ | —       |
+| L07 | Markdown, 64 KiB                     | Peak private [MiB]       | 5.1    | 5.1    | 4.8    | —       |
+| L08 | CSV, 64 KiB                          | First paint [ms]         | 20.9 ¹ | 19.9 ¹ | 13.8 ¹ | —       |
+| L08 | CSV, 64 KiB                          | Peak private [MiB]       | 5.2    | 5.2    | 4.8    | —       |
+| L09 | Python, 8 MiB                        | First paint [ms]         | 21.4 ¹ | 20.4 ¹ | 14.2 ¹ | —       |
+| L09 | Python, 8 MiB                        | File read [ms]           | 8.9    | 8.5    | 7.9    | —       |
+| L09 | Python, 8 MiB                        | Fully highlighted [ms]   | n/i    | n/i    | n/i    | —       |
+| L09 | Python, 8 MiB                        | Peak private [MiB]       | 13.5   | 13.5   | 13.1   | —       |
+| L10 | C, 8 MiB                             | First paint [ms]         | 22.0 ¹ | 20.0 ¹ | 14.2 ¹ | —       |
+| L10 | C, 8 MiB                             | File read [ms]           | 8.6    | 8.4    | 7.9    | —       |
+| L10 | C, 8 MiB                             | Peak private [MiB]       | 13.4   | 13.4   | 13.2   | —       |
+| L11 | JSON, 8 MiB                          | First paint [ms]         | 22.8 ¹ | 20.8 ¹ | 14.9 ¹ | —       |
+| L11 | JSON, 8 MiB                          | File read [ms]           | 8.8    | 8.0    | 7.8    | —       |
+| L11 | JSON, 8 MiB                          | Peak private [MiB]       | 13.4   | 13.5   | 13.2   | —       |
+| L12 | Markdown, 8 MiB                      | First paint [ms]         | 23.1 ¹ | 20.1 ¹ | 14.2 ¹ | —       |
+| L12 | Markdown, 8 MiB                      | File read [ms]           | 9.2    | 8.3    | 8.0    | —       |
+| L12 | Markdown, 8 MiB                      | Peak private [MiB]       | 13.5   | 13.4   | 13.2   | —       |
+| L13 | CSV, 8 MiB                           | First paint [ms]         | 22.8 ¹ | 20.0 ¹ | 14.1 ¹ | —       |
+| L13 | CSV, 8 MiB                           | File read [ms]           | 9.2    | 8.2    | 7.9    | —       |
+| L13 | CSV, 8 MiB                           | Peak private [MiB]       | 13.5   | 13.5   | 13.2   | —       |
+| L14 | Read-only text, 256 MiB              | First paint [ms]         | 24.8   | 20.8   | 13.4   | —       |
+| L14 | Read-only text, 256 MiB              | File read [ms]           | 85.2   | 72.7   | 71.5   | —       |
+| L14 | Read-only text, 256 MiB              | Peak private [MiB]       | 267.3  | 267.4  | 267.0  | —       |
+| L15 | Read-only Python, 64 KiB             | First paint [ms]         | 23.0 ¹ | 19.7 ¹ | 13.4 ¹ | —       |
+| L15 | Read-only Python, 64 KiB             | Peak private [MiB]       | 5.2    | 5.2    | 4.8    | —       |
+| L16 | Single line text, 64 MiB             | First paint [ms]         | 23.0   | 21.9   | 13.9   | —       |
+| L16 | Single line text, 64 MiB             | File read [ms]           | 25.2   | 24.3   | 23.8   | —       |
+| L16 | Single line text, 64 MiB             | Peak private [MiB]       | 72.0   | 72.1   | 71.7   | —       |
+| L17 | Single line JSON, 8 MiB              | First paint [ms]         | 21.2 ¹ | 19.9 ¹ | 14.8 ¹ | —       |
+| L17 | Single line JSON, 8 MiB              | File read [ms]           | 8.1    | 8.0    | 8.5    | —       |
+| L17 | Single line JSON, 8 MiB              | Peak private [MiB]       | 13.4   | 13.5   | 13.2   | —       |
+| L18 | Notebook as JSON, 8 MiB              | First paint [ms]         | 21.4 ¹ | 20.4 ¹ | 14.3 ¹ | —       |
+| L18 | Notebook as JSON, 8 MiB              | File read [ms]           | 8.4    | 8.1    | 8.2    | —       |
+| L18 | Notebook as JSON, 8 MiB              | Peak private [MiB]       | 13.4   | 13.4   | 13.1   | —       |
+| L19 | Markdown, 128 MiB                    | First paint [ms]         | 23.4   | 21.4   | 13.7   | —       |
+| L19 | Markdown, 128 MiB                    | File read [ms]           | 43.1   | 39.8   | 39.6   | —       |
+| L19 | Markdown, 128 MiB                    | Peak private [MiB]       | 136.8  | 136.8  | 136.5  | —       |
+| U01 | Show the Command Palette             | Key to frame [ms]        | 0.38   | 0.38   | n/i    | —       |
+| U01 | Show the Command Palette             | Key to frame, p95 [ms]   | 4.97   | 0.61   | n/i    | —       |
+| U02 | Show favorites                       | Key to frame [ms]        | 0.41   | 0.33   | n/i    | —       |
+| U02 | Show favorites                       | Key to frame, p95 [ms]   | 4.96   | 0.58   | n/i    | —       |
+| C01 | Copy 1 KiB                           | Key to clipboard [ms]    | 0.53   | n/m    | n/m    | —       |
+| C02 | Copy 1 MiB                           | Key to clipboard [ms]    | 1.61   | n/m    | n/m    | —       |
+| C03 | Copy 64 MiB                          | Key to clipboard [ms]    | 113.88 | n/m    | n/m    | —       |
+| C04 | Paste 1 KiB into Python, 8 MiB       | Key to frame [ms]        | 0.60   | n/m    | n/m    | —       |
+| C05 | Paste 1 MiB into Python, 8 MiB       | Key to frame [ms]        | 2.02   | n/m    | n/m    | —       |
+| C06 | Paste 64 MiB into text               | Key to frame [ms]        | 104.72 | n/m    | n/m    | —       |
+| C06 | Paste 64 MiB into text               | Peak private [MiB]       | 781.4  | n/m    | n/m    | —       |
+| E01 | Typing in Python, 8 MiB              | Key to frame [ms]        | 0.35   | n/m    | n/m    | —       |
+| E02 | Typing at the start of a 64 MiB line | Key to frame [ms]        | 0.30   | n/m    | n/m    | —       |
+| E03 | End and Home on a 64 MiB line        | Key to frame [ms]        | 0.42   | n/m    | n/m    | —       |
+| M01 | Add next occurrence                  | Key to frame [ms]        | 0.42   | n/i    | n/i    | —       |
+| M02 | Select all occurrences               | Key to frame [ms]        | 0.80   | n/i    | n/i    | —       |
+| M03 | Column selection, 1,000 lines        | Key to frame [ms]        | 1.21   | n/i    | n/i    | —       |
+| M04 | Insert cursor below                  | Key to frame [ms]        | 0.44   | n/i    | n/i    | —       |
+| M05 | Type at 10,000 carets                | Key to frame [ms]        | 3.64   | n/i    | n/i    | —       |
+| M05 | Type at 10,000 carets                | Peak private [MiB]       | 33.8   | n/i    | n/i    | —       |
+| M06 | Backspace at 10,000 carets           | Key to frame [ms]        | 4.25   | n/i    | n/i    | —       |
+| M07 | Paste 10,000 pieces                  | Key to frame [ms]        | 5.22   | n/i    | n/i    | —       |
+| M08 | Undo and redo, 10,000 carets         | Key to frame [ms]        | 0.49   | n/i    | n/i    | —       |
+| S01 | Scroll and jump, Markdown, 64 KiB    | Key to frame, p95 [ms]   | 2.13   | n/m    | n/m    | —       |
+| S01 | Scroll and jump, Markdown, 64 KiB    | Key to frame, max [ms]   | 2.52   | n/m    | n/m    | —       |
+| S01 | Scroll and jump, Markdown, 64 KiB    | Missed refreshes [%]     | 0.0    | n/m    | n/m    | —       |
+| S02 | Scroll and jump, Markdown, 8 MiB     | Key to frame, p95 [ms]   | 2.49   | n/m    | n/m    | —       |
+| S02 | Scroll and jump, Markdown, 8 MiB     | Key to frame, max [ms]   | 3.88   | n/m    | n/m    | —       |
+| S02 | Scroll and jump, Markdown, 8 MiB     | Missed refreshes [%]     | 0.0    | n/m    | n/m    | —       |
+| S02 | Scroll and jump, Markdown, 8 MiB     | Jump to highlighted [ms] | n/i    | n/i    | n/i    | —       |
+| S03 | Scroll and jump, Markdown, 128 MiB   | Key to frame, p95 [ms]   | 2.62   | n/m    | n/m    | —       |
+| S03 | Scroll and jump, Markdown, 128 MiB   | Key to frame, max [ms]   | 2.87   | n/m    | n/m    | —       |
+| S03 | Scroll and jump, Markdown, 128 MiB   | Missed refreshes [%]     | 0.0    | n/m    | n/m    | —       |
+| F01 | Find next, text, 256 MiB             | Key to frame [ms]        | 0.53   | n/i    | n/i    | —       |
+| F02 | Count matches, text, 256 MiB         | Key to final count [ms]  | 218.81 | n/i    | n/i    | —       |
+| F03 | Toggle RegEx, Python, 8 MiB          | Key to final count [ms]  | 3.08   | n/i    | n/i    | —       |
+| —   | Whole suite (implemented tests)      | Run time [s]             | 21.8   | 9.6    | 6.7    | —       |
+
+Values are medians. — no earlier version; n/i: feature not implemented
+yet (highlighting: M6; search and multi-cursor before 0.3.0); n/m: not
+measured, the interaction harness did not cover the test yet. ¹ Plain text:
+syntax highlighting is not implemented in 0.3.0.
+
+All tests of v1 run from 0.3.0 on. Interaction tests use the scripted input
+mode with untimed setup steps (see [Tests](#tests)). A key that starts
+search-thread work is timed to the frame that shows its result: F02 and F03
+include the full count of the file. Copies (C01-C03) are timed until the
+clipboard is written; their peak memory includes the 256 MiB fixture. The
+scroll tests send one key per display refresh (16.67 ms here) and count a
+missed refresh when a key took longer than one refresh. The whole suite takes
+longer than in 0.2.0 because it runs 23 more tests. The U01 and U02 p95
+values are the second slowest of 30 repetitions and vary between runs (0.77
+and 0.57 ms in another full run of this session).
+
+This session ran at the slower environment level described under 0.1.0, as
+for 0.2.0. First paint and file read differ from 0.2.0 by up to 4.0 ms and
+12.5 ms without a startup-related change; only L01 was compared directly: an
+A/B against 0.2.0 rebuilt from its tag, 30 interleaved launches each,
+measured first paint 21.0 ms against 21.3 ms and 5.0 MiB peak memory for
+both (before the review fixes of 0.3.0, which do not touch startup). The
+executable grows from 2.0 MiB to 4.0 MiB (regular expression engines).
+
 ## 0.2.0
 
 ### Main Performance Oriented Changes
@@ -251,11 +389,14 @@ run directly from the VS Code terminal.
 
 ### v1
 
-Status: load tests (L01-L19) and the Command Palette tests (U01-U02) are
-implemented in `cargo xtask bench-perf` ([xtask/src/perf.rs](xtask/src/perf.rs));
-they run in about 7-10 s. U01-U02 use the editor's scripted input mode
-(`--bench-keys <keys> --bench-runs <n>`); the other interaction tests are
-specified and need more scripted actions. The whole
+Status: all tests are implemented in `cargo xtask bench-perf`
+([xtask/src/perf.rs](xtask/src/perf.rs)); the suite runs in about 22 s.
+Interaction tests use the editor's scripted input mode
+(`--bench-setup <steps> --bench-keys <steps> --bench-runs <n>`, where a
+step is a key, a repeated key such as `Down*40`, or quoted text such as
+`'abc'`, typed one character per step; `--bench-select <start>..<end>`,
+`--bench-handled` and `--bench-paced`, see below).
+`--only L01,F01` runs a subset (its total is not checked). The whole
 suite should not exceed 60 seconds on the reference machine, including
 fixture generation on a first run; faster is better.
 
@@ -274,21 +415,27 @@ fixture generation on a first run; faster is better.
     small files are read before the first paint).
   - **Peak private:** `PeakPagefileUsage` reported by the editor at exit.
 - **Interaction tests** run one process per scenario with a scripted input
-  sequence, started after the file is fully loaded. Each repetition measures
-  from the input message to the frame drawn (after `BitBlt`, without the
-  composition wait), and to clipboard ownership for copies.
-- **Scroll and jump tests** (S01-S03) send one key per display refresh, like
-  a held key at the display rate: `Down` × 40, `Up` × 40, `PgDn` × 20,
-  `PgUp` × 20, `End` and `Home` alternating × 10 on long lines, `Ctrl+End`
-  and `Ctrl+Home` alternating × 10 (140 keys, about 2.4 s at 59 Hz). They
-  report the p95 and the maximum key-to-frame time and the share of keys whose
-  frame missed the next refresh (16.9 ms at 59 Hz). Smooth means no missed
+  sequence, started after the file is fully loaded. An initial selection
+  (`--bench-select`) and untimed setup keys come first. Each repetition
+  measures from the input message to the frame drawn (after `BitBlt`,
+  without the composition wait); copies draw nothing and are measured until
+  the clipboard is written (`--bench-handled`). A key that starts
+  search-thread work (navigation, select all, the count and highlights of the
+  search box) is measured to the frame that shows its result. Peak private
+  memory is reported at exit.
+- **Scroll and jump tests** (S01-S03, `--bench-paced`) send each key once
+  the previous frame has been composed, one key per display refresh like a
+  held key: `Down` × 40, `Up` × 40, `PgDn` × 20, `PgUp` × 20, `End` and
+  `Home` alternating × 10, `Ctrl+End` and `Ctrl+Home` alternating × 10
+  (140 keys, about 2.4 s at 60 Hz). They report the p95 and the maximum
+  key-to-frame time and the share of keys whose frame took longer than one
+  refresh period (from DWM, 16.7 ms at 60 Hz). Smooth means no missed
   refresh. S02 also reports the time from a `Ctrl+End` or `Ctrl+Home` jump to
   the first highlighted frame (viewport-first highlighting, see
   [Plan/Architecture.md](Plan/Architecture.md)). S03 is above
   `syntax.maxFileMiB` and scrolls plain text.
 - Statistics: median of all repetitions; p95 for tests with ≥ 20 repetitions;
-  one warm-up per test, not counted.
+  one warm-up per test, not counted (none for the scroll tests).
 - Each test has a time cap; a test over its cap fails the run, so the suite
   cannot exceed its total budget.
 - Results are comparable only within one benchmark version. Once a version
@@ -390,24 +537,53 @@ Each code fixture repeats a block containing every highlighted element:
 | E01     | Type 200 characters                         | `medium.py`                     | 200               | 2       |
 | E02     | Type 50 characters at the line start        | `line.txt`                      | 50                | 1       |
 | E03     | `End`, then `Home`                          | `line.txt`                      | 20                | 1       |
-| M01     | Add next occurrence (`Ctrl+D`)              | `medium.c`                      | 100               | 2       |
-| M02     | Select all occurrences (10,000 cap)         | `medium.c`                      | 5                 | 2       |
-| M03     | Column selection over 1,000 lines           | `medium.c`                      | 5                 | 2       |
-| M04     | Insert cursor below (`Ctrl+Alt+Down`)       | `medium.c`                      | 100               | 2       |
-| M05     | Type 20 characters at 10,000 carets         | `medium.c`                      | 20                | 2       |
-| M06     | Backspace 20 times at 10,000 carets         | `medium.c`                      | 20                | 2       |
+| M01     | Add next occurrence (`Ctrl+D`)              | `medium.c`                      | 100               | 1       |
+| M02     | Select all occurrences of `#` (10,000 cap)  | `medium.c`                      | 5                 | 1       |
+| M03     | Column selection over 1,000 lines           | `medium.c`                      | 5                 | 1       |
+| M04     | Insert cursor below (`Ctrl+Alt+Down`)       | `medium.c`                      | 100               | 1       |
+| M05     | Type 20 characters at 10,000 carets         | `medium.c`                      | 20                | 1       |
+| M06     | Backspace 20 times at 10,000 carets         | `medium.c`                      | 20                | 1       |
 | M07     | Paste 10,000 pieces, one per caret          | `medium.c`                      | 3                 | 1       |
 | M08     | Undo and redo a 10,000-caret edit           | `medium.c`                      | 10                | 1       |
+| F01     | Find next (`F3`), seeded `2026`             | `large.log`                     | 30                | 1       |
+| F02     | Open the search box: count all matches      | `large.log`                     | 3                 | 2       |
+| F03     | Toggle RegEx: count and highlights          | `medium.py`                     | 30                | 1       |
 | S01     | Scroll and jump, small file                 | `small.md`                      | 140 keys          | 3       |
 | S02     | Scroll and jump, medium file                | `medium.md`                     | 140 keys          | 3       |
 | S03     | Scroll and jump, large file                 | `large.md`                      | 140 keys          | 3       |
 
-Load caps add up to 21 s, interaction caps to 35 s and fixture generation is
-capped at 3 s, so a run cannot exceed 59 s. Load caps are about twice the
-measured time. The harness fails when the load tests leave less than 35 s for
-the interaction tests. On the reference machine the load tests take about 7 s,
+Load caps add up to 21 s, interaction caps to 33 s and fixture generation is
+capped at 3 s, so a run cannot exceed 57 s. Load caps are about twice the
+measured time. On the reference machine the load tests take about 7 s,
 plus about 1 s for fixtures on a first run. CSV highlighting requires adding
 CSV to the language registry; it is not in the initial language list.
+
+Setup and keys of the scripted interaction tests:
+
+| ID      | Setup (untimed)                                   | Timed keys                      |
+| ------- | ------------------------------------------------- | ------------------------------- |
+| C01-C03 | Select bytes 0 to 1 KiB, 1 MiB, 64 MiB            | `Ctrl+C` (until handled)        |
+| C04-C05 | Select bytes 0 to 1 KiB, 1 MiB; `Ctrl+C`, `Right` | `Ctrl+V`                        |
+| C06     | Select bytes 0 to 64 MiB; `Ctrl+C`, `Right`       | `Ctrl+V`                        |
+| E01-E02 | None                                              | `'x'`                           |
+| E03     | None                                              | `End`, `Home` (both timed)      |
+| M01     | None                                              | `Ctrl+D`                        |
+| M02     | `Ctrl+D` (selects `#`)                            | `Ctrl+Shift+L` (refused)        |
+| M03     | `Ctrl+Shift+Alt+PgDn` × 30                        | `Ctrl+Shift+Alt+Right`, `Left`  |
+| M04     | None                                              | `Ctrl+Alt+Down`                 |
+| M05     | 10K carets                                        | `'x'`                           |
+| M06     | 10K carets                                        | `Backspace`                     |
+| M07     | 10K selections, `Ctrl+C`                          | `Ctrl+V`                        |
+| M08     | 10K carets, `'x'`                                 | `Ctrl+Z`, `Ctrl+Y` (both timed) |
+| F01     | `Ctrl+F` (seeds `2026`)                           | `F3`                            |
+| F02     | None                                              | `Ctrl+F`, `Escape`              |
+| F03     | `Ctrl+Right`, `Ctrl+F`                            | `Alt+R`                         |
+| S01-S03 | None                                              | The 140 scroll keys (all timed) |
+
+**10K selections:** `Ctrl+F`, `Alt+R`, `'sum_\d{1,4}\('`, `Alt+Enter`,
+`Escape` selects `sum_0(` to `sum_9999(`, exactly 10,000 matches (the
+default `editor.multiCursorLimit`). **10K carets** adds `Right`, a caret after
+each. C01-C06 and M07 replace the system clipboard.
 
 #### Short Benchmark
 

@@ -5,6 +5,10 @@
 //! ```yaml
 //! palette:
 //!   recentCount: 3   # recent commands shown by Ctrl+P, 0 to 20
+//! editor:
+//!   multiCursorLimit: 10000   # most cursors, 1 to 1000000
+//! search:
+//!   replaceAllMaxMiB: 512     # memory Replace All may use, 1 to 4096
 //! ```
 
 use std::path::Path;
@@ -15,15 +19,23 @@ pub const FILE_NAME: &str = concat!(env!("RTE_FILE_NAME"), ".yaml");
 /// Largest `palette.recentCount`.
 pub const RECENT_MAX: usize = 20;
 const RECENT_PROBLEM: &str = "palette.recentCount must be a number from 0 to 20";
+const CURSORS_PROBLEM: &str = "editor.multiCursorLimit must be a number from 1 to 1000000";
+const REPLACE_PROBLEM: &str = "search.replaceAllMaxMiB must be a number from 1 to 4096";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     pub recent_count: usize,
+    pub multi_cursor_limit: usize,
+    pub replace_all_max_mib: u64,
 }
 
 impl Default for Config {
     fn default() -> Config {
-        Config { recent_count: 3 }
+        Config {
+            recent_count: 3,
+            multi_cursor_limit: 10_000,
+            replace_all_max_mib: 512,
+        }
     }
 }
 
@@ -53,21 +65,42 @@ pub fn parse(text: &str) -> (Config, Option<String>) {
         Ok(None) => {}
         Ok(Some(Value::Map(entries))) => {
             for (key, value) in entries {
-                match (key.as_str(), value) {
-                    ("palette", Value::Map(palette)) => {
-                        for (key, value) in palette {
-                            match (key.as_str(), value) {
-                                ("recentCount", Value::Scalar(s)) => match s.parse() {
-                                    Ok(n) if n <= RECENT_MAX => config.recent_count = n,
-                                    _ => problems.push(RECENT_PROBLEM.to_owned()),
-                                },
-                                ("recentCount", _) => problems.push(RECENT_PROBLEM.to_owned()),
-                                (key, _) => problems.push(format!("unknown setting palette.{key}")),
-                            }
+                let section = key.clone();
+                let Value::Map(settings) = value else {
+                    problems.push(match key.as_str() {
+                        "palette" | "editor" | "search" => format!("{key} must be a map"),
+                        _ => format!("unknown setting {key}"),
+                    });
+                    continue;
+                };
+                for (name, value) in settings {
+                    let number = |max: u64, min: u64| match &value {
+                        Value::Scalar(s) => {
+                            s.parse::<u64>().ok().filter(|n| (min..=max).contains(n))
+                        }
+                        _ => None,
+                    };
+                    match (section.as_str(), name.as_str()) {
+                        ("palette", "recentCount") => match number(RECENT_MAX as u64, 0) {
+                            Some(n) => config.recent_count = n as usize,
+                            None => problems.push(RECENT_PROBLEM.to_owned()),
+                        },
+                        ("editor", "multiCursorLimit") => match number(1_000_000, 1) {
+                            Some(n) => config.multi_cursor_limit = n as usize,
+                            None => problems.push(CURSORS_PROBLEM.to_owned()),
+                        },
+                        ("search", "replaceAllMaxMiB") => match number(4096, 1) {
+                            Some(n) => config.replace_all_max_mib = n,
+                            None => problems.push(REPLACE_PROBLEM.to_owned()),
+                        },
+                        ("palette" | "editor" | "search", name) => {
+                            problems.push(format!("unknown setting {section}.{name}"));
+                        }
+                        _ => {
+                            problems.push(format!("unknown setting {section}"));
+                            break;
                         }
                     }
-                    ("palette", _) => problems.push("palette must be a map".to_owned()),
-                    (key, _) => problems.push(format!("unknown setting {key}")),
                 }
             }
         }
@@ -160,6 +193,22 @@ mod tests {
         assert_eq!(config.recent_count, 7);
         assert_eq!(problem, None);
         assert_eq!(parse("palette: {recentCount: 0}").0.recent_count, 0);
+    }
+
+    #[test]
+    fn reads_the_search_and_cursor_limits() {
+        let (config, problem) =
+            parse("editor:\n  multiCursorLimit: 500\nsearch:\n  replaceAllMaxMiB: 64\n");
+        assert_eq!(problem, None);
+        assert_eq!(config.multi_cursor_limit, 500);
+        assert_eq!(config.replace_all_max_mib, 64);
+        let (config, problem) = parse("editor:\n  multiCursorLimit: 0\n");
+        assert_eq!(config.multi_cursor_limit, 10_000);
+        assert!(problem.unwrap().contains("editor.multiCursorLimit"));
+        let (_, problem) = parse("search:\n  replaceAllMaxMiB: 5000\n");
+        assert!(problem.unwrap().contains("search.replaceAllMaxMiB"));
+        let (_, problem) = parse("search:\n  other: 1\n");
+        assert!(problem.unwrap().contains("unknown setting search.other"));
     }
 
     #[test]

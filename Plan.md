@@ -4,6 +4,7 @@
 
 - [Architecture](Plan/Architecture.md)
 - [Data Safety 001](Plan/DataSafety001.md)
+- [Search and Multi-Cursor](Plan/SearchAndMultiCursor.md)
 
 ## Completed
 

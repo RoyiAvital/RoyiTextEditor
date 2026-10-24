@@ -439,12 +439,47 @@ fn normalize_breaks(text: Cow<'_, [u8]>, line_ending: LineEnding) -> Cow<'_, [u8
     Cow::Owned(out)
 }
 
+/// The lines of `text` (one trailing break removed) when there are exactly
+/// `n` of them: VS Code spreads such a paste over `n` cursors.
+fn spread_lines(text: &[u8], n: usize) -> Option<Vec<Vec<u8>>> {
+    let text = text.strip_suffix(b"\n").unwrap_or(text);
+    let text = text.strip_suffix(b"\r").unwrap_or(text);
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    while i < text.len() {
+        let width = match (text[i], text.get(i + 1)) {
+            (b'\r', Some(b'\n')) => 2,
+            (b'\r' | b'\n', _) => 1,
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        if lines.len() + 1 >= n {
+            return None;
+        }
+        lines.push(text[start..i].to_vec());
+        i += width;
+        start = i;
+    }
+    lines.push(text[start..].to_vec());
+    (lines.len() == n).then_some(lines)
+}
+
 /// `Ctrl+V`. One piece per selection when the counts match (several
-/// selections), otherwise the whole text at each. Line-mode text pastes
-/// above the caret line when the selection is empty.
+/// selections), or one line per selection when plain text has as many lines;
+/// otherwise the whole text at each. Line-mode text pastes above the caret
+/// line when the selection is empty.
 pub fn paste(s: &Snapshot, sels: &Selections, clip: &Clip, opts: &EditOptions) -> Option<Command> {
     let eol = opts.line_ending;
-    let texts: Vec<Vec<u8>> = if sels.len() > 1 && clip.pieces.len() == sels.len() {
+    let spread = match clip.pieces.as_slice() {
+        [piece] if sels.len() > 1 && !clip.line_mode => spread_lines(piece, sels.len()),
+        _ => None,
+    };
+    let texts: Vec<Vec<u8>> = if let Some(lines) = spread {
+        lines
+    } else if sels.len() > 1 && clip.pieces.len() == sels.len() {
         clip.pieces
             .iter()
             .map(|p| normalize_breaks(Cow::Borrowed(p), eol).into_owned())

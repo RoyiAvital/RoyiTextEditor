@@ -271,8 +271,9 @@ The benchmark specification and the results of each version are in
 [Perfromance.md](Perfromance.md).
 
 ```powershell
-cargo xtask bench-perf                 # Performance Benchmark v1 (load tests)
+cargo xtask bench-perf                 # Performance Benchmark v1
 cargo xtask bench-perf --short         # Short Benchmark: release-notes table
+cargo xtask bench-perf --only L01,F01  # Selected tests (total cap not checked)
 cargo xtask bench-perf --print-hashes  # Regenerate the fixtures, print hashes
 cargo xtask bench-startup              # Startup stages; gate: p95 < 100 ms
 cargo bench -p rte_text                # Text engine (Ropey baseline)
@@ -283,9 +284,12 @@ cargo bench -p rte_edit                # Worst-case caret movement latency
 `bench-perf` builds the release executable and launches a fresh process per
 repetition. Its fixtures are generated deterministically into `target/perf/v1`
 and verified by XXH3-64 hashes recorded in `xtask/src/perf.rs`; a mismatch
-fails the run. The load tests take about 7 s. Interaction tests (Command
-Palette, clipboard, typing, multi-cursor, scrolling) are specified but need a
-scripted input mode in the editor. The output starts with the application name
+fails the run. The load tests take about 7 s, the whole suite about 22 s. The
+interaction tests drive the editor with `--bench-setup`, `--bench-keys` and
+`--bench-runs` (keys, `Down*40` repeats, and quoted text typed one character
+per step), plus `--bench-select`, `--bench-handled` (copies) and
+`--bench-paced` (scrolling). C01-C06 and M07 replace the system clipboard.
+The output starts with the application name
 and version, the benchmark version, `rustc` and the CPU.
 
 For the release notes, `### Performance` holds the Short Benchmark table. When

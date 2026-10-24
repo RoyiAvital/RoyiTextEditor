@@ -250,6 +250,39 @@ fn copy_cut_paste() {
 }
 
 #[test]
+fn plain_paste_spreads_lines_over_as_many_cursors() {
+    let opts = lf();
+    let plain = |text: &str| Clip {
+        pieces: vec![text.as_bytes().to_vec()],
+        line_mode: false,
+    };
+    let two = "|a |b";
+    for text in ["X\nY", "X\r\nY", "X\nY\n", "X\r\nY\r\n"] {
+        assert_eq!(
+            run(two, |s, sel| paste(s, sel, &plain(text), &opts)),
+            "X|a Y|b",
+            "{text:?}"
+        );
+    }
+    assert_eq!(
+        run(two, |s, sel| paste(s, sel, &plain("X\nY\nZ"), &opts)),
+        "X\nY\nZ|a X\nY\nZ|b"
+    );
+    assert_eq!(
+        run("|a", |s, sel| paste(s, sel, &plain("X\nY"), &opts)),
+        "X\nY|a"
+    );
+    let lines = Clip {
+        pieces: vec![b"X\nY\n".to_vec()],
+        line_mode: true,
+    };
+    assert_eq!(
+        run("|a\n|b", |s, sel| paste(s, sel, &lines, &opts)),
+        "X\nY\n|a\nX\nY\n|b"
+    );
+}
+
+#[test]
 fn long_runs_are_crossed_in_bounded_steps() {
     const LIMIT: u64 = MOTION_SCAN_LIMIT;
     let word = Snapshot::from_bytes(&vec![b'a'; 4 << 20]);
@@ -433,6 +466,78 @@ fn op() -> impl Strategy<Value = Op> {
         any::<u16>().prop_map(Op::Move),
         Just(Op::Seal),
     ]
+}
+
+fn multi(marked: &str, f: impl Fn(&Snapshot, &Selections) -> Selections) -> String {
+    let (s, sels) = parse(marked);
+    show(&s, &f(&s, &sels))
+}
+
+#[test]
+fn add_cursors_above_and_below_keep_the_goal_column() {
+    let down = |s: &Snapshot, sels: &Selections| add_cursors_vertical(s, sels, 1, 4);
+    let up = |s: &Snapshot, sels: &Selections| add_cursors_vertical(s, sels, -1, 4);
+    assert_eq!(multi("ab|cd\nx\nefgh", down), "ab|cd\nx|\nefgh");
+    let (s, sels) = parse("ab|cd\nx\nefgh");
+    let once = add_cursors_vertical(&s, &sels, 1, 4);
+    let twice = add_cursors_vertical(&s, &once, 1, 4);
+    assert_eq!(show(&s, &twice), "ab|cd\nx|\nef|gh");
+    assert_eq!(twice.primary().head, 9);
+    assert_eq!(multi("a\nb|c", down), "a\nb|c");
+    assert_eq!(multi("a|bc\nd", up), "a|bc\nd");
+    assert_eq!(multi("ab\n\tc|d", up), "ab|\n\tc|d");
+}
+
+#[test]
+fn cursors_at_line_ends_of_selections() {
+    let ends = |s: &Snapshot, sels: &Selections| cursors_at_line_ends(s, sels, 100).unwrap();
+    assert_eq!(multi("a[b\ncd\nef]g", ends), "ab|\ncd|\nef|g");
+    assert_eq!(multi("[ab\ncd\n]ef", ends), "ab|\ncd|\nef");
+    assert_eq!(multi("a[bc]d", ends), "abc|d");
+    let (s, sels) = parse("a[b\ncd\nef]g");
+    assert!(cursors_at_line_ends(&s, &sels, 3).is_some());
+    assert!(cursors_at_line_ends(&s, &sels, 2).is_none());
+}
+
+#[test]
+fn line_end_and_column_limits_refuse_before_building() {
+    let text = "x\n".repeat(50_000);
+    let s = Snapshot::from_bytes(text.as_bytes());
+    let all = Selections::single(Selection::new(0, s.len()));
+    let started = std::time::Instant::now();
+    assert!(cursors_at_line_ends(&s, &all, 2).is_none());
+    assert!(box_select(&s, (0, 0), (49_999, 1), 4, 2).is_none());
+    assert!(started.elapsed() < std::time::Duration::from_millis(50));
+    assert_eq!(box_select(&s, (0, 0), (1, 1), 4, 2).unwrap().len(), 2);
+}
+
+#[test]
+fn select_lines_grows_by_whole_lines() {
+    let f = select_lines;
+    assert_eq!(multi("a|b\ncd\nef", f), "[ab\n]cd\nef");
+    assert_eq!(multi("[ab\n]cd\nef", f), "[ab\ncd\n]ef");
+    assert_eq!(multi("ab\ncd\ne|f", f), "ab\ncd\n[ef]");
+    assert_eq!(multi("a[b\nc]d\nef", f), "[ab\ncd\n]ef");
+}
+
+#[test]
+fn box_selection_follows_columns_tabs_and_short_lines() {
+    let s = Snapshot::from_bytes(b"abcdef\nab\n\tcdef\nabcdef\nx");
+    let sels = box_select(&s, (0, 1), (3, 5), 4, 100).unwrap();
+    assert_eq!(show(&s, &sels), "a[bcde]f\na[b]\n[\tc]def\na[bcde]f\nx");
+    assert_eq!(sels.primary().head, 21);
+    let short = box_select(&s, (3, 3), (4, 5), 4, 100).unwrap();
+    assert_eq!(show(&s, &short), "abcdef\nab\n\tcdef\nabc[de]f\nx|");
+    let back = box_select(&s, (3, 5), (0, 1), 4, 100).unwrap();
+    assert_eq!(back.len(), 4);
+    assert_eq!(
+        back.primary(),
+        Selection {
+            goal: Some(1),
+            ..Selection::new(5, 1)
+        }
+    );
+    assert_eq!(cell_of(&s, 13, 4), (2, 6));
 }
 
 proptest! {

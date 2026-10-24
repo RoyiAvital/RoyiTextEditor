@@ -32,3 +32,39 @@ binding exactly. For example, `Ctrl+Shift+S` is not Save.
 
 Mouse clicks place the caret. `Shift`+click extends the current selection.
 Commands without a shortcut are available by name in the Command Palette.
+
+## Search and Replace
+
+| Keys | Action |
+| --- | --- |
+| `Ctrl+F`; `Ctrl+H` | Open the search box; open it with the replace field |
+| `Enter` / `Shift+Enter`; `F3` / `Shift+F3` | Next / previous match |
+| `Alt+Enter` | Select all matches |
+| `Alt+C`; `Alt+W` | Toggle Match Case; toggle Whole Word |
+| `Alt+G`; `Alt+R` | Toggle Glob; toggle RegEx. Both off is Text. |
+| `Alt+L` | Toggle Find in Selection |
+| `Enter` or `Ctrl+Shift+1` (replace field) | Replace the current match and go to the next |
+| `Ctrl+Alt+Enter` | Replace all matches in one undo step |
+| `Alt+P` | Toggle Preserve Case |
+| `Esc` | Close the search box |
+
+Glob: `?` matches one character; `*` matches the shortest text within a line,
+and a trailing `*` matches the rest of the line. Replacements use the VS Code
+syntax: `$1`, `$<name>`, `$0`, `$$`, `\n`, `\t`, `\u`, `\l`, `\U` and `\L`.
+
+## Multiple Cursors
+
+| Keys | Action |
+| --- | --- |
+| `Ctrl+D`; `Ctrl+K Ctrl+D` | Add the next occurrence; move the last selection to it |
+| `Ctrl+Shift+L`; `Ctrl+F2` | Select all occurrences |
+| `Ctrl+Alt+Up` / `Ctrl+Alt+Down` | Add a cursor above / below |
+| `Shift+Alt+I` | Add cursors to the ends of the selected lines |
+| `Ctrl+L` | Select the line, then extend by lines |
+| `Ctrl+U` | Undo the last cursor operation |
+| `Alt`+click | Add or remove a cursor |
+| `Shift+Alt`+drag; middle-drag | Column selection |
+| `Ctrl+Shift+Alt` + arrows / `PgUp` / `PgDn` | Column selection by keys |
+
+At most `editor.multiCursorLimit` selections (10,000 by default) are created;
+larger requests are refused with a message on the status line.

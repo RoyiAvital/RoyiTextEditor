@@ -172,6 +172,17 @@ try {
     Copy-Item $ImageCache $SourceImage
     $StagedFiles.Add($SourceImage)
 
+    $SearchImageCache = & $CaptureScript -SearchPanel | Select-Object -Last 1
+    if (-not $SearchImageCache -or -not (Test-Path $SearchImageCache)) {
+        throw 'Search panel screenshot helper did not produce an image.'
+    }
+    $SourceSearchImage = Join-Path $SourceAssetsDir 'search-panel.png'
+    if (Test-Path $SourceSearchImage) {
+        throw "Refusing to overwrite existing file: $SourceSearchImage"
+    }
+    Copy-Item $SearchImageCache $SourceSearchImage
+    $StagedFiles.Add($SourceSearchImage)
+
     New-Item -ItemType Directory -Path $MermaidStage | Out-Null
     [IO.File]::WriteAllText(
         (Join-Path $MermaidStage 'book.toml'),
@@ -183,16 +194,19 @@ try {
         throw "mdbook-mermaid install failed with exit code $LASTEXITCODE."
     }
     foreach ($File in @('mermaid.min.js', 'mermaid-init.js')) {
+        $Destination = Join-Path $DocsDir "theme\$File"
+        if (Test-Path $Destination -PathType Leaf) {
+            continue
+        }
         $InstalledFile = Get-ChildItem -Path $MermaidStage -Filter $File -File -Recurse | Select-Object -First 1
         if (-not $InstalledFile) {
             throw "mdbook-mermaid did not install $File."
         }
-        $Destination = Join-Path $DocsDir "theme\$File"
         if (Test-Path $Destination) {
             throw "Refusing to overwrite existing file: $Destination"
         }
-        Copy-Item $InstalledFile.FullName $Destination
         $StagedFiles.Add($Destination)
+        Copy-Item $InstalledFile.FullName $Destination -ErrorAction Stop
     }
 
     if ($Serve) {
@@ -224,7 +238,8 @@ try {
         }
         foreach ($OutputFile in @(
             (Join-Path $BookDir 'index.html'),
-            (Join-Path $BookDir 'assets\editor-screenshot.png')
+            (Join-Path $BookDir 'assets\editor-screenshot.png'),
+            (Join-Path $BookDir 'assets\search-panel.png')
         )) {
             if (-not (Test-Path $OutputFile)) {
                 throw "mdbook did not create $OutputFile"

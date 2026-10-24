@@ -441,6 +441,16 @@ mod tests {
     }
 
     #[test]
+    fn default_face_has_the_search_box_symbols() {
+        let r = renderer();
+        let missing: String = rte_view::FIND_SYMBOLS
+            .chars()
+            .filter(|&ch| r.font().charmap().map(ch) == 0)
+            .collect();
+        assert!(missing.is_empty(), "missing symbols: {missing}");
+    }
+
+    #[test]
     fn missing_characters_share_one_bitmap_and_sizes_keep_caches() {
         let mut r = renderer();
         for code in 0x2_0000..0x2_0000 + 1000 {
@@ -624,6 +634,7 @@ mod tests {
                     options: &options,
                     selections: &[],
                     caret: CaretStyle::Hidden,
+                    highlights: Default::default(),
                 },
                 &mut list,
             );

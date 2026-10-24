@@ -72,13 +72,58 @@ New files are created only from the command line: a path that does not exist
 opens an empty document and the first save creates it. Without a path the
 editor opens an untitled scratch document that cannot be saved (amber marker).
 
+### Search and Replace
+
+`Ctrl+F` opens the search box at the top right, seeded with the selection or
+the word at the caret. The count of matches streams in while a large file is
+searched (`2 of 1,204+`); invalid patterns and skipped lines are reported
+below the field.
+
+| Keys                                       | Action                              |
+| ------------------------------------------ | ----------------------------------- |
+| `Ctrl+F`, `Ctrl+H`                         | Find; find and replace              |
+| `Enter` / `Shift+Enter`, `F3` / `Shift+F3` | Next / previous match               |
+| `Alt+Enter`                                | Select all matches (multi-cursor)   |
+| `Alt+C` / `Alt+W`                          | Match Case / Whole Word             |
+| `Alt+G` / `Alt+R`                          | Glob / RegEx mode; both off is Text |
+| `Alt+L`                                    | Find in the selection               |
+| `Enter` or `Ctrl+Shift+1` (replace field)  | Replace one and go to the next      |
+| `Ctrl+Alt+Enter`                           | Replace all, one undo step          |
+| `Alt+P`                                    | Preserve Case                       |
+| `Esc`                                      | Close the search box                |
+
+- **Text** finds the typed text anywhere. **Glob**: `?` is one character, `*`
+  the shortest text within a line, a trailing `*` the rest of the line.
+  **RegEx** uses Rust regular expressions; look-around and backreferences use
+  a bounded engine that skips lines it cannot finish.
+- Replacements use the VS Code syntax: `$1`, `$<name>`, `$0`, `$$`, `\n`,
+  `\t` and the case operators `\u`, `\l`, `\U`, `\L`.
+
+### Multiple Cursors
+
+The keys follow VS Code. Typing, deleting, pasting and moving apply to every
+selection; `Esc` returns to one. Pasted text with one line per cursor puts one
+line at each.
+
+| Keys                                         | Action                                           |
+| -------------------------------------------- | ------------------------------------------------ |
+| `Ctrl+D`; `Ctrl+K Ctrl+D`                    | Add the next occurrence; move the last one to it |
+| `Ctrl+Shift+L`, `Ctrl+F2`                    | Select all occurrences                           |
+| `Ctrl+Alt+Up` / `Ctrl+Alt+Down`              | Add a cursor above / below                       |
+| `Shift+Alt+I`                                | Add cursors to the ends of the selected lines    |
+| `Ctrl+L`                                     | Select the line, then extend by lines            |
+| `Ctrl+U`                                     | Undo the last cursor operation                   |
+| `Alt`+click                                  | Add or remove a cursor                           |
+| `Shift+Alt`+drag, middle-drag                | Column selection                                 |
+| `Ctrl+Shift+Alt+Arrows` / `PgUp` / `PgDn`    | Column selection by keys                         |
+
 ### Command Palette
 
 Commands are grouped in families: `Application:`, `File:`, `Edit:`,
-`Selection:`, `Go:` and `View:`. Type any part of a name (for example `fsave`),
-move with `Up` / `Down` / `PgUp` / `PgDn`, run with `Enter` or a click, close
-with `Esc`. The search field supports the usual editing keys, `Ctrl+A` and
-`Ctrl+V`.
+`Selection:`, `Search:`, `Go:` and `View:`. Type any part of a name (for
+example `fsave`), move with `Up` / `Down` / `PgUp` / `PgDn`, run with `Enter`
+or a click, close with `Esc`. The search field supports the usual editing
+keys, `Ctrl+A` and `Ctrl+V`.
 
 - Click the star of a command, or press `Ctrl+Space`, to add or remove it from
   the favorites.
@@ -99,7 +144,11 @@ keep their defaults.
 
 ```yaml
 palette:
-  recentCount: 3   # recent commands listed by Ctrl+P, 0 to 20
+  recentCount: 3          # recent commands listed by Ctrl+P, 0 to 20
+editor:
+  multiCursorLimit: 10000 # most selections, 1 to 1,000,000
+search:
+  replaceAllMaxMiB: 512   # memory for one Replace All [MiB], 1 to 4096
 ```
 
 ## Features

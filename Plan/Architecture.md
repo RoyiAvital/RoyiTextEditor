@@ -235,6 +235,8 @@ replacement syntax), with bounded memory and preemptible work.
 - **Options.** Match case (`Alt+C`), whole word (`Alt+W`), regex (`Alt+R`),
   preserve case (`Alt+P`), find in selection (`Alt+L`). Multiline patterns
   (containing `\n`) are supported.
+- **Glob** (`Alt+G`, not in VS Code; exclusive with regex): `?`, `*` (within
+  a line), `[abc]`, `[!abc]`; translated to the automata engine.
 - **Literal:** `memchr::memmem` over chunks, carrying a pattern-length overlap
   across chunk boundaries.
 - **Regex, two engines.** The pattern is parsed once:
@@ -764,6 +766,7 @@ Search and Replace:
 | `Ctrl+D`                    | Add selection to next match       | Kept   |
 | `Ctrl+K Ctrl+D`             | Move last selection to next match | Kept   |
 | `Alt+C` / `Alt+R` / `Alt+W` | Toggle case / regex / whole word  | Kept   |
+| `Alt+G`                     | Toggle glob                       | Added  |
 | `Alt+P` / `Alt+L`           | Preserve case / find in selection | Kept   |
 
 Multi-cursor and Selection:

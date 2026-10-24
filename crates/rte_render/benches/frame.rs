@@ -77,6 +77,7 @@ fn frames(bencher: Bencher, snapshot: &Snapshot, width: u32, height: u32, px: f3
             // Every visible row is partly selected; one caret.
             selections: &[Selection::new(100, 300_000)],
             caret: CaretStyle::Bar,
+            highlights: Default::default(),
         };
         view.build(&frame, &mut list);
         renderer.draw(

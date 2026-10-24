@@ -16,8 +16,8 @@ use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{FILETIME, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{
-    DWMWA_CLOAK, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmExtendFrameIntoClientArea,
-    DwmFlush, DwmSetWindowAttribute,
+    DWM_TIMING_INFO, DWMWA_CLOAK, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+    DwmExtendFrameIntoClientArea, DwmFlush, DwmGetCompositionTimingInfo, DwmSetWindowAttribute,
 };
 use windows_sys::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, BitBlt, CreateCompatibleDC, CreateDIBSection,
@@ -45,19 +45,23 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetCursor,
     SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, WM_APP,
     WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND,
-    WM_GETMINMAXINFO, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST, WM_PAINT, WM_SETCURSOR, WM_SIZE,
-    WM_SYSKEYDOWN, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    WM_GETMINMAXINFO, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
+    WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST,
+    WM_PAINT, WM_SETCURSOR, WM_SIZE, WM_SYSKEYDOWN, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 
 const WM_WAKE: u32 = WM_APP + 1;
 /// A scripted key (`Ctx::post_key`): `wParam` holds the key, see `encode_key`.
 const WM_SCRIPTED_KEY: u32 = WM_APP + 2;
+/// A scripted character (`Ctx::post_char`): `wParam` holds the code point.
+const WM_SCRIPTED_CHAR: u32 = WM_APP + 3;
 const CLASS_NAME: &str = "RoyiTextEditorWindow";
 /// Icon group embedded in the executable by `rte_app`'s build script.
 const APP_ICON: u16 = 1;
 /// `wParam` flag of mouse messages: left button down.
 const MK_LBUTTON: usize = 0x0001;
+/// `wParam` flag of mouse messages: middle button down.
+const MK_MBUTTON: usize = 0x0010;
 
 /// DPI of the primary monitor. Per-monitor v2 awareness comes from the
 /// application manifest.
@@ -93,6 +97,21 @@ pub fn wait_for_composition() {
     // SAFETY: plain Win32 call without pointers.
     unsafe {
         DwmFlush();
+    }
+}
+
+/// Milliseconds between display refreshes as composed by DWM (60 Hz when
+/// unknown).
+pub fn refresh_period_ms() -> f64 {
+    let mut info: DWM_TIMING_INFO = unsafe { std::mem::zeroed() };
+    info.cbSize = size_of::<DWM_TIMING_INFO>() as u32;
+    // SAFETY: `info` is a live, correctly sized buffer; a null window means the desktop.
+    let ok = unsafe { DwmGetCompositionTimingInfo(null_mut(), &mut info) } >= 0;
+    let rate = info.rateRefresh;
+    if ok && rate.uiNumerator > 0 && rate.uiDenominator > 0 {
+        1000.0 * f64::from(rate.uiDenominator) / f64::from(rate.uiNumerator)
+    } else {
+        1000.0 / 60.0
     }
 }
 
@@ -136,9 +155,9 @@ pub enum Event {
         shift: bool,
         ctrl: bool,
     },
-    /// Left button pressed in the client area; `clicks` counts 1-3 for
-    /// single, double and triple clicks. The mouse is captured until
-    /// [`Event::MouseUp`].
+    /// Left (or, with `middle`, middle) button pressed in the client area;
+    /// `clicks` counts 1-3 for single, double and triple clicks (always 1
+    /// for the middle button). The mouse is captured until [`Event::MouseUp`].
     MouseDown {
         x: i32,
         y: i32,
@@ -146,8 +165,9 @@ pub enum Event {
         shift: bool,
         ctrl: bool,
         alt: bool,
+        middle: bool,
     },
-    /// Pointer movement while the left button is held (also outside the window).
+    /// Pointer movement while the pressed button is held (also outside the window).
     MouseMove {
         x: i32,
         y: i32,
@@ -169,6 +189,7 @@ pub struct Ctx {
     title: Option<String>,
     open_url: Option<String>,
     posted_key: Option<Key>,
+    posted_char: Option<char>,
     hwnd: HWND,
     /// Clipboard of a headless context: text and private data.
     memory_clipboard: Option<(String, Vec<u8>)>,
@@ -187,6 +208,7 @@ impl Ctx {
             title: None,
             open_url: None,
             posted_key: None,
+            posted_char: None,
             hwnd: null_mut(),
             memory_clipboard: None,
         }
@@ -195,6 +217,11 @@ impl Ctx {
     /// Key posted during this call, if any.
     pub fn posted_key(&self) -> Option<Key> {
         self.posted_key
+    }
+
+    /// Character posted during this call, if any.
+    pub fn posted_char(&self) -> Option<char> {
+        self.posted_char
     }
 
     pub fn close_requested(&self) -> bool {
@@ -265,6 +292,11 @@ impl Ctx {
     /// Queues `key` as if typed, with exactly its modifiers (benchmarks).
     pub fn post_key(&mut self, key: Key) {
         self.posted_key = Some(key);
+    }
+
+    /// Queues `ch` as if typed (benchmarks).
+    pub fn post_char(&mut self, ch: char) {
+        self.posted_char = Some(ch);
     }
 }
 
@@ -620,6 +652,9 @@ unsafe fn apply(hwnd: HWND, ctx: Ctx) {
         if let Some(key) = ctx.posted_key {
             PostMessageW(hwnd, WM_SCRIPTED_KEY, encode_key(key), 0);
         }
+        if let Some(ch) = ctx.posted_char {
+            PostMessageW(hwnd, WM_SCRIPTED_CHAR, ch as usize, 0);
+        }
         if ctx.redraw {
             InvalidateRect(hwnd, null(), 0);
         }
@@ -843,6 +878,12 @@ unsafe extern "system" fn window_proc(
                 dispatch(hwnd, Event::Key(decode_key(wparam)));
                 0
             }
+            WM_SCRIPTED_CHAR => {
+                if let Some(ch) = char::from_u32(wparam as u32) {
+                    dispatch(hwnd, Event::Char(ch));
+                }
+                0
+            }
             WM_LBUTTONDOWN => {
                 let (x, y) = point_of(lparam);
                 let Some(state) = state(hwnd) else {
@@ -857,18 +898,34 @@ unsafe extern "system" fn window_proc(
                     shift: modifier(VK_SHIFT),
                     ctrl: modifier(VK_CONTROL),
                     alt: modifier(VK_MENU),
+                    middle: false,
+                };
+                dispatch(hwnd, event);
+                0
+            }
+            WM_MBUTTONDOWN => {
+                let (x, y) = point_of(lparam);
+                SetCapture(hwnd);
+                let event = Event::MouseDown {
+                    x,
+                    y,
+                    clicks: 1,
+                    shift: modifier(VK_SHIFT),
+                    ctrl: modifier(VK_CONTROL),
+                    alt: modifier(VK_MENU),
+                    middle: true,
                 };
                 dispatch(hwnd, event);
                 0
             }
             WM_MOUSEMOVE => {
-                if wparam & MK_LBUTTON != 0 && GetCapture() == hwnd {
+                if wparam & (MK_LBUTTON | MK_MBUTTON) != 0 && GetCapture() == hwnd {
                     let (x, y) = point_of(lparam);
                     dispatch(hwnd, Event::MouseMove { x, y });
                 }
                 0
             }
-            WM_LBUTTONUP => {
+            WM_LBUTTONUP | WM_MBUTTONUP => {
                 // Releasing the capture sends WM_CAPTURECHANGED, which reports MouseUp.
                 ReleaseCapture();
                 0
@@ -1007,5 +1064,7 @@ mod tests {
             alt: false,
         });
         assert_eq!(ctx.posted_key().map(|k| k.vk), Some(0x1B));
+        ctx.post_char('é');
+        assert_eq!(ctx.posted_char(), Some('é'));
     }
 }

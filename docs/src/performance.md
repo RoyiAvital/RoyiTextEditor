@@ -40,6 +40,5 @@ The harness also provides `cargo xtask bench-startup` for the startup gate.
 Crate-specific benchmarks are available with `cargo bench -p rte_text`,
 `cargo bench -p rte_edit`, and `cargo bench -p rte_render`.
 
-Typing, large pastes, scrolling, and multi-cursor scenarios are not yet
-measured by the interaction harness. Syntax-highlighted performance is not
-measured because syntax highlighting is not implemented.
+Syntax-highlighted performance is not measured because syntax highlighting
+is not implemented.
