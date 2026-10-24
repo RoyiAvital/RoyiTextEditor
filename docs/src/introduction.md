@@ -1,6 +1,6 @@
 # Royi Text Editor
 
-A portable, keyboard-focused, lightweight and fast text and code editor for
+A portable, keyboard-focused, lightweight and fast text code editor for
 Windows.
 
 - **Minimalistic** and focused UI: the whole window is dedicated to text.

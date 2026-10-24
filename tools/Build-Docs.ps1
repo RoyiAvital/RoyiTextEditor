@@ -6,6 +6,7 @@ Builds the mdBook documentation site into target/book.
 Downloads pinned mdBook, mdbook-pagetoc, and mdbook-mermaid binaries into
 target/docs-tools when missing or outdated, verifies their SHA-256 hashes,
 captures the editor fixture, then builds docs/.
+The screenshot build requires the GNU Rust toolchain and MinGW-w64 windres.
 The hierarchy in docs/src/index.md is staged as mdBook's SUMMARY.md and removed
 after the build. Live preview keeps the generated hierarchy synchronized.
 Warnings and errors reported by mdBook fail the build.

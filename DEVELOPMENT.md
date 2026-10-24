@@ -248,10 +248,12 @@ Build it once, as the `Pages` workflow does (output in `target/book`):
 .\tools\Build-Docs.ps1
 ```
 
-The script needs no Rust toolchain, Python or Node.js. It downloads pinned
-releases of `mdbook` and `mdbook-pagetoc` into `target/docs-tools`, verifies
-their SHA-256 hashes and reuses them afterwards. The build fails on any mdBook
-warning. The book title comes from `Meta/AppMeta.json`.
+The screenshot step needs the GNU Rust toolchain and MinGW-w64 `windres`
+(see Environment above). The Pages workflow installs Rust before this build.
+Python and Node.js are not required. The script downloads pinned releases of
+`mdbook`, `mdbook-pagetoc` and `mdbook-mermaid` into `target/docs-tools`, verifies
+their SHA-256 hashes and reuses them afterwards. The book title comes from
+`Meta/AppMeta.json`.
 
 Callouts use mdBook's built-in syntax:
 

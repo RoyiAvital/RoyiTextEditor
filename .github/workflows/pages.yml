@@ -71,6 +71,15 @@ jobs:
         if: steps.pages.outputs.enabled == 'true'
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
 
+      - name: Install Rust (GNU host)
+        shell: pwsh
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal --component rustfmt,clippy
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not install the GNU Rust toolchain for the documentation screenshot.'
+          }
+          rustc --version --verbose
+
       - name: Build documentation
         shell: pwsh
         run: ./tools/Build-Docs.ps1

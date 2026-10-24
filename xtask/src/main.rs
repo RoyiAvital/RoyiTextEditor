@@ -444,6 +444,32 @@ fn sample_c_file() -> PathBuf {
 mod tests {
     use super::*;
 
+    #[test]
+    fn pages_installs_screenshot_toolchain_before_building_documentation() {
+        let workflow = include_str!("../../.github/workflows/pages.yml");
+        let toolchain = include_str!("../../rust-toolchain.toml");
+        let channel = toolchain
+            .lines()
+            .find_map(|line| {
+                line.trim()
+                    .strip_prefix("channel = \"")
+                    .and_then(|value| value.strip_suffix('"'))
+            })
+            .expect("the repository declares its Rust toolchain");
+        let install = format!("rustup toolchain install {channel} ");
+        let setup = workflow
+            .find(&install)
+            .expect("Pages must install the screenshot application's Rust toolchain");
+        let build = workflow
+            .find("run: ./tools/Build-Docs.ps1")
+            .expect("Pages builds the documentation");
+        assert!(setup < build, "Rust setup must precede screenshot capture");
+        assert!(
+            workflow[setup..build].contains("$LASTEXITCODE -ne 0"),
+            "toolchain installation failures must stop the build"
+        );
+    }
+
     fn cmd(script: &str) -> Command {
         let mut c = Command::new("cmd");
         c.args(["/d", "/c", script]);
