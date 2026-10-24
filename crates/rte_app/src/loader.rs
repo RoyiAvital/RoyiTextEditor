@@ -61,31 +61,42 @@ impl<F: Fn()> Drop for WakeOnDrop<F> {
     }
 }
 
+/// Called with the complete text just before [`LoadEvent::Done`].
+pub type OnDone = Box<dyn FnOnce(&Snapshot) + Send>;
+
 /// Starts loading `path` on its own thread. `wake` runs after every event and
 /// once more when the thread ends, so the receiver also notices a loader that
 /// stopped without a final event (its sender is disconnected by then).
-pub fn spawn(path: PathBuf, wake: impl Fn() + Clone + Send + 'static) -> Receiver<LoadEvent> {
+pub fn spawn(
+    path: PathBuf,
+    wake: impl Fn() + Clone + Send + 'static,
+    on_done: Option<OnDone>,
+) -> Receiver<LoadEvent> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let _final_wake = WakeOnDrop(wake.clone());
-        load(path, tx, wake);
+        load(path, tx, wake, on_done);
     });
     rx
 }
 
 /// Loads `path`, sending events to `tx` and calling `wake` after each send.
-pub fn load(path: PathBuf, tx: Sender<LoadEvent>, wake: impl Fn()) {
+pub fn load(path: PathBuf, tx: Sender<LoadEvent>, wake: impl Fn(), on_done: Option<OnDone>) {
     let send = |event| {
         let _ = tx.send(event);
         wake();
     };
-    match read(&path, &send) {
+    match read(&path, &send, on_done) {
         Ok(()) => {}
         Err((snapshot, error)) => send(LoadEvent::Failed { snapshot, error }),
     }
 }
 
-fn read(path: &PathBuf, send: &impl Fn(LoadEvent)) -> Result<(), (Snapshot, String)> {
+fn read(
+    path: &PathBuf,
+    send: &impl Fn(LoadEvent),
+    on_done: Option<OnDone>,
+) -> Result<(), (Snapshot, String)> {
     let mut file = match File::open(path) {
         Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
@@ -192,6 +203,9 @@ fn read(path: &PathBuf, send: &impl Fn(LoadEvent)) -> Result<(), (Snapshot, Stri
         // A file that changed size while loading keeps no hash; its stamp differs anyway.
         hash: hasher.filter(|_| loaded == stamp.size).map(|h| h.digest()),
     });
+    if let Some(on_done) = on_done {
+        on_done(&snapshot);
+    }
     send(LoadEvent::Done {
         snapshot,
         info: FileInfo {
@@ -230,9 +244,34 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rte_loader_{}_{name}", std::process::id()));
         std::fs::write(&dir, bytes).unwrap();
         let (tx, rx) = mpsc::channel();
-        load(dir.clone(), tx, || {});
+        load(dir.clone(), tx, || {}, None);
         std::fs::remove_file(&dir).unwrap();
         rx.try_iter().collect()
+    }
+
+    #[test]
+    fn the_done_hook_sees_the_complete_text_before_the_event() {
+        let path = std::env::temp_dir().join(format!("rte_loader_{}_hook", std::process::id()));
+        std::fs::write(&path, b"fn main() {}\n").unwrap();
+        let (tx, rx) = mpsc::channel();
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let hook = seen.clone();
+        let pending = rx;
+        load(
+            path.clone(),
+            tx,
+            || {},
+            Some(Box::new(move |s: &Snapshot| {
+                *hook.lock().unwrap() = Some(s.to_vec(0..s.len()));
+            })),
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(
+            seen.lock().unwrap().as_deref(),
+            Some(&b"fn main() {}\n"[..])
+        );
+        let events: Vec<_> = pending.try_iter().collect();
+        assert!(matches!(events.last(), Some(LoadEvent::Done { .. })));
     }
 
     fn done(events: &[LoadEvent]) -> (&Snapshot, FileInfo) {
@@ -300,6 +339,7 @@ mod tests {
             PathBuf::from("Z:\\definitely\\missing\\file.txt"),
             tx,
             || {},
+            None,
         );
         let events: Vec<_> = rx.try_iter().collect();
         let (s, info) = done(&events);
@@ -342,6 +382,7 @@ mod tests {
             move || {
                 counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             },
+            None,
         );
         let events: Vec<_> = rx.iter().collect();
         assert!(matches!(events.last(), Some(LoadEvent::Done { .. })));

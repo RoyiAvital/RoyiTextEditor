@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param(
-    [switch] $SearchPanel
+    [switch] $SearchPanel,
+    [switch] $SyntaxCode,
+    [switch] $SyntaxLanguages
 )
 
 $ErrorActionPreference = 'Stop'
@@ -11,15 +13,57 @@ Add-Type -AssemblyName System.Windows.Forms
 $Root = Split-Path -Parent $PSScriptRoot
 $EditorTarget = Join-Path $Root 'target\docs-app'
 $EditorExe = Join-Path $EditorTarget 'release\RoyiTextEditor.exe'
-$Fixture = Join-Path $Root 'docs\src\Untitled'
 $OutputDir = Join-Path $Root 'target\docs-assets'
-$OutputName = if ($SearchPanel) { 'search-panel.png' } else { 'editor-screenshot.png' }
+New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
+$Modes = @()
+if ($SearchPanel) { $Modes += 'search' }
+if ($SyntaxCode) { $Modes += 'syntax-code' }
+if ($SyntaxLanguages) { $Modes += 'syntax-languages' }
+if ($Modes.Count -gt 1) { throw 'Choose only one screenshot mode.' }
+
+$IsSyntaxCapture = $SyntaxCode -or $SyntaxLanguages
+$Fixture = if ($IsSyntaxCapture) {
+    $SyntaxFixture = Join-Path $OutputDir 'syntax-example.rs'
+    $SyntaxSample = @'
+use std::collections::HashMap;
+
+#[derive(Debug)]
+struct SyntaxOptions {
+    language: &'static str,
+    max_file_mib: usize,
+}
+
+fn main() {
+    let mut options = HashMap::new();
+    options.insert("syntax", SyntaxOptions {
+        language: "rust",
+        max_file_mib: 32,
+    });
+    println!("Highlighting: {options:?}");
+}
+'@
+    [IO.File]::WriteAllText($SyntaxFixture, $SyntaxSample, (New-Object Text.UTF8Encoding $false))
+    $SyntaxFixture
+} else {
+    Join-Path $Root 'docs\src\Untitled'
+}
+$OutputName = if ($SearchPanel) {
+    'search-panel.png'
+} elseif ($SyntaxCode) {
+    'syntax-highlighted-code.png'
+} elseif ($SyntaxLanguages) {
+    'syntax-language-picker.png'
+} else {
+    'editor-screenshot.png'
+}
 $Output = Join-Path $OutputDir $OutputName
 
-$ActualText = [IO.File]::ReadAllText($Fixture, [Text.Encoding]::UTF8).Replace("`r`n", "`n")
-$ExpectedText = "Text is the optimal universal IO interface`nText is the final frontier of interfaces`n"
-if ($ActualText -cne $ExpectedText) {
-    throw 'docs/src/Untitled must contain the two screenshot lines.'
+if (-not $IsSyntaxCapture) {
+    $ActualText = [IO.File]::ReadAllText($Fixture, [Text.Encoding]::UTF8).Replace("`r`n", "`n")
+    $ExpectedText = "Text is the optimal universal IO interface`nText is the final frontier of interfaces`n"
+    if ($ActualText -cne $ExpectedText) {
+        throw 'docs/src/Untitled must contain the two screenshot lines.'
+    }
 }
 
 & cargo build --release --locked -p rte_app --target-dir $EditorTarget
@@ -51,7 +95,6 @@ public static class DocsBuildCaptureV2 {
 }
 
 [void][DocsBuildCaptureV2]::SetProcessDPIAware()
-New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 if (Test-Path $Output) {
     Remove-Item $Output -Force
 }
@@ -98,6 +141,12 @@ try {
     }
     if ($SearchPanel) {
         [System.Windows.Forms.SendKeys]::SendWait('^f')
+    }
+    if ($SyntaxLanguages) {
+        [System.Windows.Forms.SendKeys]::SendWait('^k')
+        [System.Windows.Forms.SendKeys]::SendWait('m')
+        [System.Windows.Forms.SendKeys]::SendWait('^a')
+        [System.Windows.Forms.SendKeys]::SendWait('{BACKSPACE}')
     }
     [void][DocsBuildCaptureV2]::DwmFlush()
 

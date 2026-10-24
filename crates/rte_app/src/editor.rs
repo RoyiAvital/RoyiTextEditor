@@ -1,6 +1,7 @@
 //! The editor window: input, view state, prompts and saving around a
 //! [`Document`], plus the command palette and panels drawn above it.
 
+mod code;
 mod cursors;
 mod find;
 
@@ -14,11 +15,12 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use rte_edit::{self as edit, Command, EditOptions, Selection, Selections};
 use rte_platform::{App, Ctx, Event, Key};
 use rte_render::{Renderer, Target};
+use rte_syntax::Lang;
 use rte_text::{Encoding, LineEnding, Snapshot};
 use rte_view::{
     CaretStyle, Cell, Chrome, DisplayList, Frame, Highlights, Layout, Options, PaletteFrame,
-    PaletteGeometry, PaletteRow, PanelFrame, PanelGeometry, PanelLine, Scroll, Theme, Tone,
-    ViewBuilder, draw_palette, draw_panel, hit_test,
+    PaletteGeometry, PaletteRow, PanelFrame, PanelGeometry, PanelLine, ROW_SCAN_LIMIT, Scroll,
+    Theme, Tone, ViewBuilder, draw_palette, draw_panel, hit_test,
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -31,6 +33,7 @@ use crate::loader::{FileInfo, LoadEvent};
 use crate::palette::{Item, Mode, Motion, Palette};
 use crate::save::{self, Baseline, FileOps, SaveOutcome, SaveRequest};
 use crate::search::SearchThread;
+use crate::syntax::{EarlySyntax, Syntax};
 use crate::trace::Trace;
 
 use cursors::Column;
@@ -59,6 +62,9 @@ pub struct Settings {
     pub read_only: bool,
     pub exit_after_first_frame: bool,
     pub exit_after_load: bool,
+    /// `--exit-after-highlight`: like `exit_after_load`, and a code file
+    /// also waits until it is highlighted from a parse of the whole file.
+    pub exit_after_highlight: bool,
     /// Recent commands listed by `Ctrl+P` (configuration).
     pub recent_count: usize,
     /// Most cursors select-all may create (configuration).
@@ -71,13 +77,21 @@ pub struct Settings {
     pub notice: Option<String>,
     /// `false` after `--syntax none` / `--syntax off`.
     pub highlighting: bool,
+    /// `--syntax <id>`: language chosen instead of detection.
+    pub syntax: Option<String>,
+    /// Larger files are not highlighted (`syntax.maxFileMiB`).
+    pub syntax_max_mib: u64,
+    /// Embedded languages (`syntax.injections`).
+    pub injections: bool,
+    /// Syntax thread started while loading (adopted once).
+    pub early_syntax: Option<EarlySyntax>,
     /// Scripted keys of an interaction benchmark.
     pub bench: Option<bench::Script>,
 }
 
 /// Drawn above the text; takes the keyboard while open.
 enum Popup {
-    Palette(Palette),
+    Palette(Box<Palette>),
     Panel(Panel),
 }
 
@@ -126,6 +140,9 @@ enum DragMode {
     Column((u64, u64)),
 }
 
+/// Snapshot, caret, syntax generation and the bracket pair found there.
+type BracketPair = (Snapshot, u64, u64, Option<(u64, u64)>);
+
 pub struct Editor {
     doc: Document,
     path: Option<PathBuf>,
@@ -160,8 +177,19 @@ pub struct Editor {
     caret_column: RefCell<Option<(Snapshot, u64, u32, u64)>>,
     /// A frame was drawn (traced as `first_paint`).
     painted: bool,
-    /// Syntax highlighting is wanted (set per process; applies once it ships).
+    /// Syntax highlighting is on (`View: Toggle Syntax Highlighting`).
     highlighting: bool,
+    /// Language of the document: detected, or chosen when `language_chosen`.
+    language: Option<&'static Lang>,
+    language_chosen: bool,
+    /// The syntax thread, while highlighting a language.
+    syntax: Option<Syntax>,
+    /// Highlighting is off because the text exceeds `syntax.maxFileMiB`.
+    syntax_over_limit: bool,
+    /// Go to Symbol waits for the syntax thread.
+    symbols_pending: bool,
+    /// Last bracket pair: snapshot, caret, syntax generation, pair.
+    bracket_cache: RefCell<Option<BracketPair>>,
     bench: Option<bench::Driver>,
     /// The first frame is on screen.
     shown: bool,
@@ -188,6 +216,13 @@ pub struct Editor {
     column: Option<Column>,
     /// Word whose occurrences match whole words (`Ctrl+D` from a caret).
     occurrence_word: Option<String>,
+    /// Selections before each Expand Selection, and the last result.
+    expansions: Vec<Selections>,
+    expanded: Option<Selections>,
+    /// Offsets of the symbols listed by Go to Symbol.
+    symbol_offsets: Vec<u64>,
+    /// Trace marks done: first highlighted frame, fully highlighted.
+    marked: (bool, bool),
 }
 
 /// What a frame shows; a repaint is requested only when it changes.
@@ -202,6 +237,8 @@ struct Visible {
     saving: bool,
     overtype: bool,
     highlighting: bool,
+    /// Syntax generation and language.
+    syntax: (u64, Option<&'static str>),
     locks: Locks,
     /// Load state and shown percentage.
     status: (u8, u64),
@@ -222,6 +259,7 @@ impl Visible {
             && self.saving == other.saving
             && self.overtype == other.overtype
             && self.highlighting == other.highlighting
+            && self.syntax == other.syntax
             && self.locks == other.locks
             && self.status == other.status
             && self.new_file == other.new_file
@@ -313,6 +351,12 @@ impl Editor {
             caret_column: RefCell::new(None),
             painted: false,
             highlighting,
+            language: None,
+            language_chosen: false,
+            syntax: None,
+            syntax_over_limit: false,
+            symbols_pending: false,
+            bracket_cache: RefCell::new(None),
             bench,
             shown: false,
             popup: None,
@@ -328,13 +372,178 @@ impl Editor {
             cursor_history: std::collections::VecDeque::new(),
             column: None,
             occurrence_word: None,
+            expansions: Vec::new(),
+            expanded: None,
+            symbol_offsets: Vec::new(),
+            marked: (false, false),
         };
+        editor.choose_initial_language();
         if let Some(event) = first {
             editor.apply_load(event);
         }
         // Events queued before the waker existed produced no wake-up.
         editor.drain_loads();
+        if editor.path.is_none() {
+            editor.restart_syntax();
+        }
         editor
+    }
+
+    /// Applies `--syntax <id>`; an unknown id keeps detection.
+    fn choose_initial_language(&mut self) {
+        let Some(id) = self.settings.syntax.as_deref() else {
+            return;
+        };
+        if id.eq_ignore_ascii_case("none") || id.eq_ignore_ascii_case("off") {
+            return;
+        }
+        match rte_syntax::by_id(id) {
+            Some(lang) => {
+                self.language = Some(lang);
+                self.language_chosen = true;
+            }
+            None => {
+                self.notice = Some(format!(
+                    "Unknown syntax {id:?}: the language follows the file name"
+                ));
+            }
+        }
+    }
+
+    /// Detects the language from the path and the first bytes, unless chosen.
+    fn detect_language(&mut self) {
+        if self.language_chosen {
+            return;
+        }
+        let s = &self.doc.snapshot;
+        self.language = self
+            .path
+            .as_deref()
+            .and_then(|path| crate::syntax::detect(path, s));
+    }
+
+    /// Starts (or stops) the syntax thread for the current language, text
+    /// and settings. Plain text runs no syntax work.
+    fn restart_syntax(&mut self) {
+        // Taken first so that no early thread outlives a decision against it.
+        let early = self
+            .settings
+            .early_syntax
+            .take()
+            .and_then(|slot| slot.lock().ok()?.close());
+        self.syntax = None;
+        self.doc.journal = None;
+        self.syntax_over_limit = false;
+        self.symbols_pending = false;
+        *self.bracket_cache.get_mut() = None;
+        let Some(lang) = self.language else {
+            return;
+        };
+        if !self.highlighting || !matches!(self.status, LoadStatus::Ready) {
+            return;
+        }
+        let max = self.settings.syntax_max_mib;
+        if self.doc.snapshot.len() > max * 1024 * 1024 {
+            self.syntax_over_limit = true;
+            self.notice = Some(format!(
+                "Syntax highlighting off: the file is larger than {max} MiB"
+            ));
+            return;
+        }
+        self.doc.journal = Some(Vec::new());
+        self.syntax = Some(match early {
+            Some((l, syntax)) if std::ptr::eq(l, lang) && syntax.is_for(&self.doc.snapshot) => {
+                syntax
+            }
+            _ => Syntax::start(
+                lang,
+                self.doc.snapshot.clone(),
+                self.settings.injections,
+                self.wake.clone(),
+            ),
+        });
+        self.sync_syntax();
+    }
+
+    /// Sends edits and the visible range to the syntax thread. Growing past
+    /// `syntax.maxFileMiB` stops highlighting; shrinking below restarts it.
+    fn sync_syntax(&mut self) {
+        let over = self.doc.snapshot.len() > self.settings.syntax_max_mib * 1024 * 1024;
+        if over && self.syntax.is_some() || !over && self.syntax_over_limit {
+            self.restart_syntax();
+            return;
+        }
+        if self.syntax.is_none() {
+            return;
+        }
+        let (visible, margin) = self.visible_bytes();
+        if let Some(syntax) = &mut self.syntax {
+            syntax.sync(&mut self.doc, margin.clone());
+            syntax.set_visible(visible, margin);
+        }
+    }
+
+    fn drain_syntax(&mut self) {
+        let Some(syntax) = &mut self.syntax else {
+            return;
+        };
+        syntax.poll();
+        if let Some(e) = syntax.failed() {
+            self.notice = Some(format!("Syntax highlighting off: {e}"));
+            self.syntax = None;
+            self.doc.journal = None;
+            return;
+        }
+        if let Some(symbols) = syntax.take_symbols() {
+            self.show_symbols(&symbols);
+        }
+    }
+
+    /// Drawn bytes of the visible rows (at most [`ROW_SCAN_LIMIT`] per row),
+    /// adjacent rows merged.
+    fn visible_ranges(&self) -> Vec<std::ops::Range<u64>> {
+        let s = &self.doc.snapshot;
+        let rows = u64::from(self.layout().rows.max(1));
+        let top = self.scroll.top_line;
+        let mut ranges: Vec<std::ops::Range<u64>> = Vec::new();
+        for line in top..top + rows {
+            let Some(range) = s.line_range(line) else {
+                break;
+            };
+            // The line break belongs to the row (CRLF, comment ends).
+            let end = (range.end + 1)
+                .min(s.len())
+                .min(range.start + ROW_SCAN_LIMIT as u64);
+            match ranges.last_mut() {
+                Some(last) if last.end == range.start => last.end = end,
+                _ => ranges.push(range.start..end),
+            }
+        }
+        ranges
+    }
+
+    /// The span of the drawn bytes, and a page of rows above and below it
+    /// (parsed ahead), each row counted at most [`ROW_SCAN_LIMIT`] bytes.
+    fn visible_bytes(&self) -> (std::ops::Range<u64>, std::ops::Range<u64>) {
+        let s = &self.doc.snapshot;
+        let rows = u64::from(self.layout().rows.max(1));
+        let top = self.scroll.top_line;
+        let ranges = self.visible_ranges();
+        let visible = match (ranges.first(), ranges.last()) {
+            (Some(first), Some(last)) => first.start..last.end,
+            _ => s.len()..s.len(),
+        };
+        let page = rows * ROW_SCAN_LIMIT as u64;
+        let before = s
+            .line_start(top.saturating_sub(rows))
+            .unwrap_or(0)
+            .max(visible.start.saturating_sub(page));
+        let after = s
+            .line_start(top + 2 * rows)
+            .unwrap_or(s.len())
+            .min(visible.end + page)
+            .max(visible.end);
+        (visible, before..after)
     }
 
     /// Applies queued load events. A loader that disconnects before its final
@@ -393,6 +602,8 @@ impl Editor {
                 self.info = Some(info);
                 self.baseline = baseline;
                 self.status = LoadStatus::Ready;
+                self.detect_language();
+                self.restart_syntax();
             }
             LoadEvent::Failed { snapshot, error } => {
                 self.doc.load(snapshot);
@@ -403,11 +614,38 @@ impl Editor {
         self.clamp_scroll();
     }
 
-    /// `--exit-after-load`: report the trace and close once loading ended.
+    /// `--exit-after-load`: report the trace and close once loading ended;
+    /// `--exit-after-highlight` also waits for the full highlight of a code
+    /// file (see [`App::presented`]).
     fn exit_if_loaded(&mut self, ctx: &mut Ctx) {
-        if self.settings.exit_after_load && !matches!(self.status, LoadStatus::Loading { .. }) {
+        let loaded = !matches!(self.status, LoadStatus::Loading { .. });
+        let highlight_pending = self.settings.exit_after_highlight && self.syntax.is_some();
+        if (self.settings.exit_after_load || self.settings.exit_after_highlight)
+            && loaded
+            && !highlight_pending
+        {
             self.trace.report();
             ctx.close();
+        }
+    }
+
+    /// Trace marks of the first highlighted frame and of the first one from
+    /// a parse of the whole file (`--trace-startup`).
+    fn mark_highlights(&mut self, ctx: &mut Ctx) {
+        let Some(syntax) = &self.syntax else {
+            return;
+        };
+        if !self.marked.0 && syntax.highlighted() {
+            self.marked.0 = true;
+            self.trace.mark("highlighted");
+        }
+        if !self.marked.1 && syntax.fully_highlighted() {
+            self.marked.1 = true;
+            self.trace.mark("fully_highlighted");
+            if self.settings.exit_after_highlight {
+                self.trace.report();
+                ctx.close();
+            }
         }
     }
 
@@ -510,6 +748,10 @@ impl Editor {
             saving: self.saving.is_some(),
             overtype: self.doc.options.overtype,
             highlighting: self.highlighting,
+            syntax: (
+                self.syntax.as_ref().map_or(0, Syntax::generation),
+                self.language.map(|l| l.id),
+            ),
             locks: self.doc.locks,
             status,
             new_file: self.info.is_some_and(|i| i.new_file),
@@ -822,6 +1064,7 @@ impl Editor {
                 self.highlighting = !self.highlighting;
                 let state = if self.highlighting { "on" } else { "off" };
                 self.notice = Some(format!("Syntax highlighting {state}"));
+                self.restart_syntax();
             }
             Action::Find => self.open_find(false),
             Action::Replace => self.open_find(true),
@@ -852,6 +1095,13 @@ impl Editor {
             Action::ColumnSelectRight => self.column_select(0, 1),
             Action::ColumnSelectPageUp => self.column_select(-(self.page() as i64), 0),
             Action::ColumnSelectPageDown => self.column_select(self.page() as i64, 0),
+            Action::ChangeLanguage => self.open_language_mode(),
+            Action::ToggleLineComment => self.toggle_comment(false),
+            Action::ToggleBlockComment => self.toggle_comment(true),
+            Action::GoToBracket => self.go_to_bracket(),
+            Action::ExpandSelection => self.expand_selection(),
+            Action::ShrinkSelection => self.shrink_selection(),
+            Action::GoToSymbol => self.open_symbols(),
         }
     }
 
@@ -928,6 +1178,9 @@ impl Editor {
                 self.select_single(collapsed);
             }
             (VK_BACK, _) => {
+                if !ctrl && self.delete_pair() {
+                    return true;
+                }
                 let (s, sels) = (&self.doc.snapshot, &self.doc.selections);
                 let cmd = if ctrl {
                     edit::delete_word_left(s, sels)
@@ -946,6 +1199,9 @@ impl Editor {
                 self.run(cmd, None);
             }
             (VK_RETURN, false) => {
+                if self.newline_indent() {
+                    return true;
+                }
                 let cmd = edit::newline(&self.doc.snapshot, &self.doc.selections, &opts);
                 self.run(Some(cmd), None);
             }
@@ -981,6 +1237,9 @@ impl Editor {
             return;
         }
         self.notice = None;
+        if self.auto_close(ch) {
+            return;
+        }
         let opts = self.edit_options();
         let mut buf = [0u8; 4];
         let cmd = edit::insert(
@@ -1035,7 +1294,7 @@ impl Editor {
                 p.mode = mode;
                 p.refresh(store, recent);
             }
-            _ => self.popup = Some(Popup::Palette(Palette::new(mode, store, recent))),
+            _ => self.popup = Some(Popup::Palette(Box::new(Palette::new(mode, store, recent)))),
         }
     }
 
@@ -1101,7 +1360,7 @@ impl Editor {
             None => 0u8.hash(&mut h),
             Some(Popup::Palette(p)) => {
                 1u8.hash(&mut h);
-                (p.mode == Mode::All).hash(&mut h);
+                p.mode.hash(&mut h);
                 p.query.hash(&mut h);
                 (p.selected, p.first, p.items.len()).hash(&mut h);
                 self.store.as_ref().map(Store::rev).hash(&mut h);
@@ -1223,11 +1482,22 @@ impl Editor {
     }
 
     /// Closes the palette, records the command as recent and runs it. The
-    /// command runs before the state file is written.
+    /// command runs before the state file is written. A choice (language,
+    /// symbol) is applied instead.
     fn run_palette_item(&mut self, item: usize, ctx: &mut Ctx) {
         let Some(Popup::Palette(p)) = &self.popup else {
             return;
         };
+        if let Some(choice) = p.choice_at(item) {
+            let mode = p.mode;
+            self.popup = None;
+            match mode {
+                Mode::Language => self.set_language(choice),
+                Mode::Symbol => self.go_to_symbol(choice),
+                Mode::All | Mode::Favorites => {}
+            }
+            return;
+        }
         let (Some(def), Some(index)) = (p.command_at(item), p.index_at(item)) else {
             return;
         };
@@ -1342,15 +1612,29 @@ impl Editor {
                             enabled: enabled(def, locks, has_path),
                         }
                     }
+                    Item::Choice { index, matched } => PaletteRow::Command {
+                        label: &p.choices.labels[*index],
+                        matched: p.matched(matched),
+                        keys: &p.choices.hints[*index],
+                        starred: false,
+                        enabled: true,
+                    },
                 });
                 let placeholder = match p.mode {
                     Mode::All => "Type a command name",
                     Mode::Favorites => "Search recent and favorite commands",
+                    Mode::Language => "Select a language",
+                    Mode::Symbol => "Go to a symbol",
                 };
-                let empty = if p.mode == Mode::Favorites && p.query.as_str().is_empty() {
-                    "Star commands in Ctrl+Shift+P to add them here"
-                } else {
-                    "No matching commands"
+                let empty = match p.mode {
+                    Mode::Favorites if p.query.as_str().is_empty() => {
+                        "Star commands in Ctrl+Shift+P to add them here"
+                    }
+                    Mode::Language => "No matching languages",
+                    Mode::Symbol if self.symbols_pending => "Collecting symbols…",
+                    Mode::Symbol if p.choices.labels.is_empty() => "No symbols found",
+                    Mode::Symbol => "No matching symbols",
+                    _ => "No matching commands",
                 };
                 let query = p.query.as_str();
                 let cols = |end: usize| query[..end].width() as u32;
@@ -1581,6 +1865,8 @@ impl Editor {
         }
         if !self.highlighting {
             right.push("Syntax off".to_owned());
+        } else if let Some(lang) = self.language {
+            right.push(lang.name.to_owned());
         }
         if !self.doc.locks.loading
             && let Some(reason) = self.doc.locks.edit_refusal()
@@ -1599,7 +1885,7 @@ impl App for Editor {
         match event {
             Event::Shown => {
                 self.trace.mark("first_frame");
-                if !self.settings.exit_after_load {
+                if !self.settings.exit_after_load && !self.settings.exit_after_highlight {
                     self.trace.report();
                 }
                 if self.settings.exit_after_first_frame {
@@ -1679,9 +1965,11 @@ impl App for Editor {
                 self.drain_saves(ctx);
                 self.drain_store();
                 self.drain_search();
+                self.drain_syntax();
                 self.exit_if_loaded(ctx);
             }
         }
+        self.sync_syntax();
         let dirty = self.doc.is_dirty();
         if dirty != self.shown_dirty {
             self.shown_dirty = dirty;
@@ -1697,8 +1985,18 @@ impl App for Editor {
         if redraw {
             ctx.redraw();
         }
-        let busy = self.bench.is_some() && self.search_busy();
-        let ready = self.shown && !matches!(self.status, LoadStatus::Loading { .. });
+        let busy = self.bench.is_some() && (self.search_busy() || self.symbols_pending);
+        // Scripts start once the file is loaded and, with syntax, highlighted.
+        let full = self.bench.as_ref().is_some_and(bench::Driver::full);
+        let ready = self.shown
+            && !matches!(self.status, LoadStatus::Loading { .. })
+            && self.syntax.as_ref().is_none_or(|s| {
+                if full {
+                    s.fully_highlighted()
+                } else {
+                    s.highlighted()
+                }
+            });
         if ready && let Some(r) = self.bench.as_mut().and_then(bench::Driver::take_select) {
             let len = self.doc.snapshot.len();
             self.doc.select(Selections::single(Selection::new(
@@ -1735,6 +2033,19 @@ impl App for Editor {
         } else {
             CaretStyle::Bar
         };
+        self.sync_syntax();
+        let brackets: Vec<u64> = self
+            .bracket_pair()
+            .map(|(a, b)| vec![a.min(b), a.max(b)])
+            .unwrap_or_default();
+        let ranges = match self.syntax {
+            Some(_) => self.visible_ranges(),
+            None => Vec::new(),
+        };
+        let syntax = match &mut self.syntax {
+            Some(syntax) => syntax.spans(&self.doc.snapshot, &ranges),
+            None => &[],
+        };
         let frame = Frame {
             snapshot: &self.doc.snapshot,
             layout: &layout,
@@ -1754,7 +2065,12 @@ impl App for Editor {
             caret,
             highlights: {
                 let (matches, scope) = find::highlights(self.find.as_deref(), &self.doc.snapshot);
-                Highlights { matches, scope }
+                Highlights {
+                    matches,
+                    scope,
+                    syntax,
+                    brackets: &brackets,
+                }
             },
         };
         self.view.build(&frame, &mut self.list);
@@ -1774,9 +2090,11 @@ impl App for Editor {
     }
 
     fn presented(&mut self, ctx: &mut Ctx) {
-        let busy = self.bench.is_some() && self.search_busy();
+        self.mark_highlights(ctx);
+        let busy = self.bench.is_some() && (self.search_busy() || self.symbols_pending);
+        let highlighted = self.syntax.as_ref().map(Syntax::highlighted);
         if let Some(bench) = &mut self.bench {
-            bench.presented(busy, ctx);
+            bench.presented(busy, highlighted, ctx);
         }
     }
 
@@ -1933,12 +2251,17 @@ mod tests {
             read_only,
             exit_after_first_frame: false,
             exit_after_load,
+            exit_after_highlight: false,
             recent_count: 3,
             multi_cursor_limit: 10_000,
             replace_all_max_mib: 512,
             user_dir: None,
             notice: None,
             highlighting: true,
+            syntax: None,
+            syntax_max_mib: 32,
+            injections: true,
+            early_syntax: None,
             bench: None,
         }
     }
@@ -2429,13 +2752,14 @@ mod tests {
         }
     }
 
-    fn palette_labels(editor: &Editor) -> Vec<&'static str> {
-        palette(editor)
-            .items
+    fn palette_labels(editor: &Editor) -> Vec<&str> {
+        let p = palette(editor);
+        p.items
             .iter()
             .map(|item| match item {
                 Item::Header(h) => h,
                 Item::Command { index, .. } => COMMANDS[*index].label,
+                Item::Choice { index, .. } => p.choices.labels[*index].as_str(),
             })
             .collect()
     }
@@ -2522,6 +2846,553 @@ mod tests {
         editor.event(key(VK_RETURN, false, false), &mut ctx);
         type_text(&mut editor, &mut ctx, "x");
         assert_eq!(text(&editor), "xabc");
+    }
+
+    /// An editor on `text` loaded from `name` (detection uses the name).
+    fn editor_named(name: &str, text: &[u8]) -> Editor {
+        let (tx, rx) = mpsc::channel();
+        tx.send(done(text)).unwrap();
+        drop(tx);
+        Editor::new(
+            Some(Path::new(name)),
+            None,
+            Some(rx),
+            renderer(),
+            96,
+            settings(false, false),
+            Trace::new(false),
+            Arc::new(FakeFiles::default()),
+            Arc::new(|| {}),
+        )
+    }
+
+    /// The loader hook starts a syntax thread only for a code file within
+    /// `syntax.maxFileMiB`.
+    #[test]
+    fn the_loader_hook_starts_syntax_for_code_within_the_limit() {
+        let snapshot = Snapshot::from_bytes(b"fn main() {}\n");
+        let run = |path: &str, max_mib: u64| {
+            let slot: EarlySyntax = Default::default();
+            let hook = crate::syntax::early_start(
+                slot.clone(),
+                PathBuf::from(path),
+                None,
+                max_mib,
+                true,
+                Arc::new(|| {}),
+            );
+            hook(&snapshot);
+            slot.lock().unwrap().syntax.as_ref().map(|(l, _)| l.id)
+        };
+        assert_eq!(run(r"C:\a.rs", 32), Some("rust"));
+        assert_eq!(run(r"C:\a.txt", 32), None);
+        assert_eq!(run(r"C:\a.rs", 0), None);
+    }
+
+    /// The editor takes over a syntax thread started by the loader for the
+    /// same language and text, and starts its own otherwise.
+    #[test]
+    fn an_early_syntax_thread_is_adopted_when_it_matches() {
+        let snapshot = Snapshot::from_bytes(b"fn main() {}\n");
+        for (lang, adopted) in [("rust", true), ("python", false)] {
+            let lang = rte_syntax::by_id(lang).unwrap();
+            let early = Syntax::start(lang, snapshot.clone(), true, Arc::new(|| {}));
+            let id = early.id();
+            let slot: EarlySyntax = Arc::new(std::sync::Mutex::new(crate::syntax::Early {
+                syntax: Some((lang, early)),
+                closed: false,
+            }));
+            let (tx, rx) = mpsc::channel();
+            tx.send(LoadEvent::Done {
+                snapshot: snapshot.clone(),
+                info: info(),
+                baseline: None,
+                read_ms: 0.0,
+            })
+            .unwrap();
+            drop(tx);
+            let mut settings = settings(false, false);
+            settings.early_syntax = Some(slot.clone());
+            let editor = Editor::new(
+                Some(Path::new(r"C:\src\main.rs")),
+                None,
+                Some(rx),
+                renderer(),
+                96,
+                settings,
+                Trace::new(false),
+                Arc::new(FakeFiles::default()),
+                Arc::new(|| {}),
+            );
+            assert!(slot.lock().unwrap().syntax.is_none(), "taken once");
+            let syntax = editor.syntax.as_ref().unwrap();
+            assert!(syntax.is_for(&editor.doc.snapshot));
+            assert_eq!(syntax.id() == id, adopted, "{}", lang.id);
+        }
+    }
+
+    /// Turning highlighting off or choosing Plain Text while loading stops
+    /// the loader's syntax thread, whether it started before or after.
+    #[test]
+    fn an_early_syntax_thread_does_not_outlive_highlighting_off() {
+        let text = b"fn main() {}\n";
+        for (plain, hook_first) in [(false, false), (false, true), (true, false), (true, true)] {
+            let slot: EarlySyntax = Default::default();
+            let mut hook = Some(crate::syntax::early_start(
+                slot.clone(),
+                PathBuf::from(r"C:\src\main.rs"),
+                None,
+                32,
+                true,
+                Arc::new(|| {}),
+            ));
+            let (tx, rx) = mpsc::channel();
+            tx.send(LoadEvent::Progress {
+                snapshot: Snapshot::from_bytes(b"fn"),
+                loaded: 2,
+                total: text.len() as u64,
+            })
+            .unwrap();
+            let first = rx.recv().ok();
+            let mut settings = settings(false, false);
+            settings.early_syntax = Some(slot.clone());
+            let mut editor = Editor::new(
+                Some(Path::new(r"C:\src\main.rs")),
+                first,
+                Some(rx),
+                renderer(),
+                96,
+                settings,
+                Trace::new(false),
+                Arc::new(FakeFiles::default()),
+                Arc::new(|| {}),
+            );
+            let mut ctx = Ctx::headless(800, 600, 96);
+            let case = format!("plain {plain}, hook first {hook_first}");
+            if hook_first {
+                hook.take().unwrap()(&Snapshot::from_bytes(text));
+                assert!(slot.lock().unwrap().syntax.is_some(), "{case}");
+            }
+            if plain {
+                editor.set_language(0);
+            } else {
+                editor.perform(Action::ToggleSyntax, &mut ctx);
+            }
+            if let Some(hook) = hook {
+                hook(&Snapshot::from_bytes(text));
+            }
+            assert!(slot.lock().unwrap().syntax.is_none(), "{case}");
+            tx.send(done(text)).unwrap();
+            editor.event(Event::Wake, &mut ctx);
+            assert!(matches!(editor.status, LoadStatus::Ready), "{case}");
+            assert!(editor.syntax.is_none(), "{case}");
+        }
+    }
+
+    /// Delivers wake-ups until the syntax thread posted trees for the text.
+    fn wait_for_syntax(editor: &mut Editor, ctx: &mut Ctx) {
+        for _ in 0..5000 {
+            editor.event(Event::Wake, ctx);
+            if editor.syntax.as_ref().is_some_and(Syntax::settled) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("no syntax trees");
+    }
+
+    /// Color of the first drawn text glyph `ch`.
+    fn glyph_color(editor: &mut Editor, ch: char) -> u32 {
+        let mut pixels = vec![0u32; 800 * 600];
+        editor.paint(&mut pixels, 800, 600);
+        let clip = editor.layout().text;
+        editor
+            .list
+            .glyphs
+            .iter()
+            .find(|g| g.clip == clip && g.ch == ch)
+            .map(|g| g.color)
+            .unwrap()
+    }
+
+    #[test]
+    fn code_is_highlighted_by_the_syntax_thread() {
+        let mut ctx = Ctx::headless(800, 600, 96);
+        let mut editor = editor_named(r"C:\src\main.rs", b"fn main() {}\n");
+        editor.event(
+            Event::Resized {
+                width: 800,
+                height: 600,
+            },
+            &mut ctx,
+        );
+        assert_eq!(editor.language.map(|l| l.id), Some("rust"));
+        assert!(editor.status_text().1.contains("Rust"));
+        wait_for_syntax(&mut editor, &mut ctx);
+        let keyword = editor.theme.syntax[rte_syntax::Style::Keyword as usize];
+        assert_eq!(glyph_color(&mut editor, 'f'), keyword);
+        // Edits move the highlights with the text, then undo restores them.
+        editor.event(key(VK_HOME, true, false), &mut ctx);
+        type_text(&mut editor, &mut ctx, "// c");
+        editor.event(key(VK_RETURN, false, false), &mut ctx);
+        let comment = editor.theme.syntax[rte_syntax::Style::Comment as usize];
+        wait_for_syntax(&mut editor, &mut ctx);
+        assert_eq!(glyph_color(&mut editor, 'c'), comment);
+        assert_eq!(glyph_color(&mut editor, 'f'), keyword);
+        while text(&editor) != "fn main() {}\n" {
+            editor.event(key(VK_Z, true, false), &mut ctx);
+        }
+        wait_for_syntax(&mut editor, &mut ctx);
+        assert_eq!(glyph_color(&mut editor, 'f'), keyword);
+        // Turning highlighting off stops the thread and draws plain text.
+        editor.perform(Action::ToggleSyntax, &mut ctx);
+        assert!(editor.syntax.is_none() && editor.doc.journal.is_none());
+        assert_eq!(glyph_color(&mut editor, 'f'), editor.theme.text);
+        editor.perform(Action::ToggleSyntax, &mut ctx);
+        wait_for_syntax(&mut editor, &mut ctx);
+        assert_eq!(glyph_color(&mut editor, 'f'), keyword);
+    }
+
+    #[test]
+    fn plain_text_runs_no_syntax_work() {
+        let files = Arc::new(FakeFiles::default());
+        let editor = editor_on(&files, b"fn main() {}\n", false);
+        assert!(editor.language.is_none());
+        assert!(editor.syntax.is_none() && editor.doc.journal.is_none());
+        let mut ctx = Ctx::headless(800, 600, 96);
+        let mut editor = editor_named(r"C:\big.json", &vec![b' '; 33 * 1024 * 1024]);
+        editor.event(Event::Wake, &mut ctx);
+        assert!(editor.syntax.is_none());
+        assert!(editor.status_text().0.contains("larger than 32 MiB"));
+    }
+
+    fn chord_k(editor: &mut Editor, ctx: &mut Ctx, second: u16) {
+        editor.event(key(VK_K, true, false), ctx);
+        editor.event(key(second, false, false), ctx);
+    }
+
+    fn alt_shift(vk: u16) -> Event {
+        Event::Key(Key {
+            vk,
+            ctrl: false,
+            shift: true,
+            alt: true,
+        })
+    }
+
+    fn caret(editor: &Editor) -> u64 {
+        editor.doc.selections.primary().head
+    }
+
+    #[test]
+    fn change_language_mode_and_code_commands() {
+        let mut ctx = Ctx::headless(800, 600, 96);
+        let mut editor = editor_named(r"C:\notes.txt", b"");
+        assert!(editor.language.is_none());
+        chord_k(&mut editor, &mut ctx, VK_M);
+        assert_eq!(palette(&editor).mode, Mode::Language);
+        assert_eq!(
+            palette(&editor)
+                .selected
+                .and_then(|i| palette(&editor).choice_at(i)),
+            Some(0),
+            "Plain Text is current"
+        );
+        type_text(&mut editor, &mut ctx, "rust");
+        editor.event(key(VK_RETURN, false, false), &mut ctx);
+        assert!(editor.popup.is_none());
+        assert_eq!(editor.language.map(|l| l.id), Some("rust"));
+        assert!(editor.syntax.is_some());
+
+        // Auto-closing pairs, Enter between braces, Backspace in a pair.
+        type_text(&mut editor, &mut ctx, "fn f(");
+        assert_eq!(text(&editor), "fn f()");
+        type_text(&mut editor, &mut ctx, ") {");
+        assert_eq!(text(&editor), "fn f() {}");
+        editor.event(key(VK_RETURN, false, false), &mut ctx);
+        assert_eq!(text(&editor), "fn f() {\n    \n}");
+        type_text(&mut editor, &mut ctx, "g(");
+        editor.event(key(VK_BACK, false, false), &mut ctx);
+        assert_eq!(text(&editor), "fn f() {\n    g\n}");
+        type_text(&mut editor, &mut ctx, "();");
+
+        // Toggle Line Comment and back.
+        editor.event(key(VK_OEM_2, true, false), &mut ctx);
+        assert_eq!(text(&editor), "fn f() {\n    // g();\n}");
+        editor.event(key(VK_OEM_2, true, false), &mut ctx);
+        assert_eq!(text(&editor), "fn f() {\n    g();\n}");
+
+        // Go to Bracket from the opening brace and back.
+        wait_for_syntax(&mut editor, &mut ctx);
+        editor.select_single(Selection::caret(7));
+        editor.event(key(VK_OEM_5, true, true), &mut ctx);
+        assert_eq!(caret(&editor), text(&editor).rfind('}').unwrap() as u64);
+        editor.event(key(VK_OEM_5, true, true), &mut ctx);
+        assert_eq!(caret(&editor), 7);
+
+        // Expand Selection grows through the syntax tree; Shrink returns.
+        let g = text(&editor).find('g').unwrap() as u64;
+        editor.select_single(Selection::caret(g));
+        editor.event(alt_shift(VK_RIGHT), &mut ctx);
+        assert_eq!(editor.doc.selections.primary().range(), g..g + 1);
+        editor.event(alt_shift(VK_RIGHT), &mut ctx);
+        editor.event(alt_shift(VK_RIGHT), &mut ctx);
+        assert!(editor.doc.selections.primary().range().end - g >= 3);
+        editor.event(alt_shift(VK_LEFT), &mut ctx);
+        editor.event(alt_shift(VK_LEFT), &mut ctx);
+        assert_eq!(editor.doc.selections.primary().range(), g..g + 1);
+
+        // Go to Symbol lists `f` (from the syntax thread) and moves the
+        // caret to it.
+        editor.select_single(Selection::caret(text(&editor).len() as u64));
+        editor.event(key(VK_O, true, true), &mut ctx);
+        assert_eq!(palette(&editor).mode, Mode::Symbol);
+        for _ in 0..5000 {
+            if !editor.symbols_pending {
+                break;
+            }
+            editor.event(Event::Wake, &mut ctx);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(palette(&editor).choices.labels, ["f"]);
+        editor.event(key(VK_RETURN, false, false), &mut ctx);
+        assert_eq!(caret(&editor), 3);
+        // Unchanged text: the list shows at once.
+        editor.event(key(VK_O, true, true), &mut ctx);
+        assert!(!editor.symbols_pending);
+        assert_eq!(palette(&editor).choices.labels, ["f"]);
+        editor.event(key(VK_ESCAPE, false, false), &mut ctx);
+
+        // The bracket pair at the caret is drawn.
+        editor.select_single(Selection::caret(7));
+        assert_eq!(editor.bracket_pair().map(|(a, _)| a), Some(7));
+    }
+
+    #[test]
+    fn code_commands_follow_the_embedded_language() {
+        let mut ctx = Ctx::headless(800, 600, 96);
+        let html = "<p>a</p>\n<script>\nlet x = 1;\n</script>\n";
+        let mut editor = editor_named(r"C:\page.html", html.as_bytes());
+        editor.event(
+            Event::Resized {
+                width: 800,
+                height: 600,
+            },
+            &mut ctx,
+        );
+        let mut pixels = vec![0u32; 800 * 600];
+        for _ in 0..5000 {
+            editor.event(Event::Wake, &mut ctx);
+            editor.paint(&mut pixels, 800, 600);
+            if editor.syntax.as_ref().is_some_and(Syntax::highlighted) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let js = html.find("let").unwrap() as u64;
+        assert_eq!(editor.lang_at(js).map(|l| l.id), Some("javascript"));
+        // Line comments: `//` inside the script, `<!-- -->` outside.
+        editor.select_single(Selection::caret(js));
+        editor.event(key(VK_OEM_2, true, false), &mut ctx);
+        assert!(text(&editor).contains("// let x = 1;"), "{}", text(&editor));
+        editor.select_single(Selection::caret(0));
+        editor.event(key(VK_OEM_2, true, false), &mut ctx);
+        assert!(
+            text(&editor).starts_with("<!-- <p>a</p> -->"),
+            "{}",
+            text(&editor)
+        );
+    }
+
+    /// A fence below the view (no parsed layer yet) still comments in its
+    /// own language, also in a selection that crosses into it.
+    #[test]
+    fn offscreen_fences_comment_in_their_language() {
+        let mut ctx = Ctx::headless(800, 600, 96);
+        let md = format!(
+            "# Notes\n\n{}Text.\n```python\ndef hidden(): pass\n```\n",
+            "Paragraph.\n\n".repeat(400)
+        );
+        let mut editor = editor_named(r"C:\notes.md", md.as_bytes());
+        editor.event(
+            Event::Resized {
+                width: 800,
+                height: 600,
+            },
+            &mut ctx,
+        );
+        wait_for_syntax(&mut editor, &mut ctx);
+        let hidden = md.find("def hidden").unwrap() as u64;
+        editor.select_single(Selection::caret(hidden));
+        editor.event(key(VK_OEM_2, true, false), &mut ctx);
+        assert!(
+            text(&editor).contains("# def hidden(): pass"),
+            "{}",
+            text(&editor)
+        );
+        editor.event(key(VK_Z, true, false), &mut ctx);
+        let text_line = md.find("Text.").unwrap() as u64;
+        editor.select_single(Selection::new(text_line, hidden + 3));
+        editor.event(key(VK_OEM_2, true, false), &mut ctx);
+        let after = text(&editor);
+        assert!(after.contains("<!-- Text. -->"), "{after}");
+        assert!(after.contains("# def hidden(): pass"), "{after}");
+    }
+
+    /// After an edit far from the view the trees' positions there are
+    /// approximate: comments wait for the next parse instead of guessing.
+    #[test]
+    fn far_edits_defer_comments_until_the_next_parse() {
+        let mut ctx = Ctx::headless(800, 600, 96);
+        let md = format!(
+            "```js\nlet a = 1;\n```\n{}```js\nlet z = 1;\n```\n",
+            "Paragraph.\n\n".repeat(2000)
+        );
+        let mut editor = editor_named(r"C:\notes.md", md.as_bytes());
+        editor.event(
+            Event::Resized {
+                width: 800,
+                height: 600,
+            },
+            &mut ctx,
+        );
+        wait_for_syntax(&mut editor, &mut ctx);
+        let (a, z) = (
+            md.find("let a").unwrap() as u64,
+            md.find("let z").unwrap() as u64,
+        );
+        editor.doc.select(Selections::new(
+            vec![Selection::caret(a), Selection::caret(z)],
+            0,
+        ));
+        type_text(&mut editor, &mut ctx, &" ".repeat(100));
+        let typed = text(&editor);
+        let z = typed.find("let z").unwrap() as u64;
+        editor.select_single(Selection::caret(z));
+        editor.event(key(VK_OEM_2, true, false), &mut ctx);
+        assert_eq!(text(&editor), typed, "nothing guessed");
+        assert!(
+            editor
+                .notice
+                .as_deref()
+                .unwrap()
+                .contains("still being parsed")
+        );
+        wait_for_syntax(&mut editor, &mut ctx);
+        editor.event(key(VK_OEM_2, true, false), &mut ctx);
+        let after = text(&editor);
+        assert!(
+            after.contains("// let z = 1;"),
+            "{}",
+            &after[after.len() - 40..]
+        );
+    }
+
+    /// Replaced and final trees go back to the syntax thread to be freed;
+    /// none are kept. (Lua: no other test here holds its highlighter.)
+    #[test]
+    fn replaced_trees_are_released_by_the_syntax_thread() {
+        let hl = rte_syntax::highlighter(rte_syntax::by_id("lua").unwrap().grammar).unwrap();
+        let base = Arc::strong_count(&hl);
+        let held = || Arc::strong_count(&hl) - base;
+        let until = |done: &dyn Fn() -> bool| {
+            for _ in 0..5000 {
+                if done() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            panic!("still held: {}", held());
+        };
+        let mut ctx = Ctx::headless(800, 600, 96);
+        let mut editor = editor_named(r"C:\src\a.lua", b"local a = 1\n");
+        editor.event(
+            Event::Resized {
+                width: 800,
+                height: 600,
+            },
+            &mut ctx,
+        );
+        wait_for_syntax(&mut editor, &mut ctx);
+        type_text(&mut editor, &mut ctx, "x");
+        wait_for_syntax(&mut editor, &mut ctx);
+        until(&|| held() == 1);
+        drop(editor);
+        until(&|| held() == 0);
+    }
+
+    /// Rows over the UI budget are highlighted by the thread again once the
+    /// full parse replaces the window of a large file.
+    #[test]
+    fn long_rows_are_fully_highlighted_after_the_window() {
+        let mut text = b"[".to_vec();
+        for n in 0..20_000 {
+            text.extend_from_slice(
+                format!("{{\"id\":{n},\"ok\":true,\"tags\":[\"a\",null]}},").as_bytes(),
+            );
+        }
+        text.extend_from_slice(b"0]");
+        assert!(text.len() as u64 > rte_syntax::WINDOW_THRESHOLD);
+        let mut ctx = Ctx::headless(1100, 900, 96);
+        let mut editor = editor_named(r"C:\line.json", &text);
+        editor.event(
+            Event::Resized {
+                width: 1100,
+                height: 900,
+            },
+            &mut ctx,
+        );
+        let mut pixels = vec![0u32; 1100 * 900];
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            editor.event(Event::Wake, &mut ctx);
+            editor.paint(&mut pixels, 1100, 900);
+            if editor
+                .syntax
+                .as_ref()
+                .is_some_and(Syntax::fully_highlighted)
+            {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("never fully highlighted");
+    }
+
+    #[test]
+    fn the_syntax_size_limit_follows_edits() {
+        let mut ctx = Ctx::headless(800, 600, 96);
+        let mut editor = editor_named(r"C:\src\main.rs", b"fn f() {}\n");
+        editor.settings.syntax_max_mib = 1;
+        editor.restart_syntax();
+        assert!(editor.syntax.is_some());
+        let grow = Command {
+            tx: rte_text::Transaction::single(rte_text::Edit::insert(
+                editor.doc.snapshot.len(),
+                vec![b' '; 2 << 20],
+            )),
+            kind: edit::EditKind::Other,
+            collapse: false,
+        };
+        editor.run(Some(grow), None);
+        editor.sync_syntax();
+        assert!(editor.syntax.is_none() && editor.doc.journal.is_none());
+        assert!(editor.status_text().0.contains("larger than 1 MiB"));
+        // Shrinking below the limit turns highlighting back on.
+        editor.event(key(VK_Z, true, false), &mut ctx);
+        assert!(editor.syntax.is_some() && editor.doc.journal.is_some());
+    }
+
+    #[test]
+    fn highlighting_reads_only_the_drawn_part_of_long_lines() {
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, &vec![b'x'; 16 << 20], false);
+        editor.size = (1100, 2160);
+        let (visible, margin) = editor.visible_bytes();
+        assert!(visible.end - visible.start <= ROW_SCAN_LIMIT as u64);
+        let rows = u64::from(editor.layout().rows);
+        assert!(margin.end - margin.start <= (2 * rows + 1) * ROW_SCAN_LIMIT as u64);
+        assert_eq!(editor.visible_ranges(), [0..ROW_SCAN_LIMIT as u64]);
     }
 
     #[test]

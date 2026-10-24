@@ -918,7 +918,7 @@ mod tests {
             let path = dir.join(name);
             std::fs::write(&path, bytes).unwrap();
             let (tx, rx) = mpsc::channel();
-            crate::loader::load(path.clone(), tx, || {});
+            crate::loader::load(path.clone(), tx, || {}, None);
             let Some(crate::loader::LoadEvent::Done {
                 snapshot,
                 info,

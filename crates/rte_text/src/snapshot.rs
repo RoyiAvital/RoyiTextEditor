@@ -4,7 +4,7 @@ use std::fmt;
 use std::ops::Range;
 use std::sync::Arc;
 
-use crate::change::{ChangeSet, EditError, Transaction};
+use crate::change::{Change, ChangeSet, EditError, Transaction};
 use crate::tree::{self, Kind, Node};
 
 /// Document revision; increments with every applied transaction.
@@ -203,6 +203,68 @@ impl Snapshot {
             out.extend_from_slice(chunk);
         }
         out
+    }
+
+    /// The single change turning `self` into `new`: the bytes between their
+    /// common prefix and suffix. Leaves shared by both trees are skipped
+    /// without comparing bytes, so related snapshots (undo, redo) diff fast.
+    pub fn diff(&self, new: &Snapshot) -> ChangeSet {
+        if self.same_tree(new) {
+            return ChangeSet::default();
+        }
+        let (old_len, new_len) = (self.len(), new.len());
+        let limit = old_len.min(new_len);
+        // Common prefix.
+        let mut prefix = 0;
+        while prefix < limit {
+            let (a_start, a) = self.chunk_at(prefix).expect("inside");
+            let (b_start, b) = new.chunk_at(prefix).expect("inside");
+            let a = &a[(prefix - a_start) as usize..];
+            let b = &b[(prefix - b_start) as usize..];
+            let n = a.len().min(b.len()).min((limit - prefix) as usize);
+            if std::ptr::eq(a.as_ptr(), b.as_ptr()) {
+                prefix += n as u64;
+                continue;
+            }
+            match a[..n].iter().zip(&b[..n]).position(|(x, y)| x != y) {
+                Some(i) => {
+                    prefix += i as u64;
+                    break;
+                }
+                None => prefix += n as u64,
+            }
+        }
+        // Common suffix, not overlapping the prefix.
+        let mut suffix = 0;
+        while suffix < limit - prefix {
+            let (a_end, b_end) = (old_len - suffix, new_len - suffix);
+            let (a_start, a) = self.chunk_at(a_end - 1).expect("inside");
+            let (b_start, b) = new.chunk_at(b_end - 1).expect("inside");
+            let a = &a[..(a_end - a_start) as usize];
+            let b = &b[..(b_end - b_start) as usize];
+            let n = a.len().min(b.len()).min((limit - prefix - suffix) as usize);
+            let (a, b) = (&a[a.len() - n..], &b[b.len() - n..]);
+            if std::ptr::eq(a.as_ptr(), b.as_ptr()) {
+                suffix += n as u64;
+                continue;
+            }
+            match a.iter().rev().zip(b.iter().rev()).position(|(x, y)| x != y) {
+                Some(i) => {
+                    suffix += i as u64;
+                    break;
+                }
+                None => suffix += n as u64,
+            }
+        }
+        let old = prefix..old_len - suffix;
+        let inserted = new_len - suffix - prefix;
+        if old.is_empty() && inserted == 0 {
+            return ChangeSet::default();
+        }
+        ChangeSet::from_changes(vec![Change {
+            old,
+            new_len: inserted,
+        }])
     }
 
     /// Applies `tx` and returns the new snapshot with the position mapping.

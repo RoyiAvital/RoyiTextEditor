@@ -1,4 +1,4 @@
-//! `bench-perf`: Performance Benchmark v1 (see `Perfromance.md`).
+//! `bench-perf`: Performance Benchmark v1 (see `Performance.md`).
 //!
 //! Fixtures are generated deterministically (no randomness, no clock) and
 //! verified against recorded XXH3-64 hashes, so every machine measures the
@@ -118,7 +118,37 @@ const FIXTURES: &[Fixture] = &[
         generate: || json(8 * MIB, "", ","),
         hash: 0xcda2d7050b0bfede,
     },
+    Fixture {
+        name: "code.py",
+        generate: || lines(PY, CODE_LINES),
+        hash: 0x5ebabdd1ff1a5b60,
+    },
+    Fixture {
+        name: "code.c",
+        generate: || lines(C, CODE_LINES),
+        hash: 0xc89d830565836307,
+    },
+    Fixture {
+        name: "10k.py",
+        generate: || lines(PY, TYPICAL_LINES),
+        hash: 0x8e415b15e8bd4e98,
+    },
+    Fixture {
+        name: "10k.c",
+        generate: || lines(C, TYPICAL_LINES),
+        hash: 0x057e008afce340c3,
+    },
+    Fixture {
+        name: "10k.ts",
+        generate: || lines(TS, TYPICAL_LINES),
+        hash: 0xa69187b2ee0c321f,
+    },
 ];
+
+/// Lines of the code fixtures: a large hand-written source file.
+const CODE_LINES: usize = 50_000;
+/// Lines of the typical code fixtures: the upper end of usual source files.
+const TYPICAL_LINES: usize = 10_000;
 
 /// A load test: fresh processes on one fixture.
 struct LoadTest {
@@ -132,6 +162,9 @@ struct LoadTest {
     cap: Duration,
     /// Report the fully loaded time (files loading after the first frame).
     loaded: bool,
+    /// Wait for the whole file to be highlighted (`--exit-after-highlight`)
+    /// and report the time.
+    highlight: bool,
 }
 
 const fn test(
@@ -151,6 +184,7 @@ const fn test(
         runs,
         cap: Duration::from_secs(cap_secs),
         loaded,
+        highlight: false,
     }
 }
 
@@ -163,7 +197,10 @@ const LOAD_TESTS: &[LoadTest] = &[
     test("L06", "JSON, 64 KiB", "small.json", 10, 1, false),
     test("L07", "Markdown, 64 KiB", "small.md", 10, 1, false),
     test("L08", "CSV, 64 KiB", "small.csv", 10, 1, false),
-    test("L09", "Python, 8 MiB", "medium.py", 5, 1, true),
+    LoadTest {
+        highlight: true,
+        ..test("L09", "Python, 8 MiB", "medium.py", 5, 10, true)
+    },
     test("L10", "C, 8 MiB", "medium.c", 5, 1, true),
     test("L11", "JSON, 8 MiB", "medium.json", 5, 1, true),
     test("L12", "Markdown, 8 MiB", "medium.md", 5, 1, true),
@@ -183,6 +220,30 @@ const LOAD_TESTS: &[LoadTest] = &[
         ..test("L18", "Notebook as JSON, 8 MiB", "medium.ipynb", 5, 1, true)
     },
     test("L19", "Markdown, 128 MiB", "large.md", 5, 1, true),
+    LoadTest {
+        highlight: true,
+        ..test("L20", "Python, 50,000 lines", "code.py", 5, 5, true)
+    },
+    LoadTest {
+        highlight: true,
+        ..test("L21", "C, 50,000 lines", "code.c", 5, 5, true)
+    },
+    LoadTest {
+        highlight: true,
+        ..test("L22", "1-line JSON, highlighted", "line.json", 5, 10, true)
+    },
+    LoadTest {
+        highlight: true,
+        ..test("L23", "Python, 10,000 lines", "10k.py", 10, 2, false)
+    },
+    LoadTest {
+        highlight: true,
+        ..test("L24", "C, 10,000 lines", "10k.c", 10, 2, false)
+    },
+    LoadTest {
+        highlight: true,
+        ..test("L25", "TypeScript, 10,000 lines", "10k.ts", 10, 2, false)
+    },
 ];
 
 /// An interaction test: one process loads the fixture, sends the untimed
@@ -192,7 +253,8 @@ const LOAD_TESTS: &[LoadTest] = &[
 /// extra repetition warms up unless `warmup` is off. Steps are keys
 /// (`Down*40` repeats) or quoted text (`'abc'`). `select` (`start..end`) is
 /// selected before the setup; `handled` times steps that draw nothing (copies)
-/// until handled; `paced` sends one step per display refresh.
+/// until handled; `paced` sends one step per display refresh; `full` starts
+/// once the whole file is highlighted.
 struct InputTest {
     id: &'static str,
     label: &'static str,
@@ -205,6 +267,7 @@ struct InputTest {
     select: &'static str,
     handled: bool,
     paced: bool,
+    full: bool,
     warmup: bool,
     cap: Duration,
 }
@@ -229,6 +292,7 @@ const fn input(
         select: "",
         handled: false,
         paced: false,
+        full: false,
         warmup: true,
         cap: Duration::from_secs(cap_secs),
     }
@@ -279,6 +343,28 @@ const fn scroll(id: &'static str, label: &'static str, fixture: &'static str) ->
         ..input(id, label, fixture, SCROLL_KEYS, 1, 3)
     }
 }
+
+/// Paced steps on a fully highlighted code file, from byte `at` (`n..n`).
+const fn code_paced(
+    id: &'static str,
+    label: &'static str,
+    fixture: &'static str,
+    at: &'static str,
+    keys: &'static str,
+    runs: usize,
+) -> InputTest {
+    InputTest {
+        select: at,
+        all_steps: true,
+        paced: true,
+        full: true,
+        warmup: false,
+        ..input(id, label, fixture, keys, runs, 8)
+    }
+}
+
+/// Middle of `code.py` and `code.c`.
+const MID_50K: &str = "1000000..1000000";
 
 /// Selects `sum_0(` to `sum_9999(` in `medium.c`: exactly 10,000 selections.
 macro_rules! select_10k {
@@ -434,12 +520,90 @@ const INPUT_TESTS: &[InputTest] = &[
     scroll("S01", "Scroll and jump, MD 64 KiB", "small.md"),
     scroll("S02", "Scroll and jump, MD 8 MiB", "medium.md"),
     scroll("S03", "Scroll and jump, MD 128 MiB", "large.md"),
+    code_paced(
+        "K01",
+        "Type, Python 50k lines",
+        "code.py",
+        MID_50K,
+        "'x'",
+        100,
+    ),
+    code_paced(
+        "K02",
+        "Enter, Backspace, Py 50k",
+        "code.py",
+        MID_50K,
+        "Enter,Backspace",
+        20,
+    ),
+    code_paced("K03", "Type, C 50k lines", "code.c", MID_50K, "'x'", 50),
+    code_paced(
+        "K04",
+        "Scroll and jump, Py 50k",
+        "code.py",
+        "",
+        SCROLL_KEYS,
+        1,
+    ),
+    InputTest {
+        full: true,
+        ..input(
+            "K05",
+            "Go to Symbol, Python 50k",
+            "code.py",
+            "Ctrl+Shift+O,Escape,'x'",
+            10,
+            5,
+        )
+    },
+    code_paced(
+        "K06",
+        "Type, Python 10k lines",
+        "10k.py",
+        MID_PY_10K,
+        "'x'",
+        100,
+    ),
+    code_paced("K07", "Type, C 10k lines", "10k.c", MID_C_10K, "'x'", 100),
+    code_paced(
+        "K08",
+        "Type, TypeScript 10k lines",
+        "10k.ts",
+        MID_TS_10K,
+        "'x'",
+        100,
+    ),
+    code_paced(
+        "K09",
+        "Enter, Backspace, TS 10k",
+        "10k.ts",
+        MID_TS_10K,
+        "Enter,Backspace",
+        50,
+    ),
+    InputTest {
+        full: true,
+        ..input(
+            "K10",
+            "Go to Symbol, Python 10k",
+            "10k.py",
+            "Ctrl+Shift+O,Escape,'x'",
+            10,
+            2,
+        )
+    },
 ];
+
+/// Middles of the 10,000-line fixtures.
+const MID_PY_10K: &str = "168000..168000";
+const MID_C_10K: &str = "232000..232000";
+const MID_TS_10K: &str = "142000..142000";
 
 /// What a short-benchmark row reports.
 enum Measure {
     FirstPaint,
     FileRead,
+    FullyHighlighted,
     Peak,
     KeyToFrame,
     MissedRefreshes,
@@ -485,6 +649,12 @@ const SHORT: &[ShortRow] = &[
         "Open an 8 MiB Python file",
         "L09",
         Measure::FirstPaint,
+    ),
+    row(
+        "How soon is all of it highlighted?",
+        "Open an 8 MiB Python file",
+        "L09",
+        Measure::FullyHighlighted,
     ),
     row(
         "Does a huge file still open instantly?",
@@ -604,6 +774,38 @@ static inline unsigned long sum_$N(const int *values, size_t count) {
 
 "#;
 
+const TS: &str = r#"import { readFile } from "node:fs/promises";
+
+/** Shape $N with a doc comment. */
+export interface Shape$N<T extends object = {}> {
+  readonly id: number;
+  name?: string;
+  meta: Record<string, T>;
+}
+
+export enum Color$N { Red = 1, Green = "green", Blue = 0x1f }
+
+export class Point$N implements Shape$N {
+  readonly id = $N;
+  meta: Record<string, object> = {};
+  constructor(private x: number, public y = 1.5e-3) {}
+
+  get norm(): number {
+    // line comment $N
+    return Math.sqrt(this.x ** 2 + this.y ** 2);
+  }
+}
+
+export async function load$N(path: string, ...rest: unknown[]): Promise<string | null> {
+  const text = await readFile(path, "utf8");
+  const re = /^\d+(?:\.\d*)?$/gm;
+  return re.test(text) ? `${text.slice(0, 3)} ${rest.length}` : null;
+}
+
+const pick$N = <K extends keyof Point$N>(p: Point$N, k: K): Point$N[K] => p[k];
+
+"#;
+
 const JSON_ITEM: &str = r#"{"id": $N, "name": "item \"$N\"\n", "price": 12.5e2, "tags": ["a", "b"], "active": true, "parent": null, "nested": {"depth": [1, 2, {"x": -0.5}]}}"#;
 
 const MD_FRONT: &str = "---\ntitle: Benchmark\ntags: [a, b]\n---\n\n";
@@ -666,6 +868,16 @@ fn repeat(prefix: &str, block: &str, size: usize) -> Vec<u8> {
 
 fn code(block: &str, size: usize) -> Vec<u8> {
     repeat("", block, size)
+}
+
+/// `block` repeated (`$N` = 0, 1, ...) while the text stays within `count` lines.
+fn lines(block: &str, count: usize) -> Vec<u8> {
+    let per_block = block.matches('\n').count();
+    let mut out = Vec::new();
+    for n in 0..count / per_block {
+        out.extend_from_slice(block.replace("$N", &n.to_string()).as_bytes());
+    }
+    out
 }
 
 fn markdown(size: usize) -> Vec<u8> {
@@ -969,6 +1181,10 @@ struct Samples {
     first_paint: Vec<f64>,
     first_frame: Vec<f64>,
     loaded: Vec<f64>,
+    /// First frame highlighted from current trees (the view).
+    first_highlighted: Vec<f64>,
+    /// First frame highlighted from a parse of the whole file.
+    highlighted: Vec<f64>,
     peak: Vec<f64>,
     /// Wall time of the whole test, warm-up included.
     elapsed: Duration,
@@ -980,6 +1196,8 @@ fn run_load(exe: &Path, t: &LoadTest) -> Result<Samples, String> {
         first_paint: Vec::new(),
         first_frame: Vec::new(),
         loaded: Vec::new(),
+        first_highlighted: Vec::new(),
+        highlighted: Vec::new(),
         peak: Vec::new(),
         elapsed: Duration::ZERO,
     };
@@ -987,7 +1205,12 @@ fn run_load(exe: &Path, t: &LoadTest) -> Result<Samples, String> {
     // One warm-up run (file cache, executable image), not counted.
     for run in 0..=t.runs {
         let mut command = Command::new(exe);
-        command.args(["--trace-startup", "--exit-after-load"]);
+        let exit = if t.highlight {
+            "--exit-after-highlight"
+        } else {
+            "--exit-after-load"
+        };
+        command.args(["--trace-startup", exit]);
         if t.read_only {
             command.arg("--read-only");
         }
@@ -1010,6 +1233,10 @@ fn run_load(exe: &Path, t: &LoadTest) -> Result<Samples, String> {
         samples.first_paint.push(value("first_paint")?);
         samples.first_frame.push(value("first_frame")?);
         samples.loaded.push(value("file_read")?);
+        if t.highlight {
+            samples.first_highlighted.push(value("highlighted")?);
+            samples.highlighted.push(value("fully_highlighted")?);
+        }
         samples.peak.push(value("peak_private_mib")?);
     }
     let elapsed = start.elapsed();
@@ -1028,6 +1255,8 @@ fn run_load(exe: &Path, t: &LoadTest) -> Result<Samples, String> {
 struct InputSamples {
     /// Milliseconds from handling the first key to its presented frame.
     key_to_frame: Vec<f64>,
+    /// Step index and milliseconds to its first highlighted frame.
+    highlighted: Vec<(usize, f64)>,
     peak: f64,
     /// Display refresh period of paced tests.
     refresh: Option<f64>,
@@ -1061,10 +1290,14 @@ fn run_input(exe: &Path, t: &InputTest) -> Result<InputSamples, String> {
     if t.paced {
         command.arg("--bench-paced");
     }
+    if t.full {
+        command.arg("--bench-full");
+    }
     command.arg(fixture_dir().join(t.fixture));
     let out =
         run_traced(&mut command, Duration::from_secs(10)).map_err(|e| format!("{}: {e}", t.id))?;
     let mut all = Vec::new();
+    let mut highlighted = Vec::new();
     let mut first = 0;
     let (mut peak, mut refresh) = (None, None);
     for line in out.lines().map(str::trim).filter(|l| !l.is_empty()) {
@@ -1080,6 +1313,13 @@ fn run_input(exe: &Path, t: &InputTest) -> Result<InputSamples, String> {
         match name {
             "peak_private_mib" => peak = Some(value),
             "refresh_ms" => refresh = Some(value),
+            _ if name.starts_with("hl") => {
+                let step = name[2..]
+                    .strip_suffix("_ms")
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .ok_or_else(|| format!("{}: unexpected output line {line:?}", t.id))?;
+                highlighted.push((step, value));
+            }
             _ => {
                 let step = name
                     .strip_suffix("_ms")
@@ -1114,6 +1354,7 @@ fn run_input(exe: &Path, t: &InputTest) -> Result<InputSamples, String> {
     }
     Ok(InputSamples {
         key_to_frame: all,
+        highlighted,
         peak: peak.unwrap_or(0.0),
         refresh,
         elapsed,
@@ -1211,10 +1452,10 @@ pub fn bench_perf(args: &[String]) -> ExitCode {
         return ExitCode::SUCCESS;
     }
     println!(
-        "| ID  | Test                     | First paint [ms] | First frame [ms] | File read [ms] | Peak private [MiB] | Time [s] |"
+        "| ID  | Test                     | First paint [ms] | First frame [ms] | File read [ms] | Highlighted [ms] | Fully highlighted [ms] | Peak private [MiB] | Time [s] |"
     );
     println!(
-        "| --- | ------------------------ | ---------------- | ---------------- | -------------- | ------------------ | -------- |"
+        "| --- | ------------------------ | ---------------- | ---------------- | -------------- | ---------------- | ---------------------- | ------------------ | -------- |"
     );
     for (t, samples) in &results {
         let loaded = if t.loaded {
@@ -1222,13 +1463,23 @@ pub fn bench_perf(args: &[String]) -> ExitCode {
         } else {
             "-".to_owned()
         };
+        let (first_highlighted, highlighted) = if t.highlight {
+            (
+                format!("{:.1}", median(&samples.first_highlighted)),
+                format!("{:.1}", median(&samples.highlighted)),
+            )
+        } else {
+            ("-".to_owned(), "-".to_owned())
+        };
         println!(
-            "| {:<3} | {:<24} | {:>16.1} | {:>16.1} | {:>14} | {:>18.1} | {:>8.2} |",
+            "| {:<3} | {:<24} | {:>16.1} | {:>16.1} | {:>14} | {:>16} | {:>22} | {:>18.1} | {:>8.2} |",
             t.id,
             t.label,
             median(&samples.first_paint),
             median(&samples.first_frame),
             loaded,
+            first_highlighted,
+            highlighted,
             median(&samples.peak),
             samples.elapsed.as_secs_f64()
         );
@@ -1256,21 +1507,37 @@ pub fn bench_perf(args: &[String]) -> ExitCode {
     if inputs.iter().any(|(t, _)| t.paced) {
         println!();
         println!(
-            "| ID  | Test                          | p95 [ms] | Max [ms] | Missed refreshes [%] | Refresh [ms] | Time [s] |"
+            "| ID  | Test                          | p95 [ms] | Max [ms] | Missed refreshes [%] | Highlighted p95 [ms] | Not highlighted | Jump to highlighted [ms] | Refresh [ms] | Time [s] |"
         );
         println!(
-            "| --- | ----------------------------- | -------- | -------- | -------------------- | ------------ | -------- |"
+            "| --- | ----------------------------- | -------- | -------- | -------------------- | -------------------- | --------------- | ------------------------ | ------------ | -------- |"
         );
         for (t, samples) in inputs.iter().filter(|(t, _)| t.paced) {
             let mut sorted = samples.key_to_frame.clone();
             sorted.sort_by(f64::total_cmp);
+            let jumps = jump_to_highlighted(t, samples)
+                .map_or_else(|| "-".to_owned(), |ms| format!("{ms:.2}"));
+            let mut highlighted: Vec<f64> = samples.highlighted.iter().map(|(_, ms)| *ms).collect();
+            highlighted.sort_by(f64::total_cmp);
+            let (hl_p95, missing) = if highlighted.is_empty() {
+                ("-".to_owned(), "-".to_owned())
+            } else {
+                let missing = samples.key_to_frame.len().saturating_sub(highlighted.len());
+                (
+                    format!("{:.2}", percentile(&highlighted, 0.95)),
+                    missing.to_string(),
+                )
+            };
             println!(
-                "| {:<3} | {:<29} | {:>8.2} | {:>8.2} | {:>20.1} | {:>12.2} | {:>8.2} |",
+                "| {:<3} | {:<29} | {:>8.2} | {:>8.2} | {:>20.1} | {:>20} | {:>15} | {:>24} | {:>12.2} | {:>8.2} |",
                 t.id,
                 t.label,
                 percentile(&sorted, 0.95),
                 sorted.last().copied().unwrap_or(0.0),
                 samples.missed(),
+                hl_p95,
+                missing,
+                jumps,
                 samples.refresh.unwrap_or(0.0),
                 samples.elapsed.as_secs_f64()
             );
@@ -1288,6 +1555,32 @@ pub fn bench_perf(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+/// Median time from a `Ctrl+End` or `Ctrl+Home` jump of a paced test to its
+/// first highlighted frame; `None` without highlighted jumps (plain text).
+fn jump_to_highlighted(t: &InputTest, samples: &InputSamples) -> Option<f64> {
+    let steps: Vec<&str> = t.keys.split(',').flat_map(expand_step).collect();
+    let jumps: Vec<f64> = samples
+        .highlighted
+        .iter()
+        .filter(|(step, _)| {
+            steps
+                .get(*step)
+                .is_some_and(|k| *k == "Ctrl+End" || *k == "Ctrl+Home")
+        })
+        .map(|(_, ms)| *ms)
+        .collect();
+    (!jumps.is_empty()).then(|| median(&jumps))
+}
+
+/// `Down*3` → three `Down` steps.
+fn expand_step(key: &str) -> Vec<&str> {
+    let key = key.trim();
+    match key.rsplit_once('*') {
+        Some((k, n)) => vec![k.trim(); n.trim().parse().unwrap_or(1)],
+        None => vec![key],
+    }
 }
 
 fn print_short(results: &[(&LoadTest, Samples)], inputs: &[(&InputTest, InputSamples)]) {
@@ -1314,6 +1607,10 @@ fn print_short(results: &[(&LoadTest, Samples)], inputs: &[(&InputTest, InputSam
                 (Measure::FileRead, Some(s)) => (
                     "Time to load fully".to_owned(),
                     format!("{:.1} ms", median(&s.loaded)),
+                ),
+                (Measure::FullyHighlighted, Some(s)) => (
+                    "Time to full highlight".to_owned(),
+                    format!("{:.1} ms", median(&s.highlighted)),
                 ),
                 (Measure::Peak, Some(s)) => (
                     "Peak memory".to_owned(),
@@ -1374,6 +1671,9 @@ mod tests {
             let input = INPUT_TESTS.iter().find(|t| t.id == row.id);
             match row.measure {
                 Measure::FileRead => assert!(test.is_some_and(|t| t.loaded), "{}", row.id),
+                Measure::FullyHighlighted => {
+                    assert!(test.is_some_and(|t| t.highlight), "{}", row.id)
+                }
                 Measure::KeyToFrame => assert!(input.is_some(), "{} is not an input test", row.id),
                 Measure::MissedRefreshes => {
                     assert!(input.is_some_and(|t| t.paced), "{} is not paced", row.id)

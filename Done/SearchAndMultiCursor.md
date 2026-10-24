@@ -4,7 +4,7 @@
 
 Find and replace inside the open file, with VS Code keys and behavior, and the
 VS Code multi-cursor and column-selection commands, as specified in the
-[Architecture](Architecture.md#search-rte_search). Search must stay responsive
+[Architecture](../Plan/Architecture.md#search-rte_search). Search must stay responsive
 on files of any size and must not slow down startup.
 
 Mockup: [SearchMockup.png](../Design/SearchMockup.png) (source
@@ -223,7 +223,7 @@ Mockup: [SearchMockup.png](../Design/SearchMockup.png) (source
 7. Mouse: `Alt+Click`, `Shift+Alt+Drag`, middle drag.
 8. `bench-perf`: M01-M08, F01-F03; L01 and exe size A/B.
 9. Docs: README, docs site shortcuts, CHANGELOG, Architecture coverage
-   (`Alt+G` added), `Perfromance.md` (F01-F03 specification and results).
+   (`Alt+G` added), `Performance.md` (F01-F03 specification and results).
 
 ## Acceptance Criteria
 
@@ -933,3 +933,12 @@ it is not an A/B. Commands: `cargo test -p rte_search` (31, 1 ignored),
 `-p rte_edit` (22), `-p rte_view` (27), `-p rte_render` (8), `-p rte_platform`
 (4, 1 ignored), `-p rte_app` (108, 1 ignored), `-p xtask` (8);
 `cargo clippy --workspace --all-targets -- -D warnings`; `cargo fmt --all`.
+
+## Completion
+
+Marked done by the user on 2026_10_24 (released in 0.3.0). Final checks on
+the current tree, run for the syntax performance task the same day:
+`cargo test --workspace --locked` passed (282, 3 ignored), and the full
+`cargo xtask bench-perf` passed all caps, including F01-F03, M01-M08 and
+S01-S03 ([Performance.md](../Performance.md)). No separate re-review of the
+Astra review response was run.

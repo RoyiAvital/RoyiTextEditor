@@ -588,3 +588,149 @@ proptest! {
         prop_assert_eq!(redone.to_vec(0..redone.len()), fin);
     }
 }
+
+/// Runs a code-aware edit and shows the text with the returned selections.
+fn coded(marked: &str, f: impl Fn(&Snapshot, &Selections) -> Option<Coded>) -> String {
+    let (s, sels) = parse(marked);
+    match f(&s, &sels) {
+        Some(c) => {
+            let (s, _, _) = apply(&s, &sels, &c.cmd).unwrap();
+            show(&s, &c.selections)
+        }
+        None => format!("none: {}", show(&s, &sels)),
+    }
+}
+
+const SLASH: CommentTokens<'static> = CommentTokens {
+    line: Some("//"),
+    block: Some(("/*", "*/")),
+};
+
+#[test]
+fn line_comments_toggle_on_touched_lines() {
+    let line = |m: &str| coded(m, |s, sels| toggle_line_comment(s, sels, &|_| SLASH));
+    assert_eq!(line("  a|\n    b\n"), "  // a|\n    b\n");
+    assert_eq!(line("  [a\n\n    b]\nc"), "  // [a\n\n  //   b]\nc");
+    assert_eq!(line("  // a|\n  //b\n"), "  a|\n  //b\n");
+    assert_eq!(line("  [// a\n  //b]\n"), "  [a\n  b]\n");
+    // Mixed lines are commented, not uncommented.
+    assert_eq!(line("[// a\nb]"), "// [// a\n// b]");
+    let css = CommentTokens {
+        line: None,
+        block: Some(("/*", "*/")),
+    };
+    let block = |m: &str| coded(m, |s, sels| toggle_line_comment(s, sels, &|_| css));
+    assert_eq!(block("a { }|  \n"), "/* a { } */|  \n");
+    assert_eq!(block("/* a { } */|\n"), "a { }|\n");
+    assert_eq!(line("   |\n"), "none:    |\n");
+}
+
+/// Block tokens close before trailing whitespace spanning many chunks.
+#[test]
+fn line_comments_close_before_long_trailing_whitespace() {
+    let css = CommentTokens {
+        line: None,
+        block: Some(("/*", "*/")),
+    };
+    let block = |m: &str| coded(m, |s, sels| toggle_line_comment(s, sels, &|_| css));
+    let tail = " \t".repeat(300_000);
+    let wrapped = block(&format!("a {{ }}|{tail}\n"));
+    assert!(wrapped == format!("/* a {{ }} */|{tail}\n"));
+    assert!(block(&wrapped) == format!("a {{ }}|{tail}\n"));
+}
+
+/// Each line uses the tokens of the language at its text (embedded code).
+#[test]
+fn comments_follow_the_language_at_each_line() {
+    let hash = CommentTokens {
+        line: Some("#"),
+        block: None,
+    };
+    // Bytes from 5 on (the second line) are "Python".
+    let tokens = move |pos: u64| if pos >= 5 { hash } else { SLASH };
+    let mixed = |m: &str| coded(m, |s, sels| toggle_line_comment(s, sels, &tokens));
+    assert_eq!(mixed("[a();\nb = 1]"), "// [a();\n# b = 1]");
+    let none = |_| CommentTokens::default();
+    let plain = coded("a|", |s, sels| toggle_line_comment(s, sels, &none));
+    assert_eq!(plain, "none: a|");
+}
+
+#[test]
+fn block_comments_wrap_and_unwrap() {
+    let block = |m: &str| {
+        coded(m, |s, sels| {
+            toggle_block_comment(s, sels, &|_| Some(("/*", "*/")))
+        })
+    };
+    assert_eq!(block("a [b] c"), "a /* [b] */ c");
+    assert_eq!(block("a [/* b */] c"), "a [b] c");
+    assert_eq!(block("a [  /* b */\n] c"), "a [  b\n] c");
+    assert_eq!(block("a | c"), "a /* | */ c");
+    // Only selections with block tokens change.
+    let some = |pos: u64| (pos < 3).then_some(("/*", "*/"));
+    let partial = coded("a| b| c", |s, sels| toggle_block_comment(s, sels, &some));
+    assert_eq!(partial, "a/* | */ b| c");
+}
+
+/// Whitespace edges are scanned in place, never copied.
+#[test]
+fn block_comment_edges_of_a_large_selection() {
+    let mut text = vec![b' '; 100_000];
+    text.extend_from_slice(b"/* x */");
+    text.extend(std::iter::repeat_n(b'\n', 10_000));
+    let s = Snapshot::from_bytes(&text);
+    let sels = Selections::single(Selection::new(0, s.len()));
+    let c = toggle_block_comment(&s, &sels, &|_| Some(("/*", "*/"))).unwrap();
+    // The leading run exceeds the scan limit: the selection is wrapped.
+    assert_eq!(c.cmd.tx.edits().len(), 2);
+    assert_eq!(&*c.cmd.tx.edits()[0].text, b"/* ");
+    let sels = Selections::single(Selection::new(99_000, s.len()));
+    let c = toggle_block_comment(&s, &sels, &|_| Some(("/*", "*/"))).unwrap();
+    assert!(
+        c.cmd.tx.edits().iter().all(|e| e.text.is_empty()),
+        "unwrapped"
+    );
+}
+
+#[test]
+fn auto_closing_pairs() {
+    let pairs: &[(char, char)] = &[('(', ')'), ('{', '}'), ('"', '"')];
+    let at = |_| pairs;
+    let typed = |m: &str, ch| coded(m, |s, sels| auto_close(s, sels, ch, &at));
+    assert_eq!(typed("f|", '('), "f(|)");
+    assert_eq!(typed("f| x", '('), "f(|) x");
+    assert_eq!(typed("f|x", '('), "none: f|x");
+    assert_eq!(typed("f(|)", ')'), "f()|");
+    assert_eq!(typed("a [b] c", '('), "a ([b]) c");
+    assert_eq!(typed("x = |;", '"'), "x = \"|\";");
+    assert_eq!(typed("don|", '"'), "none: don|");
+    assert_eq!(typed("\"|\"", '"'), "\"\"|");
+    assert_eq!(typed("|a\n|b", '{'), "none: |a\n|b");
+    assert_eq!(typed("a|\nb|", '{'), "a{|}\nb{|}");
+    let back = |m: &str| coded(m, |s, sels| delete_pair(s, sels, &at));
+    assert_eq!(back("f(|)"), "f|");
+    assert_eq!(back("f(|x)"), "none: f(|x)");
+    // A caret whose language closes nothing types plainly.
+    let quotes_only: &[(char, char)] = &[('"', '"')];
+    let mixed = move |pos: u64| if pos < 2 { pairs } else { quotes_only };
+    let typed = coded("a|\nb|", |s, sels| auto_close(s, sels, '(', &mixed));
+    assert_eq!(typed, "none: a|\nb|");
+}
+
+#[test]
+fn enter_indents_after_an_opening_bracket() {
+    let opts = lf();
+    let brackets: &[(char, char)] = &[('(', ')'), ('{', '}')];
+    let enter = |m: &str, colon| {
+        coded(m, |s, sels| {
+            newline_indent(s, sels, &opts, &|_| (brackets, colon))
+        })
+    };
+    assert_eq!(enter("  f {|}", false), "  f {\n      |\n  }");
+    assert_eq!(enter("  f(|", false), "  f(\n      |");
+    assert_eq!(enter("  x|", false), "none:   x|");
+    assert_eq!(enter("def f():|", true), "def f():\n    |");
+    assert_eq!(enter("x = {'a':| 1}", true), "none: x = {'a':| 1}");
+    // Replacing a multi-line body keeps the closing brace on its own line.
+    assert_eq!(enter("{[\n  foo\n]}", false), "{\n    |\n}");
+}

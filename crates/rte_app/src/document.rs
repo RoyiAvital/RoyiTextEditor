@@ -2,7 +2,11 @@
 //! edit-permission locks. [`Document::apply`] is the only mutation entry.
 
 use rte_edit::{Command, EditOptions, History, Selection, Selections, Step, apply};
-use rte_text::Snapshot;
+use rte_text::{ChangeSet, Snapshot};
+
+/// Changes kept for one observer between its reads; older ones are
+/// dropped (the observer then diffs snapshots).
+const JOURNAL_MAX: usize = 64;
 
 /// Independent locks; each has one owner (Architecture, App: Edit permission).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -45,6 +49,17 @@ pub struct Document {
     pub saved: Snapshot,
     pub locks: Locks,
     pub options: EditOptions,
+    /// Applied commands with their exact changes, recorded while `Some`
+    /// (syntax highlighting reads and clears it). Undo, redo and loads are
+    /// not recorded.
+    pub journal: Option<Vec<Journaled>>,
+}
+
+/// A command's change: the snapshots before and after it.
+pub struct Journaled {
+    pub before: Snapshot,
+    pub after: Snapshot,
+    pub changes: ChangeSet,
 }
 
 impl Document {
@@ -57,6 +72,7 @@ impl Document {
             history: History::default(),
             locks: Locks::default(),
             options,
+            journal: None,
         }
     }
 
@@ -77,11 +93,33 @@ impl Document {
     /// Applies an edit command and records it for undo. `typed` is the
     /// character of a single keystroke (for word-group coalescing).
     pub fn apply(&mut self, cmd: &Command, typed: Option<char>) -> Result<(), &'static str> {
+        self.apply_selecting(cmd, typed, None)
+    }
+
+    /// [`Document::apply`] leaving `selections` (computed by the command's
+    /// builder) instead of the mapped ones.
+    pub fn apply_selecting(
+        &mut self,
+        cmd: &Command,
+        typed: Option<char>,
+        selections: Option<Selections>,
+    ) -> Result<(), &'static str> {
         if let Some(reason) = self.locks.edit_refusal() {
             return Err(reason);
         }
-        let (next, sels, _) = apply(&self.snapshot, &self.selections, cmd)
+        let (next, sels, changes) = apply(&self.snapshot, &self.selections, cmd)
             .expect("commands build valid transactions");
+        let sels = selections.unwrap_or(sels);
+        if let Some(journal) = &mut self.journal {
+            if journal.len() >= JOURNAL_MAX {
+                journal.clear();
+            }
+            journal.push(Journaled {
+                before: self.snapshot.clone(),
+                after: next.clone(),
+                changes,
+            });
+        }
         let inserted = cmd.tx.edits().iter().map(|e| e.text.len() as u64).sum();
         self.history.record(
             Step {

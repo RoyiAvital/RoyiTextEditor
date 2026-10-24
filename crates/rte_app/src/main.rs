@@ -17,23 +17,32 @@ mod loader;
 mod palette;
 mod save;
 mod search;
+mod syntax;
 mod trace;
 
 use std::borrow::Cow;
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
 use rte_platform::{Waker, Window, WindowOptions};
 use rte_render::Renderer;
 
-use editor::{BASE_PX, Editor, Settings, window_title};
+use editor::{BASE_PX, Editor, Settings, Wake, window_title};
 use save::SystemFiles;
+use syntax::EarlySyntax;
 use trace::Trace;
 
 /// Initial client size at 96 DPI.
 const WINDOW_SIZE: (u32, u32) = (1100, 750);
+
+#[allow(unsafe_code)]
+fn install_allocator() {
+    // SAFETY: the first call of `main`, before any other thread or
+    // tree-sitter use.
+    unsafe { rte_syntax::install_allocator() }
+}
 
 struct Args {
     path: Option<PathBuf>,
@@ -44,15 +53,18 @@ struct Args {
     trace_startup: bool,
     exit_after_first_frame: bool,
     exit_after_load: bool,
+    /// `--exit-after-highlight`: also wait for the full highlight.
+    exit_after_highlight: bool,
     /// `--bench-keys <keys>`, `--bench-runs <n>`, `--bench-setup <keys>`,
-    /// `--bench-select <start>..<end>`, `--bench-handled` and `--bench-paced`:
-    /// scripted input benchmark.
+    /// `--bench-select <start>..<end>`, `--bench-handled`, `--bench-paced` and
+    /// `--bench-full`: scripted input benchmark.
     bench_keys: Option<String>,
     bench_runs: Option<String>,
     bench_setup: Option<String>,
     bench_select: Option<String>,
     bench_handled: bool,
     bench_paced: bool,
+    bench_full: bool,
 }
 
 fn parse_args(raw: impl IntoIterator<Item = OsString>) -> Args {
@@ -63,12 +75,14 @@ fn parse_args(raw: impl IntoIterator<Item = OsString>) -> Args {
         trace_startup: false,
         exit_after_first_frame: false,
         exit_after_load: false,
+        exit_after_highlight: false,
         bench_keys: None,
         bench_runs: None,
         bench_setup: None,
         bench_select: None,
         bench_handled: false,
         bench_paced: false,
+        bench_full: false,
     };
     let mut raw = raw.into_iter();
     while let Some(arg) = raw.next() {
@@ -78,6 +92,7 @@ fn parse_args(raw: impl IntoIterator<Item = OsString>) -> Args {
             Some("--trace-startup") => args.trace_startup = true,
             Some("--exit-after-first-frame") => args.exit_after_first_frame = true,
             Some("--exit-after-load") => args.exit_after_load = true,
+            Some("--exit-after-highlight") => args.exit_after_highlight = true,
             Some("--bench-keys") => args.bench_keys = raw.next().and_then(|k| k.into_string().ok()),
             Some("--bench-runs") => args.bench_runs = raw.next().and_then(|n| n.into_string().ok()),
             Some("--bench-setup") => {
@@ -88,6 +103,7 @@ fn parse_args(raw: impl IntoIterator<Item = OsString>) -> Args {
             }
             Some("--bench-handled") => args.bench_handled = true,
             Some("--bench-paced") => args.bench_paced = true,
+            Some("--bench-full") => args.bench_full = true,
             _ => args.path = Some(PathBuf::from(arg)),
         }
     }
@@ -104,6 +120,7 @@ impl Args {
 }
 
 fn main() {
+    install_allocator();
     let args = parse_args(std::env::args_os().skip(1));
     let bench = match &args.bench_keys {
         None => None,
@@ -120,6 +137,7 @@ fn main() {
                 .transpose()?;
             script.handled = args.bench_handled;
             script.paced = args.bench_paced;
+            script.full = args.bench_full;
             Ok(script)
         }) {
             Ok(script) => Some(script),
@@ -134,10 +152,35 @@ fn main() {
     let dpi = rte_platform::system_dpi();
 
     let waker: Arc<OnceLock<Waker>> = Arc::new(OnceLock::new());
+    // The configuration and user state live beside the executable (portable).
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(PathBuf::from));
+    let (config, config_problem) = exe_dir.as_ref().map_or_else(Default::default, |dir| {
+        config::load(&dir.join(config::FILE_NAME))
+    });
+    let early = args
+        .highlighting()
+        .then(|| EarlySyntax::new(Mutex::new(Default::default())));
+    let chosen = args.syntax.as_deref().and_then(rte_syntax::by_id);
+    // The highlight query compiles while the file is read.
+    if let Some(lang) = chosen.or_else(|| rte_syntax::detect(args.path.as_deref()?, b""))
+        && early.is_some()
+    {
+        rte_syntax::warm(lang.grammar);
+    }
     // Events sent before the window exists find no waker; `Editor::new` drains them.
-    let loads = args.path.clone().map(|path| {
+    let wake: Wake = {
         let waker = waker.clone();
-        loader::spawn(path, move || waker.get().map_or((), Waker::wake))
+        Arc::new(move || waker.get().map_or((), Waker::wake))
+    };
+    let loads = args.path.clone().map(|path| {
+        let on_done = early.clone().map(|slot| {
+            let (max, injections) = (config.syntax_max_mib, config.injections);
+            syntax::early_start(slot, path.clone(), chosen, max, injections, wake.clone())
+        });
+        let wake = wake.clone();
+        loader::spawn(path, move || wake(), on_done)
     });
     let px = (BASE_PX * dpi as f32 / 96.0).round();
     let glyphs = thread::spawn(move || {
@@ -148,13 +191,6 @@ fn main() {
     });
 
     let title = window_title(args.path.as_deref(), false);
-    // The configuration and user state live beside the executable (portable).
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(PathBuf::from));
-    let (config, config_problem) = exe_dir.as_ref().map_or_else(Default::default, |dir| {
-        config::load(&dir.join(config::FILE_NAME))
-    });
     let window = match Window::create(&WindowOptions {
         title: &title,
         width: WINDOW_SIZE.0 * dpi / 96,
@@ -181,17 +217,22 @@ fn main() {
             read_only: args.read_only,
             exit_after_first_frame: args.exit_after_first_frame,
             exit_after_load: args.exit_after_load,
+            exit_after_highlight: args.exit_after_highlight,
             recent_count: config.recent_count,
             multi_cursor_limit: config.multi_cursor_limit,
             replace_all_max_mib: config.replace_all_max_mib,
             user_dir: exe_dir.map(|dir| dir.join("UserSettings")),
             notice: config_problem,
             highlighting: args.highlighting(),
+            syntax: args.syntax.clone(),
+            syntax_max_mib: config.syntax_max_mib,
+            injections: config.injections,
+            early_syntax: early,
             bench,
         },
         trace,
         Arc::new(SystemFiles),
-        Arc::new(move || waker.get().map_or((), Waker::wake)),
+        wake,
     );
     std::process::exit(window.run(Box::new(editor)));
 }

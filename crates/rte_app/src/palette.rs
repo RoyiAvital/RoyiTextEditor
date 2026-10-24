@@ -1,6 +1,7 @@
 //! Command palette state: query, filtered rows, selection and scrolling.
 //! `Ctrl+Shift+P` lists every command; `Ctrl+P` lists recent commands and
-//! favorites.
+//! favorites. The same list also picks one of a set of choices (languages,
+//! symbols).
 
 use std::cmp::Reverse;
 use std::ops::Range;
@@ -12,10 +13,23 @@ use crate::fuzzy::Matcher;
 /// Most characters in a query.
 pub const QUERY_MAX: usize = 256;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Mode {
     All,
     Favorites,
+    /// Change Language Mode.
+    Language,
+    /// Go to Symbol in Editor.
+    Symbol,
+}
+
+/// Rows of a choice mode: label and right-aligned hint.
+#[derive(Clone, Debug, Default)]
+pub struct Choices {
+    pub labels: Vec<String>,
+    pub hints: Vec<String>,
+    /// Choices kept in list order (symbols), not sorted by score.
+    pub keep_order: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -25,6 +39,11 @@ pub enum Item {
         /// Index into [`COMMANDS`].
         index: usize,
         /// Range of [`Palette::matched`]: label characters matching the query.
+        matched: Range<usize>,
+    },
+    Choice {
+        /// Index into [`Palette::choices`].
+        index: usize,
         matched: Range<usize>,
     },
 }
@@ -208,6 +227,8 @@ pub struct Palette {
     pub mode: Mode,
     pub query: Query,
     pub items: Vec<Item>,
+    /// Rows of the choice modes.
+    pub choices: Choices,
     /// Matched character indices of every command item.
     matched: Vec<u32>,
     /// Index into `items` of the selected command.
@@ -225,6 +246,7 @@ impl Palette {
             mode,
             query: Query::default(),
             items: Vec::new(),
+            choices: Choices::default(),
             matched: Vec::new(),
             selected: None,
             first: 0,
@@ -253,10 +275,56 @@ impl Palette {
                     (0..COMMANDS.len()).filter(|i| store.is_favorite(*i) && !recent.contains(i));
                 self.push_matches(Some("favorites"), favorites);
             }
+            Mode::Language | Mode::Symbol => self.push_choices(),
         }
         self.first = 0;
         let first = self.commands().next();
         self.selected = first;
+    }
+
+    /// Opens a choice mode on `choices`.
+    pub fn set_choices(&mut self, mode: Mode, choices: Choices) {
+        self.mode = mode;
+        self.choices = choices;
+        self.query = Query::default();
+    }
+
+    fn push_choices(&mut self) {
+        self.scored.clear();
+        for (index, label) in self.choices.labels.iter().enumerate() {
+            let start = self.matched.len();
+            if let Some(score) = self.matcher.score(label, &mut self.matched) {
+                self.scored.push((score, index, start..self.matched.len()));
+            }
+        }
+        if !self.choices.keep_order {
+            self.scored.sort_by_key(|(score, ..)| Reverse(*score));
+        }
+        self.items.extend(
+            self.scored
+                .drain(..)
+                .map(|(_, index, matched)| Item::Choice { index, matched }),
+        );
+    }
+
+    /// Index into [`Palette::choices`] of the choice at `item`.
+    pub fn choice_at(&self, item: usize) -> Option<usize> {
+        match self.items.get(item) {
+            Some(Item::Choice { index, .. }) => Some(*index),
+            _ => None,
+        }
+    }
+
+    /// Selects the row of choice `index` when listed.
+    pub fn select_choice(&mut self, index: usize, rows: usize) {
+        if let Some(item) = self
+            .items
+            .iter()
+            .position(|i| matches!(i, Item::Choice { index: c, .. } if *c == index))
+        {
+            self.selected = Some(item);
+            self.reveal(rows);
+        }
     }
 
     /// Rebuilds after a list change, keeping the selection near its row.
@@ -295,12 +363,12 @@ impl Palette {
         );
     }
 
-    /// Item indices of commands.
+    /// Item indices of selectable rows (commands and choices).
     fn commands(&self) -> impl Iterator<Item = usize> + '_ {
         self.items
             .iter()
             .enumerate()
-            .filter(|(_, item)| matches!(item, Item::Command { .. }))
+            .filter(|(_, item)| !matches!(item, Item::Header(_)))
             .map(|(i, _)| i)
     }
 
@@ -378,12 +446,13 @@ mod tests {
     const UNDO: &str = "undo";
     const ABOUT: &str = "workbench.action.showAboutDialog";
 
-    fn labels(p: &Palette) -> Vec<&'static str> {
+    fn labels(p: &Palette) -> Vec<&str> {
         p.items
             .iter()
             .map(|item| match item {
                 Item::Header(h) => h,
                 Item::Command { index, .. } => COMMANDS[*index].label,
+                Item::Choice { index, .. } => p.choices.labels[*index].as_str(),
             })
             .collect()
     }
@@ -404,6 +473,32 @@ mod tests {
         p.query.select_all();
         p.query.insert(text);
         p.refresh(store, 3);
+    }
+
+    #[test]
+    fn choices_filter_and_select() {
+        let store = Store::memory();
+        let mut p = Palette::new(Mode::All, &store, 3);
+        let names = ["Plain Text", "Python", "Rust", "TypeScript"];
+        p.set_choices(
+            Mode::Language,
+            Choices {
+                labels: names.iter().map(|s| s.to_string()).collect(),
+                hints: vec![String::new(); 4],
+                keep_order: false,
+            },
+        );
+        p.refresh(&store, 3);
+        assert_eq!(labels(&p), names);
+        p.select_choice(2, 10);
+        assert_eq!(p.selected.and_then(|i| p.choice_at(i)), Some(2));
+        assert_eq!(p.command_at(p.selected.unwrap()).map(|c| c.id), None);
+        set_query(&mut p, "ty", &store);
+        assert_eq!(labels(&p), ["TypeScript"]);
+        assert_eq!(p.selected.and_then(|i| p.choice_at(i)), Some(3));
+        set_query(&mut p, "t", &store);
+        p.move_selection(1, 10);
+        assert!(p.selected.and_then(|i| p.choice_at(i)).is_some());
     }
 
     #[test]

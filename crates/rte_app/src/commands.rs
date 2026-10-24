@@ -33,6 +33,7 @@ pub mod vk {
     pub const VK_I: u16 = 0x49;
     pub const VK_K: u16 = 0x4B;
     pub const VK_L: u16 = 0x4C;
+    pub const VK_M: u16 = 0x4D;
     pub const VK_N: u16 = 0x4E;
     pub const VK_O: u16 = 0x4F;
     pub const VK_P: u16 = 0x50;
@@ -52,6 +53,10 @@ pub mod vk {
     pub const VK_F4: u16 = 0x73;
     pub const VK_OEM_PLUS: u16 = 0xBB;
     pub const VK_OEM_MINUS: u16 = 0xBD;
+    /// `/` and `?` on US keyboards.
+    pub const VK_OEM_2: u16 = 0xBF;
+    /// `\` and `|` on US keyboards.
+    pub const VK_OEM_5: u16 = 0xDC;
 }
 
 use vk::*;
@@ -115,6 +120,13 @@ pub enum Action {
     ColumnSelectRight,
     ColumnSelectPageUp,
     ColumnSelectPageDown,
+    ChangeLanguage,
+    ToggleLineComment,
+    ToggleBlockComment,
+    GoToBracket,
+    ExpandSelection,
+    ShrinkSelection,
+    GoToSymbol,
 }
 
 /// A key with exactly these modifiers.
@@ -315,6 +327,20 @@ pub static COMMANDS: &[CommandDef] = &[
         Action::Redo,
     ),
     command(
+        "editor.action.blockComment",
+        "Edit: Toggle Block Comment",
+        &[shift_alt(VK_A)],
+        true,
+        Action::ToggleBlockComment,
+    ),
+    command(
+        "editor.action.commentLine",
+        "Edit: Toggle Line Comment",
+        &[ctrl(VK_OEM_2)],
+        true,
+        Action::ToggleLineComment,
+    ),
+    command(
         "editor.action.toggleOvertypeInsertMode",
         "Edit: Toggle Overtype Mode",
         &[plain(VK_INSERT)],
@@ -356,6 +382,20 @@ pub static COMMANDS: &[CommandDef] = &[
         &[ctrl(VK_END)],
         false,
         Action::GoToBottom,
+    ),
+    command(
+        "editor.action.jumpToBracket",
+        "Go: Go to Bracket",
+        &[ctrl_shift(VK_OEM_5)],
+        false,
+        Action::GoToBracket,
+    ),
+    command(
+        "workbench.action.gotoSymbol",
+        "Go: Go to Symbol in Editor",
+        &[ctrl_shift(VK_O)],
+        false,
+        Action::GoToSymbol,
     ),
     command(
         "actions.find",
@@ -539,6 +579,13 @@ pub static COMMANDS: &[CommandDef] = &[
         false,
         Action::ExpandLineSelection,
     ),
+    command(
+        "editor.action.smartSelect.expand",
+        "Selection: Expand Selection",
+        &[shift_alt(VK_RIGHT)],
+        false,
+        Action::ExpandSelection,
+    ),
     chord(
         "editor.action.moveSelectionToNextFindMatch",
         "Selection: Move Last Selection to Next Occurrence",
@@ -572,6 +619,19 @@ pub static COMMANDS: &[CommandDef] = &[
         &[ctrl_shift(VK_END)],
         false,
         Action::SelectToBottom,
+    ),
+    command(
+        "editor.action.smartSelect.shrink",
+        "Selection: Shrink Selection",
+        &[shift_alt(VK_LEFT)],
+        false,
+        Action::ShrinkSelection,
+    ),
+    chord(
+        "workbench.action.editor.changeLanguageMode",
+        "View: Change Language Mode",
+        &[(ctrl(VK_K), plain(VK_M))],
+        Action::ChangeLanguage,
     ),
     command(
         "editor.action.fontZoomReset",
@@ -742,6 +802,8 @@ pub fn key_text(b: Binding) -> String {
         VK_SUBTRACT => "Numpad-",
         VK_OEM_PLUS => "=",
         VK_OEM_MINUS => "-",
+        VK_OEM_2 => "/",
+        VK_OEM_5 => "\\",
         0x30..=0x39 | 0x41..=0x5A => {
             text.push(char::from(b.vk as u8));
             return text;

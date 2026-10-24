@@ -5,6 +5,7 @@
 //! between `\r` and `\n` of a CRLF, or before a zero-width mark (marks belong
 //! to the previous character, as the view draws them).
 
+mod code;
 mod columns;
 mod commands;
 mod cursor;
@@ -13,6 +14,10 @@ mod motion;
 mod multi;
 mod selection;
 
+pub use code::{
+    Coded, CommentTokens, auto_close, delete_pair, newline_indent, toggle_block_comment,
+    toggle_line_comment,
+};
 pub use columns::{COLUMN_SCAN_LIMIT, cell_width, column_after, column_of, offset_at_column};
 pub use commands::{
     Clip, Command, EditKind, EditOptions, apply, backspace, copy, cut, delete_forward,

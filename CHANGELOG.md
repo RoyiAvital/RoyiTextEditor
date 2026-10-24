@@ -7,6 +7,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-24
+
+This release focuses on adding _Syntax Highlighting_.  
+We have optimized the code path to be parallel with optimized memory allocator.
+The rendering performance are instantaneous for files with up to 50,000 _lines of code_.
+The design choice was to prefer speed and responsiveness even with larger memory 
+footprint.
+
+### Added
+
+- Syntax highlighting with built-in tree-sitter grammars for Bash, C, C#,
+  C++, CSS, Go, HTML, Java, JavaScript, JSON, Julia, Lua, Markdown, MATLAB,
+  Octave, PowerShell, Python, Rust, SQL, TOML, TypeScript (and TSX), XML and
+  YAML, in a dark theme. The language follows the file name or a `#!` line
+  (`.m`: MATLAB, or Octave by its content; `.ipynb` stays plain text) and is
+  shown on the status line.
+- Highlighting never delays the first frame: a code file opens as plain text
+  and is highlighted within milliseconds. Parsing runs on a syntax thread,
+  incrementally after each edit; the drawn part of the visible rows is
+  highlighted on the UI thread within 1 ms per frame, the rest by the syntax
+  thread. Files above 128 KiB are highlighted around the view first (within
+  about a frame), then completely in the background. `syntax.maxFileMiB`
+  also applies after edits: growing past it turns highlighting off,
+  shrinking below turns it back on.
+- Embedded languages: Markdown inline elements, fenced code blocks by their
+  info string, YAML and TOML front matter and HTML blocks; HTML `<script>`
+  (JavaScript, JSON, TypeScript) and `<style>` (CSS).
+- Change Language Mode (`Ctrl+K M`, including Plain Text); `--syntax <id>`
+  accepts the language ids and aliases (an unknown id shows a notice).
+- Code-aware editing: Toggle Line Comment (`Ctrl+/`) and Toggle Block Comment
+  (`Shift+Alt+A`); auto-closing brackets and quotes that wrap a selection,
+  are stepped over and are deleted in pairs; `Enter` after an opening bracket
+  (or a Python and YAML `:`) indents; the bracket pair at the caret is marked
+  and Go to Bracket (`Ctrl+Shift+\`) jumps between them; Expand and Shrink
+  Selection (`Shift+Alt+Right` / `Left`) by syntax nodes; Go to Symbol in
+  Editor (`Ctrl+Shift+O`, collected on the syntax thread). Comments, pairs,
+  indentation and brackets follow the embedded language at each selection
+  (for example JavaScript inside `<script>`).
+- Configuration keys `syntax.maxFileMiB` (default 32) and `syntax.injections`
+  (default true).
+- Benchmark options `--exit-after-highlight` and `--bench-full` (start a
+  script once the whole file is highlighted), trace stages `highlighted` and
+  `fully_highlighted`; interaction benchmarks report the time from each step
+  to its first highlighted frame (`bench.hl<step>_ms`).
+
+### Changed
+
+- `View: Toggle Syntax Highlighting` and `--syntax none` now switch real
+  highlighting; plain text and files without a language run no syntax work.
+- The executable grows from about 4 MiB to 31 MiB (grammar tables, linked
+  statically and paged in only when used).
+- Tree-sitter parses with the mimalloc allocator (MIT); the rest of the
+  application keeps the system heap.
+
+### Performance
+
+| Question                                  | Scenario                                  | Measure             | Result    |
+| ----------------------------------------- | ----------------------------------------- | ------------------- | --------- |
+| How fast does it start?                   | Open an empty file                        | Time to first frame | 22.1 ms   |
+| How light is it?                          | Open an empty file                        | Peak memory         | 5.1 MiB   |
+| How fast does a normal code file open?    | Open an 8 MiB Python file                 | Time to first frame | 22.7 ms   |
+| Does a huge file still open instantly?    | Open a 256 MiB log file                   | Time to first frame | 23.6 ms   |
+| How long until all of it is loaded?       | Open a 256 MiB log file                   | Time to load fully  | 76.9 ms   |
+| What memory does a huge file cost?        | Open a 256 MiB log file                   | Peak memory         | 267.6 MiB |
+| Does a pathological file break it?        | Open a 64 MiB file with one line          | Time to first frame | 23.4 ms   |
+| Are commands instant?                     | Show the Command Palette                  | Key to frame        | 0.42 ms   |
+| Is typing instant in a big file?          | Type in an 8 MiB Python file              | Key to frame        | 0.47 ms   |
+| Is pasting a lot of text fast?            | Paste 1 MiB into an 8 MiB Python file     | Key to frame        | 2.88 ms   |
+| Is scrolling smooth?                      | Scroll and jump in an 8 MiB Markdown file | Missed refreshes    | 0.0 %     |
+| Is multi-cursor editing instant at scale? | Type at 10,000 carets                     | Key to frame        | 4.28 ms   |
+
+Medians of the Performance Benchmark v1 on an AMD Ryzen 9 9950X (Windows 11);
+full results in `Performance.md`.
+
+- Files of 10,000 lines of TypeScript, Python and C are fully highlighted
+  35.8, 40.7 and 68.5 ms after process start; 50,000 lines of Python and C
+  in 171 and 312 ms. An 8 MiB Python file shows its first highlighted frame
+  at 30.8 ms and is fully highlighted at 798 ms.
+- Typing in a 10,000-line file is highlighted within 5.0-8.2 ms (p95); Go
+  to Symbol opens in 14 ms at 10,000 lines and 65 ms at 50,000.
+- Code files hold their syntax trees: a 64 KiB Python file peaks at
+  11.6 MiB (5.2 MiB in 0.3.0), a 10,000-line Python file at 26.7 MiB.
+  Edits in highlighted files take 0.1-0.9 ms longer than in 0.3.0. First
+  paint stays at 21.4-24.4 ms.
+
+### Documentation
+
+- The Developer Guide shows the parallel syntax threads in a diagram and
+  explains the memory allocation, including the choice of a larger memory
+  footprint for faster highlighting.
+
 ## [0.3.0] - 2026-10-24
 
 This release focuses on _Selections_ and _Search and Replace_.  
@@ -65,7 +156,7 @@ Next milestone is adding _Syntax Highlighting_.
 | Is multi-cursor editing instant at scale? | Type at 10,000 carets                     | Key to frame        | 3.64 ms                     |
 
 Medians of the Performance Benchmark v1 on an AMD Ryzen 9 9950X (Windows 11);
-full results in `Perfromance.md`.
+full results in `Performance.md`.
 
 - The search box and the search thread are created on first use; nothing of
   search or multi-cursor runs at startup. Startup is unchanged against 0.2.0 (empty
@@ -131,7 +222,7 @@ It misses the Search (M5) and Syntax Highlighting (M6) features.
 | Is multi-cursor editing instant at scale? | Type at 10,000 carets                     | Key to frame        | Feature not implemented yet |
 
 Medians of the Performance Benchmark v1 on an AMD Ryzen 9 9950X (Windows 11);
-full results in `Perfromance.md`. The machine ran at a slower level in this
+full results in `Performance.md`. The machine ran at a slower level in this
 session: 0.1.0, re-measured alongside, gave the same results (21.2 ms, 5.0 MiB
 for an empty file), so the Command Palette added no startup cost. Showing the
 Command Palette is timed from the key to the presented frame.
@@ -215,7 +306,7 @@ It misses the _Command Center_ (M4), Search (M5) and Syntax Highlighting (M6).
 | Is multi-cursor editing instant at scale? | Type at 10,000 carets                     | Key to frame        | Feature not implemented yet |
 
 Medians of the Performance Benchmark v1 on an AMD Ryzen 9 9950X (Windows 11);
-full results in `Perfromance.md`.
+full results in `Performance.md`.
 
 ### Documentation
 

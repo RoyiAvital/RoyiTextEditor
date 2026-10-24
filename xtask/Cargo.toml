@@ -6,6 +6,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+rte_syntax = { path = "../crates/rte_syntax", features = ["generate"] }
 serde_json.workspace = true
 xxhash-rust.workspace = true
 

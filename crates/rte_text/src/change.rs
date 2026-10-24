@@ -111,14 +111,19 @@ pub struct ChangeSet {
 
 impl ChangeSet {
     pub(crate) fn from_transaction(tx: &Transaction) -> ChangeSet {
-        let changes: Vec<Change> = tx
-            .edits
-            .iter()
-            .map(|e| Change {
-                old: e.range.clone(),
-                new_len: e.text.len() as u64,
-            })
-            .collect();
+        ChangeSet::from_changes(
+            tx.edits
+                .iter()
+                .map(|e| Change {
+                    old: e.range.clone(),
+                    new_len: e.text.len() as u64,
+                })
+                .collect(),
+        )
+    }
+
+    /// Changes must be sorted and non-overlapping (as in a [`Transaction`]).
+    pub fn from_changes(changes: Vec<Change>) -> ChangeSet {
         let mut deltas = Vec::with_capacity(changes.len() + 1);
         let mut delta = 0i64;
         deltas.push(0);

@@ -68,6 +68,12 @@ pub struct Theme {
     pub error_text: Color,
     pub error_background: Color,
     pub error_border: Color,
+    /// Text colors of the syntax styles, indexed by [`SyntaxSpan::style`]:
+    /// keyword, string, comment, number, type, function, constant, operator,
+    /// punctuation, property, tag, attribute.
+    pub syntax: [Color; 12],
+    /// Background of a matching bracket pair.
+    pub bracket_match: Color,
 }
 
 impl Theme {
@@ -101,6 +107,21 @@ impl Theme {
         error_text: 0xF48771,
         error_background: 0x5A1D1D,
         error_border: 0xE05252,
+        syntax: [
+            0x569CD6, // keyword
+            0xCE9178, // string
+            0x6A9955, // comment
+            0xB5CEA8, // number
+            0x4EC9B0, // type
+            0xDCDCAA, // function
+            0x4FC1FF, // constant
+            0xD4D4D4, // operator
+            0xA9AEB6, // punctuation
+            0x9CDCFE, // property
+            0x569CD6, // tag
+            0x9CDCFE, // attribute
+        ],
+        bracket_match: 0x3E4A45,
     };
 }
 
@@ -306,13 +327,26 @@ pub struct Frame<'a> {
     pub highlights: Highlights<'a>,
 }
 
-/// Search decorations of a frame.
+/// Search decorations and syntax colors of a frame.
 #[derive(Clone, Debug, Default)]
 pub struct Highlights<'a> {
     /// Sorted, non-overlapping matches (at least the visible ones).
     pub matches: &'a [std::ops::Range<u64>],
     /// Find-in-selection range.
     pub scope: Option<std::ops::Range<u64>>,
+    /// Sorted, non-overlapping syntax styles; other text has the text color.
+    pub syntax: &'a [SyntaxSpan],
+    /// Offsets of matching brackets (the pair at the caret).
+    pub brackets: &'a [u64],
+}
+
+/// Bytes drawn in a syntax color.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SyntaxSpan {
+    pub start: u64,
+    pub end: u64,
+    /// Index into [`Theme::syntax`].
+    pub style: u8,
 }
 
 impl ViewBuilder {
@@ -391,7 +425,7 @@ impl ViewBuilder {
                 name_x as i32,
                 title_y,
                 cell,
-                theme.title_text,
+                theme.unsaved,
                 layout.title,
             );
         }
@@ -481,16 +515,35 @@ impl ViewBuilder {
             }
             selection_row(out, frame, row_rect, bytes, content.clone(), crlf);
             row_ranges.matches(out, frame);
+            for &at in frame.highlights.brackets {
+                if (content.start..content.end).contains(&at)
+                    && let Some(rect) = row_ranges.rect(frame, &(at..at + 1))
+                {
+                    fill(out, rect, theme.bracket_match);
+                }
+            }
             let text_x = layout.text.x;
             let clip = layout.text;
+            let syntax = frame.highlights.syntax;
+            // Spans ending inside or after the row, advanced as offsets grow.
+            let mut span = syntax.partition_point(|s| s.end <= range.start);
             layout_line(
                 bytes,
                 scroll.first_col,
                 layout.cols + 1,
                 options.tab_width,
-                |col, ch, kind| {
+                |col, ch, kind, offset| {
                     let color = match kind {
-                        Kind::Text => theme.text,
+                        Kind::Text => {
+                            let at = range.start + offset as u64;
+                            while span < syntax.len() && syntax[span].end <= at {
+                                span += 1;
+                            }
+                            match syntax.get(span) {
+                                Some(s) if s.start <= at => theme.syntax[s.style as usize],
+                                _ => theme.text,
+                            }
+                        }
                         Kind::Control => theme.control,
                     };
                     out.glyphs.push(Glyph {
@@ -812,44 +865,52 @@ pub enum Kind {
     Control,
 }
 
-/// Lays out one line, calling `emit(visible_col, char, kind)` for every
-/// character visible in `[first_col, first_col + cols)`.
+/// Lays out one line, calling `emit(visible_col, char, kind, offset)` for
+/// every character visible in `[first_col, first_col + cols)`; `offset` is
+/// the character's byte offset in `bytes`.
 pub fn layout_line(
     bytes: &[u8],
     first_col: u64,
     cols: u32,
     tab_width: u32,
-    mut emit: impl FnMut(u32, char, Kind),
+    mut emit: impl FnMut(u32, char, Kind, usize),
 ) {
     let end_col = first_col + u64::from(cols);
     let tab = u64::from(tab_width.max(1));
     let mut col = 0u64;
     // Visible column of the previous character and the marks drawn on it.
     let mut last_visible: Option<(u32, u32)> = None;
-    let mut place =
-        |col: &mut u64, last: &mut Option<(u32, u32)>, ch: char, width: u64, kind: Kind| {
-            if width == 0 {
-                if let Some((v, marks)) = last
-                    && *marks < MAX_MARKS_PER_CELL
-                {
-                    *marks += 1;
-                    emit(*v, ch, kind);
-                }
-                return;
+    let mut place = |col: &mut u64,
+                     last: &mut Option<(u32, u32)>,
+                     ch: char,
+                     width: u64,
+                     kind: Kind,
+                     offset: usize| {
+        if width == 0 {
+            if let Some((v, marks)) = last
+                && *marks < MAX_MARKS_PER_CELL
+            {
+                *marks += 1;
+                emit(*v, ch, kind, offset);
             }
-            *last = None;
-            if *col >= first_col && *col + width <= end_col {
-                let v = (*col - first_col) as u32;
-                emit(v, ch, kind);
-                *last = Some((v, 0));
-            }
-            *col += width;
-        };
+            return;
+        }
+        *last = None;
+        if *col >= first_col && *col + width <= end_col {
+            let v = (*col - first_col) as u32;
+            emit(v, ch, kind, offset);
+            *last = Some((v, 0));
+        }
+        *col += width;
+    };
+    let mut offset = 0;
     for chunk in bytes.utf8_chunks() {
         for ch in chunk.valid().chars() {
             if col >= end_col {
                 return;
             }
+            let at = offset;
+            offset += ch.len_utf8();
             let last = &mut last_visible;
             match ch {
                 '\t' => {
@@ -858,15 +919,16 @@ pub fn layout_line(
                 }
                 '\0'..='\u{1F}' => {
                     let symbol = char::from_u32(0x2400 + ch as u32).unwrap();
-                    place(&mut col, last, symbol, 1, Kind::Control);
+                    place(&mut col, last, symbol, 1, Kind::Control, at);
                 }
-                '\u{7F}' => place(&mut col, last, '\u{2421}', 1, Kind::Control),
+                '\u{7F}' => place(&mut col, last, '\u{2421}', 1, Kind::Control, at),
                 _ => place(
                     &mut col,
                     last,
                     ch,
                     ch.width().unwrap_or(1) as u64,
                     Kind::Text,
+                    at,
                 ),
             }
         }
@@ -874,7 +936,16 @@ pub fn layout_line(
             if col >= end_col {
                 return;
             }
-            place(&mut col, &mut last_visible, '\u{FFFD}', 1, Kind::Control);
+            let at = offset;
+            offset += 1;
+            place(
+                &mut col,
+                &mut last_visible,
+                '\u{FFFD}',
+                1,
+                Kind::Control,
+                at,
+            );
         }
     }
 }
@@ -885,7 +956,9 @@ mod tests {
 
     fn cells(bytes: &[u8], first_col: u64, cols: u32) -> Vec<(u32, char, Kind)> {
         let mut out = Vec::new();
-        layout_line(bytes, first_col, cols, 4, |c, ch, k| out.push((c, ch, k)));
+        layout_line(bytes, first_col, cols, 4, |c, ch, k, _| {
+            out.push((c, ch, k))
+        });
         out
     }
 
@@ -1034,6 +1107,55 @@ mod tests {
     }
 
     #[test]
+    fn syntax_spans_color_their_characters() {
+        let spans = [
+            SyntaxSpan {
+                start: 0,
+                end: 2,
+                style: 0,
+            },
+            SyntaxSpan {
+                start: 7,
+                end: 10,
+                style: 1,
+            },
+        ];
+        let highlights = Highlights {
+            syntax: &spans,
+            ..Highlights::default()
+        };
+        let (layout, list) = build_full(
+            "fn é\n\t\"x\" y".as_bytes(),
+            400,
+            200,
+            &[],
+            CaretStyle::Hidden,
+            highlights,
+        );
+        let theme = Theme::DARK;
+        let colors: Vec<(char, Color)> = list
+            .glyphs
+            .iter()
+            .filter(|g| g.clip == layout.text)
+            .map(|g| (g.ch, g.color))
+            .collect();
+        assert_eq!(
+            colors,
+            [
+                ('f', theme.syntax[0]),
+                ('n', theme.syntax[0]),
+                (' ', theme.text),
+                ('é', theme.text),
+                ('"', theme.syntax[1]),
+                ('x', theme.syntax[1]),
+                ('"', theme.syntax[1]),
+                (' ', theme.text),
+                ('y', theme.text),
+            ]
+        );
+    }
+
+    #[test]
     fn builds_rows_with_line_numbers_and_crlf() {
         let (layout, list) = build(b"ab\r\ncd\n", 400, 200);
         let numbers: String = list
@@ -1120,6 +1242,7 @@ mod tests {
         let highlights = Highlights {
             matches: &matches,
             scope: Some(0..7),
+            ..Highlights::default()
         };
         let sels = [Selection::new(3, 5)];
         let (layout, list) = build_full(
@@ -1164,6 +1287,7 @@ mod tests {
         let highlights = Highlights {
             matches: &matches,
             scope: None,
+            ..Highlights::default()
         };
         let started = std::time::Instant::now();
         let (layout, list) = build_full(
@@ -1251,13 +1375,24 @@ mod tests {
             (
                 glyphs.iter().map(|g| g.ch).collect::<String>(),
                 glyphs.first().map(|g| g.x),
+                glyphs.iter().find(|g| g.ch == 'A').map(|g| g.color),
             )
         };
         // 400 px: "│ App" ends one cell before the right edge.
-        assert_eq!(name(400), ("\u{2502}App".to_owned(), Some(400 - 60)));
+        assert_eq!(
+            name(400),
+            (
+                "\u{2502}App".to_owned(),
+                Some(400 - 60),
+                Some(Theme::DARK.unsaved)
+            )
+        );
         // "title" and its marker end at 80 px; the divider needs a 1-cell gap.
-        assert_eq!(name(150), ("\u{2502}App".to_owned(), Some(90)));
-        assert_eq!(name(149), (String::new(), None));
+        assert_eq!(
+            name(150),
+            ("\u{2502}App".to_owned(), Some(90), Some(Theme::DARK.unsaved))
+        );
+        assert_eq!(name(149), (String::new(), None, None));
     }
 
     #[test]
@@ -1284,7 +1419,7 @@ mod tests {
         // Each drawn base glyph starts at the offset hit at its column.
         let line = &text.as_bytes()[2..12];
         let mut drawn = Vec::new();
-        layout_line(line, 0, 40, 4, |c, ch, _| drawn.push((c, ch)));
+        layout_line(line, 0, 40, 4, |c, ch, _, _| drawn.push((c, ch)));
         let starts = [0u64, 2, 5, 8, 9];
         let bases: Vec<u32> = drawn
             .iter()

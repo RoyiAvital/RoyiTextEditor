@@ -1,5 +1,198 @@
 # Performance
 
+## 0.4.0
+
+### Main Performance Oriented Changes
+
+- Syntax highlighting never delays the first frame: a code file opens as
+  plain text and its first highlighted frame follows within about one
+  refresh (L23: first paint 22.4 ms, highlighted 36.1 ms).
+- Highlighting starts while the window is created: the loader thread starts
+  the syntax thread once the text is read, and the highlight query compiles
+  on its own thread meanwhile. Files of 10,000 lines of TypeScript, Python
+  and C are fully highlighted 35.8, 40.7 and 68.5 ms after process start.
+- Above 128 KiB a 32 KiB window around the view is parsed first; the whole
+  file parses at the same time on its own thread and is adopted as soon as
+  it is ready.
+- The UI thread highlights the visible rows within 1 ms per frame; the
+  syntax thread highlights the rest, collects Go to Symbol and frees
+  replaced trees. Typing in a 10,000-line file is highlighted within
+  5.0-8.2 ms (p95).
+- Tree-sitter allocates through mimalloc (6-16% faster parses, Go to Symbol
+  about 25% faster); the rest of the application keeps the Windows heap.
+- Plain text, disabled highlighting and files above `syntax.maxFileMiB`
+  run no syntax work.
+
+### Performance Results
+
+Using the Performance Benchmark v`1` (`cargo xtask bench-perf`).
+
+Reference machine: AMD Ryzen 9 9950X, 94 GiB RAM, Windows 11 Pro for
+Workstations, 2560 × 1600 at 59 Hz, release build, warm file cache.
+
+| ID  | Test                                          | Metric                       | 0.4.0  | 0.3.0  | 0.2.0  | 0.1.0  |
+| --- | --------------------------------------------- | ---------------------------- | -------| ------ | ------ | ------ |
+| L01 | Empty file                                    | First paint [ms]             | 22.1   | 21.3   | 20.2   | 13.2   |
+| L01 | Empty file                                    | Peak private [MiB]           | 5.1    | 5.0    | 5.0    | 4.6    |
+| L02 | Text, 64 KiB                                  | First paint [ms]             | 21.6   | 21.4   | 20.6   | 13.6   |
+| L02 | Text, 64 KiB                                  | Peak private [MiB]           | 5.5    | 5.3    | 5.3    | 4.9    |
+| L03 | Text, 256 MiB                                 | First paint [ms]             | 23.6   | 23.3   | 21.5   | 13.6   |
+| L03 | Text, 256 MiB                                 | File read [ms]               | 76.9   | 77.7   | 71.9   | 70.1   |
+| L03 | Text, 256 MiB                                 | Peak private [MiB]           | 267.6  | 267.4  | 267.3  | 267.0  |
+| L04 | Python, 64 KiB                                | First paint [ms]             | 21.5   | 21.2 ¹ | 20.2 ¹ | 13.5 ¹ |
+| L04 | Python, 64 KiB                                | Peak private [MiB]           | 11.6   | 5.2    | 5.2    | 4.8    |
+| L05 | C, 64 KiB                                     | First paint [ms]             | 22.7   | 21.1 ¹ | 20.3 ¹ | 13.6 ¹ |
+| L05 | C, 64 KiB                                     | Peak private [MiB]           | 10.1   | 5.2    | 5.2    | 4.8    |
+| L06 | JSON, 64 KiB                                  | First paint [ms]             | 22.1   | 21.8 ¹ | 20.4 ¹ | 13.7 ¹ |
+| L06 | JSON, 64 KiB                                  | Peak private [MiB]           | 10.7   | 5.6    | 5.5    | 5.2    |
+| L07 | Markdown, 64 KiB                              | First paint [ms]             | 21.9   | 21.1 ¹ | 20.0 ¹ | 13.5 ¹ |
+| L07 | Markdown, 64 KiB                              | Peak private [MiB]           | 19.2   | 5.1    | 5.1    | 4.8    |
+| L08 | CSV, 64 KiB                                   | First paint [ms]             | 21.5   | 20.9 ¹ | 19.9 ¹ | 13.8 ¹ |
+| L08 | CSV, 64 KiB                                   | Peak private [MiB]           | 5.3    | 5.2    | 5.2    | 4.8    |
+| L09 | Python, 8 MiB                                 | First paint [ms]             | 22.7   | 21.4 ¹ | 20.4 ¹ | 14.2 ¹ |
+| L09 | Python, 8 MiB                                 | File read [ms]               | 9.2    | 8.9    | 8.5    | 7.9    |
+| L09 | Python, 8 MiB                                 | Highlighted [ms]             | 30.8   | n/i    | n/i    | n/i    |
+| L09 | Python, 8 MiB                                 | Fully highlighted [ms]       | 797.8  | n/i    | n/i    | n/i    |
+| L09 | Python, 8 MiB                                 | Peak private [MiB]           | 393.1  | 13.5   | 13.5   | 13.1   |
+| L10 | C, 8 MiB                                      | First paint [ms]             | 23.4   | 22.0 ¹ | 20.0 ¹ | 14.2 ¹ |
+| L10 | C, 8 MiB                                      | File read [ms]               | 8.9    | 8.6    | 8.4    | 7.9    |
+| L10 | C, 8 MiB                                      | Peak private [MiB]           | 23.5   | 13.4   | 13.4   | 13.2   |
+| L11 | JSON, 8 MiB                                   | First paint [ms]             | 23.5   | 22.8 ¹ | 20.8 ¹ | 14.9 ¹ |
+| L11 | JSON, 8 MiB                                   | File read [ms]               | 9.0    | 8.8    | 8.0    | 7.8    |
+| L11 | JSON, 8 MiB                                   | Peak private [MiB]           | 33.1   | 13.4   | 13.5   | 13.2   |
+| L12 | Markdown, 8 MiB                               | First paint [ms]             | 23.6   | 23.1 ¹ | 20.1 ¹ | 14.2 ¹ |
+| L12 | Markdown, 8 MiB                               | File read [ms]               | 9.0    | 9.2    | 8.3    | 8.0    |
+| L12 | Markdown, 8 MiB                               | Peak private [MiB]           | 37.7   | 13.5   | 13.4   | 13.2   |
+| L13 | CSV, 8 MiB                                    | First paint [ms]             | 21.4   | 22.8 ¹ | 20.0 ¹ | 14.1 ¹ |
+| L13 | CSV, 8 MiB                                    | File read [ms]               | 9.0    | 9.2    | 8.2    | 7.9    |
+| L13 | CSV, 8 MiB                                    | Peak private [MiB]           | 13.6   | 13.5   | 13.5   | 13.2   |
+| L14 | Read-only text, 256 MiB                       | First paint [ms]             | 22.7   | 24.8   | 20.8   | 13.4   |
+| L14 | Read-only text, 256 MiB                       | File read [ms]               | 77.9   | 85.2   | 72.7   | 71.5   |
+| L14 | Read-only text, 256 MiB                       | Peak private [MiB]           | 267.5  | 267.3  | 267.4  | 267.0  |
+| L15 | Read-only Python, 64 KiB                      | First paint [ms]             | 22.1   | 23.0 ¹ | 19.7 ¹ | 13.4 ¹ |
+| L15 | Read-only Python, 64 KiB                      | Peak private [MiB]           | 11.6   | 5.2    | 5.2    | 4.8    |
+| L16 | Single line text, 64 MiB                      | First paint [ms]             | 23.4   | 23.0   | 21.9   | 13.9   |
+| L16 | Single line text, 64 MiB                      | File read [ms]               | 26.5   | 25.2   | 24.3   | 23.8   |
+| L16 | Single line text, 64 MiB                      | Peak private [MiB]           | 72.2   | 72.0   | 72.1   | 71.7   |
+| L17 | Single line JSON, 8 MiB                       | First paint [ms]             | 23.1   | 21.2 ¹ | 19.9 ¹ | 14.8 ¹ |
+| L17 | Single line JSON, 8 MiB                       | File read [ms]               | 8.8    | 8.1    | 8.0    | 8.5    |
+| L17 | Single line JSON, 8 MiB                       | Peak private [MiB]           | 38.1   | 13.4   | 13.5   | 13.2   |
+| L18 | Notebook as JSON, 8 MiB                       | First paint [ms]             | 22.9   | 21.4 ¹ | 20.4 ¹ | 14.3 ¹ |
+| L18 | Notebook as JSON, 8 MiB                       | File read [ms]               | 8.6    | 8.4    | 8.1    | 8.2    |
+| L18 | Notebook as JSON, 8 MiB                       | Peak private [MiB]           | 22.4   | 13.4   | 13.4   | 13.1   |
+| L19 | Markdown, 128 MiB                             | First paint [ms]             | 24.4   | 23.4   | 21.4   | 13.7   |
+| L19 | Markdown, 128 MiB                             | File read [ms]               | 47.0   | 43.1   | 39.8   | 39.6   |
+| L19 | Markdown, 128 MiB                             | Peak private [MiB]           | 142.9  | 136.8  | 136.8  | 136.5  |
+| L20 | Python, 50,000 lines                          | First paint [ms]             | 23.7   | n/i    | n/i    | n/i    |
+| L20 | Python, 50,000 lines                          | Highlighted [ms]             | 34.6   | n/i    | n/i    | n/i    |
+| L20 | Python, 50,000 lines                          | Fully highlighted [ms]       | 171.4  | n/i    | n/i    | n/i    |
+| L20 | Python, 50,000 lines                          | Peak private [MiB]           | 88.6   | n/i    | n/i    | n/i    |
+| L21 | C, 50,000 lines                               | First paint [ms]             | 22.3   | n/i    | n/i    | n/i    |
+| L21 | C, 50,000 lines                               | Highlighted [ms]             | 39.8   | n/i    | n/i    | n/i    |
+| L21 | C, 50,000 lines                               | Fully highlighted [ms]       | 312.3  | n/i    | n/i    | n/i    |
+| L21 | C, 50,000 lines                               | Peak private [MiB]           | 84.4   | n/i    | n/i    | n/i    |
+| L22 | Single line JSON, 8 MiB, highlighted          | First paint [ms]             | 23.1   | n/i    | n/i    | n/i    |
+| L22 | Single line JSON, 8 MiB, highlighted          | Highlighted [ms]             | 39.8   | n/i    | n/i    | n/i    |
+| L22 | Single line JSON, 8 MiB, highlighted          | Fully highlighted [ms]       | 686.6  | n/i    | n/i    | n/i    |
+| L22 | Single line JSON, 8 MiB, highlighted          | Peak private [MiB]           | 415.3  | n/i    | n/i    | n/i    |
+| L23 | Python, 10,000 lines                          | First paint [ms]             | 22.4   | n/i    | n/i    | n/i    |
+| L23 | Python, 10,000 lines                          | Highlighted [ms]             | 36.1   | n/i    | n/i    | n/i    |
+| L23 | Python, 10,000 lines                          | Fully highlighted [ms]       | 40.7   | n/i    | n/i    | n/i    |
+| L23 | Python, 10,000 lines                          | Peak private [MiB]           | 26.7   | n/i    | n/i    | n/i    |
+| L24 | C, 10,000 lines                               | First paint [ms]             | 22.5   | n/i    | n/i    | n/i    |
+| L24 | C, 10,000 lines                               | Highlighted [ms]             | 41.4   | n/i    | n/i    | n/i    |
+| L24 | C, 10,000 lines                               | Fully highlighted [ms]       | 68.5   | n/i    | n/i    | n/i    |
+| L24 | C, 10,000 lines                               | Peak private [MiB]           | 25.1   | n/i    | n/i    | n/i    |
+| L25 | TypeScript, 10,000 lines                      | First paint [ms]             | 23.0   | n/i    | n/i    | n/i    |
+| L25 | TypeScript, 10,000 lines                      | Highlighted [ms]             | 35.8   | n/i    | n/i    | n/i    |
+| L25 | TypeScript, 10,000 lines                      | Fully highlighted [ms]       | 35.8   | n/i    | n/i    | n/i    |
+| L25 | TypeScript, 10,000 lines                      | Peak private [MiB]           | 22.0   | n/i    | n/i    | n/i    |
+| U01 | Show the Command Palette                      | Key to frame [ms]            | 0.42   | 0.38   | 0.38   | n/i    |
+| U01 | Show the Command Palette                      | Key to frame, p95 [ms]       | 0.66   | 4.97   | 0.61   | n/i    |
+| U02 | Show favorites                                | Key to frame [ms]            | 0.41   | 0.41   | 0.33   | n/i    |
+| U02 | Show favorites                                | Key to frame, p95 [ms]       | 9.16   | 4.96   | 0.58   | n/i    |
+| C01 | Copy 1 KiB                                    | Key to clipboard [ms]        | 0.52   | 0.53   | n/m    | n/m    |
+| C02 | Copy 1 MiB                                    | Key to clipboard [ms]        | 1.63   | 1.61   | n/m    | n/m    |
+| C03 | Copy 64 MiB                                   | Key to clipboard [ms]        | 111.39 | 113.88 | n/m    | n/m    |
+| C04 | Paste 1 KiB into Python, 8 MiB                | Key to frame [ms]            | 0.62   | 0.60   | n/m    | n/m    |
+| C05 | Paste 1 MiB into Python, 8 MiB                | Key to frame [ms]            | 2.88   | 2.02   | n/m    | n/m    |
+| C06 | Paste 64 MiB into text                        | Key to frame [ms]            | 106.59 | 104.72 | n/m    | n/m    |
+| C06 | Paste 64 MiB into text                        | Peak private [MiB]           | 781.9  | 781.4  | n/m    | n/m    |
+| E01 | Typing in Python, 8 MiB                       | Key to frame [ms]            | 0.47   | 0.35   | n/m    | n/m    |
+| E02 | Typing at the start of a 64 MiB line          | Key to frame [ms]            | 0.30   | 0.30   | n/m    | n/m    |
+| E03 | End and Home on a 64 MiB line                 | Key to frame [ms]            | 0.40   | 0.42   | n/m    | n/m    |
+| M01 | Add next occurrence                           | Key to frame [ms]            | 0.57   | 0.42   | n/i    | n/i    |
+| M02 | Select all occurrences                        | Key to frame [ms]            | 0.93   | 0.80   | n/i    | n/i    |
+| M03 | Column selection, 1,000 lines                 | Key to frame [ms]            | 1.23   | 1.21   | n/i    | n/i    |
+| M04 | Insert cursor below                           | Key to frame [ms]            | 0.55   | 0.44   | n/i    | n/i    |
+| M05 | Type at 10,000 carets                         | Key to frame [ms]            | 4.28   | 3.64   | n/i    | n/i    |
+| M05 | Type at 10,000 carets                         | Peak private [MiB]           | 134.1  | 33.8   | n/i    | n/i    |
+| M06 | Backspace at 10,000 carets                    | Key to frame [ms]            | 4.11   | 4.25   | n/i    | n/i    |
+| M07 | Paste 10,000 pieces                           | Key to frame [ms]            | 4.98   | 5.22   | n/i    | n/i    |
+| M08 | Undo and redo, 10,000 carets                  | Key to frame [ms]            | 0.74   | 0.49   | n/i    | n/i    |
+| S01 | Scroll and jump, Markdown, 64 KiB             | Key to frame, p95 [ms]       | 1.19   | 2.13   | n/m    | n/m    |
+| S01 | Scroll and jump, Markdown, 64 KiB             | Key to frame, max [ms]       | 3.90   | 2.52   | n/m    | n/m    |
+| S01 | Scroll and jump, Markdown, 64 KiB             | Missed refreshes [%]         | 0.0    | 0.0    | n/m    | n/m    |
+| S02 | Scroll and jump, Markdown, 8 MiB              | Key to frame, p95 [ms]       | 1.23   | 2.49   | n/m    | n/m    |
+| S02 | Scroll and jump, Markdown, 8 MiB              | Key to frame, max [ms]       | 3.92   | 3.88   | n/m    | n/m    |
+| S02 | Scroll and jump, Markdown, 8 MiB              | Missed refreshes [%]         | 0.0    | 0.0    | n/m    | n/m    |
+| S02 | Scroll and jump, Markdown, 8 MiB              | Jump to highlighted [ms]     | 4.08   | n/i    | n/i    | n/i    |
+| S03 | Scroll and jump, Markdown, 128 MiB            | Key to frame, p95 [ms]       | 1.17   | 2.62   | n/m    | n/m    |
+| S03 | Scroll and jump, Markdown, 128 MiB            | Key to frame, max [ms]       | 1.33   | 2.87   | n/m    | n/m    |
+| S03 | Scroll and jump, Markdown, 128 MiB            | Missed refreshes [%]         | 0.0    | 0.0    | n/m    | n/m    |
+| F01 | Find next, text, 256 MiB                      | Key to frame [ms]            | 0.55   | 0.53   | n/i    | n/i    |
+| F02 | Count matches, text, 256 MiB                  | Key to final count [ms]      | 225.73 | 218.81 | n/i    | n/i    |
+| F03 | Toggle RegEx, Python, 8 MiB                   | Key to final count [ms]      | 3.15   | 3.08   | n/i    | n/i    |
+| K01 | Typing in Python, 50,000 lines                | Key to frame, p95 [ms]       | 3.74   | n/i    | n/i    | n/i    |
+| K01 | Typing in Python, 50,000 lines                | Key to highlighted, p95 [ms] | 4.83   | n/i    | n/i    | n/i    |
+| K02 | Enter and Backspace, Python, 50,000 lines     | Key to frame, p95 [ms]       | 1.30   | n/i    | n/i    | n/i    |
+| K02 | Enter and Backspace, Python, 50,000 lines     | Key to highlighted, p95 [ms] | 70.30  | n/i    | n/i    | n/i    |
+| K03 | Typing in C, 50,000 lines                     | Key to frame, p95 [ms]       | 1.33   | n/i    | n/i    | n/i    |
+| K03 | Typing in C, 50,000 lines                     | Key to highlighted, p95 [ms] | 39.66  | n/i    | n/i    | n/i    |
+| K04 | Scroll and jump, Python, 50,000 lines         | Key to frame, p95 [ms]       | 1.20   | n/i    | n/i    | n/i    |
+| K04 | Scroll and jump, Python, 50,000 lines         | Missed refreshes [%]         | 0.0    | n/i    | n/i    | n/i    |
+| K04 | Scroll and jump, Python, 50,000 lines         | Jump to highlighted [ms]     | 0.81   | n/i    | n/i    | n/i    |
+| K05 | Go to Symbol, Python, 50,000 lines            | Key to frame [ms]            | 65.00  | n/i    | n/i    | n/i    |
+| K06 | Typing in Python, 10,000 lines                | Key to frame, p95 [ms]       | 4.20   | n/i    | n/i    | n/i    |
+| K06 | Typing in Python, 10,000 lines                | Key to highlighted, p95 [ms] | 5.16   | n/i    | n/i    | n/i    |
+| K07 | Typing in C, 10,000 lines                     | Key to frame, p95 [ms]       | 3.91   | n/i    | n/i    | n/i    |
+| K07 | Typing in C, 10,000 lines                     | Key to highlighted, p95 [ms] | 8.17   | n/i    | n/i    | n/i    |
+| K08 | Typing in TypeScript, 10,000 lines            | Key to frame, p95 [ms]       | 4.35   | n/i    | n/i    | n/i    |
+| K08 | Typing in TypeScript, 10,000 lines            | Key to highlighted, p95 [ms] | 5.25   | n/i    | n/i    | n/i    |
+| K09 | Enter and Backspace, TypeScript, 10,000 lines | Key to frame, p95 [ms]       | 3.86   | n/i    | n/i    | n/i    |
+| K09 | Enter and Backspace, TypeScript, 10,000 lines | Key to highlighted, p95 [ms] | 5.00   | n/i    | n/i    | n/i    |
+| K10 | Go to Symbol, Python, 10,000 lines            | Key to frame [ms]            | 14.40  | n/i    | n/i    | n/i    |
+| —   | Whole suite (implemented tests)               | Run time [s]                 | 54.9   | 21.8   | 9.6    | 6.7    |
+
+Values are medians of one full run. n/i: feature not implemented in that
+version; n/m: not measured. ¹ Plain text: syntax highlighting was not
+implemented before this version.
+
+- **Memory:** code files now hold their syntax trees. 64 KiB files peak
+  5-14 MiB higher (Markdown has the most layers). The 8 MiB load tests
+  exit after load while the view is highlighted and the whole file still
+  parses (22-38 MiB); L09 and L22 wait for the whole tree (393 and 415 MiB,
+  about 50 bytes per text byte). M05 (134.1 MiB) includes the trees of its
+  8 MiB C file. CSV and plain text are unchanged. `--syntax none`
+  (highlighting off) restores the memory footprint of 0.3.0: L06 peaks at
+  5.7 MiB instead of 10.7 MiB (0.3.0: 5.6 MiB; medians of 8 launches).
+- **Highlighted files:** E01, C05, M01, M02, M04, M05 and M08 are 0.1-0.9 ms
+  slower than in 0.3.0: each frame also queries the visible rows (at most
+  1 ms) and edits update the trees.
+- **K02** (Enter and Backspace at 50,000 Python lines, 70.3 ms to the
+  highlighted frame) is bound by tree-sitter's incremental reparse of
+  tree-reshaping edits; frames stay at 1.3 ms. K03 (C) reparses about 1 µs
+  per top-level item on every edit.
+- **U02 p95** (9.16 ms) is the second slowest of 30 repetitions and varies
+  between runs, as in 0.3.0.
+- **First paint** is 21.4-24.4 ms, as in 0.3.0 (20.9-24.8 ms); it was not
+  A/B compared with 0.3.0 in this session. The executable grows from 4.0 MiB
+  to 31 MiB (grammar tables).
+- The whole suite takes longer because it runs 16 more tests (L20-L25,
+  K01-K10), which wait for their files to be fully highlighted.
+- Design, alternatives and the measurements behind these choices are in
+  [Done/SyntaxPerformance.md](Done/SyntaxPerformance.md).
+
 ## 0.3.0
 
 ### Main Performance Oriented Changes
@@ -390,12 +583,13 @@ run directly from the VS Code terminal.
 ### v1
 
 Status: all tests are implemented in `cargo xtask bench-perf`
-([xtask/src/perf.rs](xtask/src/perf.rs)); the suite runs in about 22 s.
+([xtask/src/perf.rs](xtask/src/perf.rs)); the suite runs in about 22 s,
+plus about 35 s for the code-file tests (L20-L25, K01-K10).
 Interaction tests use the editor's scripted input mode
 (`--bench-setup <steps> --bench-keys <steps> --bench-runs <n>`, where a
 step is a key, a repeated key such as `Down*40`, or quoted text such as
 `'abc'`, typed one character per step; `--bench-select <start>..<end>`,
-`--bench-handled` and `--bench-paced`, see below).
+`--bench-handled`, `--bench-paced` and `--bench-full`, see below).
 `--only L01,F01` runs a subset (its total is not checked). The whole
 suite should not exceed 60 seconds on the reference machine, including
 fixture generation on a first run; faster is better.
@@ -414,8 +608,14 @@ fixture generation on a first run; faster is better.
   - **File read:** the loader thread has read the whole file (large files only;
     small files are read before the first paint).
   - **Peak private:** `PeakPagefileUsage` reported by the editor at exit.
+  - **Highlighted** and **Fully highlighted** (L09, L20-L25;
+    `--exit-after-highlight` instead of `--exit-after-load`): the first frame
+    highlighted from current trees (trace stage `highlighted`; the view of a
+    large file comes first), and the first one from a parse of the whole file
+    (`fully_highlighted`).
 - **Interaction tests** run one process per scenario with a scripted input
-  sequence, started after the file is fully loaded. An initial selection
+  sequence, started after the file is fully loaded and, when highlighted,
+  its visible rows are highlighted. An initial selection
   (`--bench-select`) and untimed setup keys come first. Each repetition
   measures from the input message to the frame drawn (after `BitBlt`,
   without the composition wait); copies draw nothing and are measured until
@@ -432,8 +632,18 @@ fixture generation on a first run; faster is better.
   refresh period (from DWM, 16.7 ms at 60 Hz). Smooth means no missed
   refresh. S02 also reports the time from a `Ctrl+End` or `Ctrl+Home` jump to
   the first highlighted frame (viewport-first highlighting, see
-  [Plan/Architecture.md](Plan/Architecture.md)). S03 is above
+  [Plan/Architecture.md](Plan/Architecture.md)); with highlighting, each key
+  waits for its highlighted frame (at most 1 s) before the next refresh
+  starts the next key. S03 is above
   `syntax.maxFileMiB` and scrolls plain text.
+- **Code files** (K01-K10) open a 50,000-line (K01-K05) or 10,000-line
+  (K06-K10) file and start once it is fully highlighted (`--bench-full`),
+  with the caret in its middle (K04 at the top). The paced ones (K01-K04,
+  K06-K09) also report the
+  p95 time from a key to its first highlighted frame (current trees) and the
+  number of keys not highlighted within 1 s (a paced run ends after the last
+  key's highlighted frame). K05 and K10 are timed until the symbol
+  list is shown; typing `x` after each run makes every run collect anew.
 - Statistics: median of all repetitions; p95 for tests with ≥ 20 repetitions;
   one warm-up per test, not counted (none for the scroll tests).
 - Each test has a time cap; a test over its cap fails the run, so the suite
@@ -491,6 +701,11 @@ must not depend on the line length.
 | `medium.csv`   | 8,388,604   | `0x8641de1a0b731974` | Header, CSV row, repeated                         |
 | `line.txt`     | 67,108,864  | `0x178f1d1aaeb2328c` | Words without any line break                      |
 | `line.json`    | 8,388,551   | `0xcda2d7050b0bfede` | Minified JSON array on one line                   |
+| `code.py`      | 1,693,627   | `0x5ebabdd1ff1a5b60` | Python block, repeated to 50,000 lines            |
+| `code.c`       | 2,353,242   | `0xc89d830565836307` | C block, repeated to 50,000 lines                 |
+| `10k.py`       | 337,182     | `0x8e415b15e8bd4e98` | Python block, repeated to 10,000 lines            |
+| `10k.c`        | 464,767     | `0x057e008afce340c3` | C block, repeated to 10,000 lines                 |
+| `10k.ts`       | 283,728     | `0xa69187b2ee0c321f` | TypeScript block, repeated to 10,000 lines        |
 
 Each code fixture repeats a block containing every highlighted element:
 
@@ -500,6 +715,10 @@ Each code fixture repeats a block containing every highlighted element:
 - **C:** `#include` and `#define`, structs, typedefs, functions, `switch`,
   line and block comments, string and character literals with escapes,
   numeric suffixes.
+- **TypeScript:** imports, interfaces with generics and optional members,
+  enums, classes with parameter properties and getters, doc and line
+  comments, `async` functions, rest parameters, regular expressions,
+  template literals, arrow functions with type parameters.
 - **JSON:** one array of nested objects and arrays; strings with escapes,
   numbers with exponents, `true`, `false`, `null`.
 - **Jupyter Notebook:** nbformat 4 with alternating Markdown and Python code
@@ -529,6 +748,9 @@ Each code fixture repeats a block containing every highlighted element:
 | L17     | Load single-line JSON                       | `line.json`                     | 5 processes       | 1       |
 | L18     | Load a notebook as JSON                     | `medium.ipynb`, `--syntax json` | 5 processes       | 1       |
 | L19     | Load large Markdown                         | `large.md`                      | 5 processes       | 1       |
+| L20-L21 | Load and highlight 50,000 lines (Python, C) | `code.py`, `code.c`             | 5 processes each  | 5 each  |
+| L22     | Load and highlight single-line JSON         | `line.json`                     | 5 processes       | 10      |
+| L23-L25 | Load and highlight 10,000 lines (Py, C, TS) | `10k.py`, `10k.c`, `10k.ts`     | 10 processes each | 2 each  |
 | U01     | Show and close the Command Palette          | `small.py`                      | 30                | 1       |
 | U02     | Show and close favorites (`Ctrl+P`)         | `small.py`                      | 30                | 1       |
 | C01-C03 | Copy 1 KiB, 1 MiB, 64 MiB                   | `large.log`                     | 20, 5, 3          | 2       |
@@ -551,12 +773,21 @@ Each code fixture repeats a block containing every highlighted element:
 | S01     | Scroll and jump, small file                 | `small.md`                      | 140 keys          | 3       |
 | S02     | Scroll and jump, medium file                | `medium.md`                     | 140 keys          | 3       |
 | S03     | Scroll and jump, large file                 | `large.md`                      | 140 keys          | 3       |
+| K01     | Type, 50,000 lines of Python                | `code.py`                       | 100               | 8       |
+| K02     | `Enter`, `Backspace`, 50,000 lines          | `code.py`                       | 20                | 8       |
+| K03     | Type, 50,000 lines of C                     | `code.c`                        | 50                | 8       |
+| K04     | Scroll and jump, 50,000 lines               | `code.py`                       | 140 keys          | 8       |
+| K05     | Go to Symbol, 50,000 lines                  | `code.py`                       | 10                | 5       |
+| K06-K08 | Type, 10,000 lines (Python, C, TypeScript)  | `10k.py`, `10k.c`, `10k.ts`     | 100 each          | 8 each  |
+| K09     | `Enter`, `Backspace`, 10,000 lines          | `10k.ts`                        | 50                | 8       |
+| K10     | Go to Symbol, 10,000 lines                  | `10k.py`                        | 10                | 2       |
 
-Load caps add up to 21 s, interaction caps to 33 s and fixture generation is
-capped at 3 s, so a run cannot exceed 57 s. Load caps are about twice the
-measured time. On the reference machine the load tests take about 7 s,
-plus about 1 s for fixtures on a first run. CSV highlighting requires adding
-CSV to the language registry; it is not in the initial language list.
+Load caps add up to 47 s, interaction caps to 104 s and fixture generation is
+capped at 3 s; the total cap (60 s) is checked separately. Load caps are
+about twice the measured time. On the reference machine the load tests take
+about 19 s, plus about 1 s for fixtures on a first run. CSV highlighting
+requires adding CSV to the language registry; it is not in the initial
+language list.
 
 Setup and keys of the scripted interaction tests:
 
@@ -579,6 +810,14 @@ Setup and keys of the scripted interaction tests:
 | F02     | None                                              | `Ctrl+F`, `Escape`              |
 | F03     | `Ctrl+Right`, `Ctrl+F`                            | `Alt+R`                         |
 | S01-S03 | None                                              | The 140 scroll keys (all timed) |
+| K01     | Caret at byte 1,000,000                           | `'x'`                           |
+| K02     | Caret at byte 1,000,000                           | `Enter`, `Backspace` (timed)    |
+| K03     | Caret at byte 1,000,000                           | `'x'`                           |
+| K04     | None                                              | The 140 scroll keys (all timed) |
+| K05     | None                                              | `Ctrl+Shift+O`, `Escape`, `'x'` |
+| K06-K08 | Caret at byte 168,000, 232,000, 142,000           | `'x'`                           |
+| K09     | Caret at byte 142,000                             | `Enter`, `Backspace` (timed)    |
+| K10     | None                                              | `Ctrl+Shift+O`, `Escape`, `'x'` |
 
 **10K selections:** `Ctrl+F`, `Alt+R`, `'sum_\d{1,4}\('`, `Alt+Enter`,
 `Escape` selects `sum_0(` to `sum_9999(`, exactly 10,000 matches (the

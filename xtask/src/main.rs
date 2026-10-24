@@ -10,10 +10,12 @@
 //!   on MinGW runtime DLLs (the release must be self-contained), and checks
 //!   that the application manifest is embedded.
 //! - `bench-perf [--short] [--print-hashes]`: Performance Benchmark v1 (`perf.rs`,
-//!   `Perfromance.md`); `--print-hashes` regenerates the fixtures and prints
+//!   `Performance.md`); `--print-hashes` regenerates the fixtures and prints
 //!   their hashes.
 //! - `package`: builds the release, checks imports and writes
 //!   `target/package/<file name>-<version>-windows-x86_64.zip` (`Meta/AppMeta.json`); prints its path last.
+//! - `syntax-queries`: regenerates the trimmed tree-sitter queries under
+//!   `crates/rte_syntax/queries/` from the grammar crates.
 
 mod perf;
 
@@ -51,13 +53,40 @@ fn main() -> ExitCode {
             }
         }
         Some("package") => package(),
+        Some("syntax-queries") => syntax_queries(),
         _ => {
             eprintln!(
-                "usage: cargo xtask <bench-startup [--runs N] [--warmup N] [FILE] | bench-perf [--short] [--print-hashes] | check-imports [EXE] | package>"
+                "usage: cargo xtask <bench-startup [--runs N] [--warmup N] [FILE] | bench-perf [--short] [--print-hashes] | check-imports [EXE] | package | syntax-queries>"
             );
             ExitCode::FAILURE
         }
     }
+}
+
+fn syntax_queries() -> ExitCode {
+    let files = match rte_syntax::generate::generate() {
+        Ok(files) => files,
+        Err(e) => {
+            eprintln!("syntax-queries: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let dir = root().join("crates").join("rte_syntax").join("queries");
+    for (path, content) in files {
+        let path = dir.join(path);
+        let unchanged = std::fs::read_to_string(&path).is_ok_and(|old| old == content);
+        if unchanged {
+            continue;
+        }
+        if let Err(e) = std::fs::create_dir_all(path.parent().unwrap())
+            .and_then(|()| std::fs::write(&path, content))
+        {
+            eprintln!("syntax-queries: {}: {e}", path.display());
+            return ExitCode::FAILURE;
+        }
+        println!("wrote {}", path.display());
+    }
+    ExitCode::SUCCESS
 }
 
 fn root() -> PathBuf {
@@ -445,7 +474,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn docs_summary_staging_restores_existing_files_on_success_and_failure() {
+    fn docs_build_uses_summary_and_restores_staged_images() {
         let script = r##"
 $ErrorActionPreference = 'Stop'
 $tokens = $null
@@ -453,78 +482,60 @@ $parseErrors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile(
     $env:RTE_DOCS_BUILD_SCRIPT, [ref]$tokens, [ref]$parseErrors)
 if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
-$assignment = $ast.Find({ param($node)
-    $node -is [Management.Automation.Language.AssignmentStatementAst] -and
-    $node.Left -is [Management.Automation.Language.VariableExpressionAst] -and
-    $node.Left.VariablePath.UserPath -eq 'SyncSummary'
-}, $true)
-$expression = $assignment.Right.Find({ param($node)
-    $node -is [Management.Automation.Language.ScriptBlockExpressionAst]
-}, $true)
-$SyncSummary = $expression.ScriptBlock.GetScriptBlock()
+$source = [IO.File]::ReadAllText($env:RTE_DOCS_BUILD_SCRIPT)
+foreach ($obsolete in @('DocsIndex', 'SyncSummary', 'SummaryJob', 'SummaryBackup', 'HadSummary')) {
+    if ($source.Contains($obsolete)) { throw "Obsolete navigation sync remains: $obsolete" }
+}
+foreach ($required in @(
+    "src\SUMMARY.md",
+    'Remove-Item $GeneratedImagesDir -Recurse -Force',
+    'Copy-Item $ImageCache $SourceImage -Force',
+    'Copy-Item $SearchImageCache $SourceSearchImage -Force',
+    'Copy-Item $SyntaxImageCache $SourceSyntaxImage -Force',
+    'Copy-Item $LanguageImageCache $SourceLanguageImage -Force'
+)) {
+    if (-not $source.Contains($required)) { throw "Missing docs build behavior: $required" }
+}
+if (Test-Path (Join-Path (Split-Path (Split-Path $env:RTE_DOCS_BUILD_SCRIPT -Parent) -Parent) 'docs\src\index.md')) {
+    throw 'Duplicate index.md navigation source still exists.'
+}
 $buildTry = $ast.Find({ param($node)
     $node -is [Management.Automation.Language.TryStatementAst] -and
     $node.Body.Extent.Text.Contains('$CaptureScript =')
 }, $true)
 if (-not $buildTry) { throw 'Documentation build staging not found.' }
-$setup = @()
-foreach ($statement in $buildTry.Body.Statements) {
-    if ($statement.Extent.Text.StartsWith('$CaptureScript =')) { break }
-    $setup += $statement.Extent.Text
-}
-$prepare = [scriptblock]::Create($setup -join "`n")
 $cleanup = [scriptblock]::Create(($buildTry.Finally.Statements | ForEach-Object { $_.Extent.Text }) -join "`n")
-$folder = Join-Path ([IO.Path]::GetTempPath()) ('rte-summary-test-' + [Guid]::NewGuid().ToString('N'))
+$folder = Join-Path ([IO.Path]::GetTempPath()) ('rte-docs-image-test-' + [Guid]::NewGuid().ToString('N'))
 $null = [IO.Directory]::CreateDirectory($folder)
+$sourceAssets = Join-Path $folder 'assets'
+$null = [IO.Directory]::CreateDirectory($sourceAssets)
+$existing = Join-Path $sourceAssets 'editor-screenshot.png'
+$staged = Join-Path $sourceAssets 'search-panel.png'
+$original = [byte[]](1, 2, 3, 4)
+[IO.File]::WriteAllBytes($existing, $original)
+[IO.File]::WriteAllBytes($existing, [byte[]](9, 9, 9))
+[IO.File]::WriteAllBytes($staged, [byte[]](8, 8, 8))
+$SourceAssetBackups = @{ $existing = $original }
+$StagedFiles = New-Object 'System.Collections.Generic.List[string]'
+$StagedFiles.Add($staged)
+$SourceAssetsDir = $sourceAssets
+$CreatedAssetsDir = $false
+$MermaidStage = Join-Path $folder 'mermaid-stage'
+$null = [IO.Directory]::CreateDirectory($MermaidStage)
+$PreviousSiteUrl = [Environment]::GetEnvironmentVariable('MDBOOK_OUTPUT__HTML__SITE_URL', 'Process')
+[Environment]::SetEnvironmentVariable('MDBOOK_OUTPUT__HTML__SITE_URL', 'temporary-test', 'Process')
 try {
-    foreach ($case in @('absent', 'matching', 'stale')) {
-        foreach ($fail in @($false, $true)) {
-            $caseDir = Join-Path $folder "$case-$fail"
-            $null = [IO.Directory]::CreateDirectory($caseDir)
-            $DocsIndex = Join-Path $caseDir 'index.md'
-            $DocsSummary = Join-Path $caseDir 'SUMMARY.md'
-            $SourceAssetsDir = Join-Path $caseDir 'assets'
-            $MermaidStage = Join-Path $caseDir 'mermaid'
-            $StagedFiles = New-Object 'System.Collections.Generic.List[string]'
-            $SummaryJob = $null
-            $SummaryBackup = $null
-            $HadSummary = $false
-            $CreatedAssetsDir = $false
-            $Serve = $false
-            $PreviousSiteUrl = [Environment]::GetEnvironmentVariable('MDBOOK_OUTPUT__HTML__SITE_URL', 'Process')
-            $expected = "# Index`n- [Introduction](introduction.md)`n"
-            [IO.File]::WriteAllText($DocsIndex, $expected)
-            $original = $null
-            if ($case -eq 'matching') {
-                [IO.File]::WriteAllText($DocsSummary, $expected)
-                $original = [IO.File]::ReadAllBytes($DocsSummary)
-            } elseif ($case -eq 'stale') {
-                $original = [byte[]](0xEF, 0xBB, 0xBF, 0x23, 0x20, 0x4F, 0x6C, 0x64, 0x0D, 0x0A)
-                [IO.File]::WriteAllBytes($DocsSummary, $original)
-            }
-            $caught = $false
-            try {
-                . $prepare
-                if ([IO.File]::ReadAllText($DocsSummary) -cne $expected) { throw 'Build did not use index.md.' }
-                if ($fail) { throw [InvalidOperationException]::new('injected renderer failure') }
-            } catch [InvalidOperationException] {
-                if (-not $fail -or $_.Exception.Message -ne 'injected renderer failure') { throw }
-                $caught = $true
-            } finally {
-                . $cleanup
-            }
-            if ($fail -and -not $caught) { throw 'Injected failure was not observed.' }
-            if ($case -eq 'absent') {
-                if (Test-Path $DocsSummary) { throw 'Generated summary was not removed.' }
-            } else {
-                if (-not (Test-Path $DocsSummary)) { throw 'Existing summary was deleted.' }
-                if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($DocsSummary)) -ne
-                    [Convert]::ToBase64String($original)) { throw 'Existing summary bytes changed.' }
-            }
-        }
+    & $cleanup
+    if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($existing)) -ne
+        [Convert]::ToBase64String($original)) { throw 'Existing source image bytes were not restored.' }
+    if (Test-Path $staged) { throw 'Newly staged screenshot was not removed.' }
+    if (Test-Path $MermaidStage) { throw 'Temporary Mermaid directory was not removed.' }
+    if ([Environment]::GetEnvironmentVariable('MDBOOK_OUTPUT__HTML__SITE_URL', 'Process') -ne $PreviousSiteUrl) {
+        throw 'The previous mdBook site URL was not restored.'
     }
 }
 finally {
+    [Environment]::SetEnvironmentVariable('MDBOOK_OUTPUT__HTML__SITE_URL', $PreviousSiteUrl, 'Process')
     Remove-Item -LiteralPath $folder -Recurse -Force
 }
 "##;
@@ -533,10 +544,10 @@ finally {
             .env("RTE_DOCS_BUILD_SCRIPT", root().join("tools/Build-Docs.ps1"))
             .args(["-NoProfile", "-NonInteractive", "-Command", script])
             .output()
-            .expect("run the summary staging regression");
+            .expect("run the documentation image staging regression");
         assert!(
             output.status.success(),
-            "Summary staging failed:\n{}\n{}",
+            "Documentation image staging failed:\n{}\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );

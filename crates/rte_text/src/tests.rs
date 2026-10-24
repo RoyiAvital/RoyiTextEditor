@@ -495,4 +495,33 @@ proptest! {
         prop_assert_eq!(map.map(model.len() as u64, Bias::Right), new.len() as u64);
         prop_assert_eq!(map.map(0, Bias::Left), 0);
     }
+
+    /// `diff` finds one change that rebuilds the new text from the old one,
+    /// and the smallest one: its edges differ unless the change is empty.
+    #[test]
+    fn diff_rebuilds_the_new_text((model, cuts) in initial(), ops in prop::collection::vec(op(), 1..6)) {
+        let old = build_initial(&model, &cuts);
+        let mut s = old.clone();
+        let mut new_model = model.clone();
+        for op in &ops {
+            let tx = to_transaction(op, new_model.len());
+            s = s.apply(&tx).unwrap().0;
+            new_model = apply_model(&new_model, &tx);
+        }
+        for (a, b, a_model, b_model) in [(&old, &s, &model, &new_model), (&s, &old, &new_model, &model)] {
+            let changes = a.diff(b);
+            let mut rebuilt = a_model.clone();
+            if let Some(c) = changes.changes().first() {
+                prop_assert_eq!(changes.changes().len(), 1);
+                let start = c.old.start as usize;
+                let inserted = &b_model[start..start + c.new_len as usize];
+                rebuilt.splice(start..c.old.end as usize, inserted.iter().copied());
+                // Minimal: the first changed bytes differ.
+                if !c.old.is_empty() && c.new_len > 0 {
+                    prop_assert_ne!(a_model[start], b_model[start]);
+                }
+            }
+            prop_assert_eq!(&rebuilt, b_model);
+        }
+    }
 }

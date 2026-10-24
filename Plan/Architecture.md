@@ -69,6 +69,13 @@ and the requirements and competition list in [DEVELOPMENT.md](../DEVELOPMENT.md)
 4. Startup does only what the first frame needs. Everything else is parallel or lazy.
 5. Few dependencies. Each one must justify its startup, size and build cost.
 6. Pure, testable core crates. Win32 code only in `rte_platform`.
+7. **Speed over memory.** When they conflict, fast rendering and
+   highlighting win over a small memory footprint (the owner's design
+   choice, 2026_10_24): syntax trees stay in memory, the whole file parses
+   beside the first window, tree-sitter allocates through mimalloc. Memory
+   stays bounded by explicit limits (`syntax.maxFileMiB`, the Replace All
+   cap, the cursor limit), and startup memory is not traded. Highlighting
+   off (`--syntax none`) restores the memory footprint of 0.3.0.
 
 ### Overview
 
@@ -305,24 +312,39 @@ replacement syntax), with bounded memory and preemptible work.
   may highlight as error nodes; highlighting degrades, never blocks.
 - **Parsing** runs on the worker: incremental `Tree::edit` from each `ChangeSet`,
   input read through a chunk callback (no flattening), cancellable via the
-  progress callback.
-- **Highlighting** runs on the UI thread from a per-line span cache (bounded,
-  around the viewport, keyed by line and mapped through `ChangeSet`s). Missing
-  visible rows run the highlight query over their byte range with a **1 ms work
-  budget** enforced by the query progress callback. When the budget runs out,
-  remaining rows draw from mapped cached spans or plain text, and the worker
-  highlights them and posts spans for the next frame. Edits never flicker to
-  plain text for rows already cached.
+  progress callback. At startup the loader thread starts the worker as soon
+  as the text is read (before the window exists; the editor adopts it when
+  the language and text match), and the highlight query compiles on its own
+  short-lived thread while the text parses. Tree-sitter allocates through
+  mimalloc (6-16% faster parses than the system heap; Rust code keeps the
+  system heap, which measured no gain and double the memory with mimalloc).
+  Trees the UI replaces are sent back to the worker to be freed (freeing a
+  100,000-line tree takes up to about 57 ms).
+- **Highlighting** runs on the UI thread over the visible byte range (cached
+  per tree generation, text and range). The trees received from the worker
+  are edited forward with each transaction (exact edits near the visible rows,
+  one point edit for changes before them), so positions match the current
+  text until the next parse arrives. The visible rows are queried with a
+  **1 ms work budget** enforced by the query progress callback. When the
+  budget runs out, the worker highlights the range and posts spans for the
+  next frame.
 - **Trimmed queries.** Our own `highlights.scm` per language under
-  `crates/rte_syntax/queries/<lang>/`, derived from upstream (licenses kept).
-  Only patterns producing the theme's captures remain: `keyword`, `string`,
-  `comment`, `number`, `type`, `function`, `constant`, `operator`,
-  `punctuation`, `property`, `tag`, `attribute`. Regex predicates are avoided.
-  Smaller queries compile faster at startup and match faster per frame.
-- **First frame:** wait for highlights until a startup deadline, otherwise draw
-  plain text and repaint when ready.
+  `crates/rte_syntax/queries/<lang>/`, generated from upstream (licenses kept;
+  `cargo xtask syntax-queries`). Only patterns producing the theme's captures
+  remain: `keyword`, `string`, `comment`, `number`, `type`, `function`,
+  `constant`, `operator`, `punctuation`, `property`, `tag`, `attribute`
+  (`@none` is kept: plain text over outer captures). Patterns with predicates
+  tree-sitter does not evaluate (`#lua-match?`, `#has-ancestor?`) are
+  dropped; regex predicates stay (the regex engine is linked anyway). Patterns
+  are ordered by specificity (nodes and predicates), then by upstream
+  precedence; the first pattern matching a node wins. `tags.scm` is trimmed
+  to definitions; grammars without one get a small written query.
+- **First frame:** never waits for highlighting; a code file shows plain text
+  first and repaints when the trees arrive.
 - **Off switch:** unknown language, Plain Text chosen, or a file above
   `syntax.maxFileMiB` (default 32) → plain text, no parser work.
+  `--syntax none` restores the memory footprint of 0.3.0 (64 KiB JSON:
+  5.7 MiB peak instead of 10.7 MiB).
 - **Size limit.** Measured with tree-sitter 0.25 on the reference machine
   (`tools/SyntaxProbe`; one thread, the benchmark fixture blocks;
   memory and time grow linearly with size), at the 32 MiB limit:
@@ -340,14 +362,22 @@ replacement syntax), with bounded memory and preemptible work.
   JSON and Markdown were measured at 32 MiB; Python, C and minified JSON at
   128 MiB, scaled to 32 MiB (128 MiB: 3.8–6.4 GiB, 12–19 s; Markdown with all
   layers about 16.5 GiB, 82 s).
-- **Viewport first.** When the estimated full parse exceeds 100 ms, the worker
-  first parses a 128 KiB window around the viewport, starting at a line
-  start, as a standalone document (10–80 ms) and posts its spans. The
-  cancellable full parse follows and replaces them. A jump outside the window
-  (`Ctrl+End`, scroll bar, Go to Line) parses a new window. Window spans can
-  be wrong for constructs opened before the window (block comments, strings,
-  code fences) until the full tree arrives. Edits re-parse incrementally: the
-  full tree when present, otherwise the current window.
+- **Viewport first.** Above 128 KiB (an estimated full parse over one frame),
+  the worker first parses a 32 KiB window around the viewport (a few
+  milliseconds, so the second frame is highlighted), starting at a line
+  start when one is near (otherwise at a character boundary, so minified
+  lines stay bounded), with `set_included_ranges` (positions stay those of
+  the document) and posts it. A window covering half the file or more is
+  replaced by one full parse. Meanwhile a second parser parses the whole file
+  on its own thread; edits made meanwhile are applied to its tree when it
+  finishes. A jump
+  outside the window (`Ctrl+End`, scroll bar, Go to Line) parses a new window.
+  Window spans can be wrong for constructs opened before the window (block
+  comments, strings, code fences), so a window not starting at the file start
+  is provisional: it is drawn, but not reported as highlighted nor used by
+  code-aware commands until the full tree arrives. A finished full tree is
+  adopted before another window parses. Edits re-parse
+  incrementally: the full tree when present, otherwise the window.
 - **Injections** (embedded languages) are in v1, on by default, setting
   `syntax.injections`:
   - **HTML:** `<script>` → JavaScript, `<style>` → CSS.
@@ -361,13 +391,18 @@ replacement syntax), with bounded memory and preemptible work.
     count in tree-sitter 0.25 (13,152 inline ranges: 1.3 s; 26,200: 5.1 s;
     separate trees: 0.6 s). Layers are rebuilt on the worker after the host
     parse. Highlighting merges the visible captures of all layers; the
-    innermost layer wins.
+    innermost layer wins. Commands outside the parsed layers (or with
+    layers older than the text) take the language from the host tree's
+    regions (fence info string, `<script>`), not from the host language.
+    After edits far from the view (positions there are approximate until
+    the next parse), comments report "still being parsed" and typing aids
+    act as in plain text.
   - **Depth.** One level below the host. HTML inside Markdown gets no further
     injections. Markdown inline counts as part of Markdown.
   - **Lazy grammars.** An injected language's queries compile on the worker
     the first time it appears. Until then its region draws plain text.
-- **Theme:** capture name (`@keyword`, `@string`, ...) → style. Two built-in
-  themes: dark and light. No theme files.
+- **Theme:** capture name (`@keyword`, `@string`, ...) → style. Built-in dark
+  theme (v1); a light theme later. No theme files.
 
 | Feature                       | Source                                        |
 | ----------------------------- | --------------------------------------------- |
@@ -828,6 +863,7 @@ Toggle Read-Only (palette; no default key, as VS Code).
 | New files | Only from a command-line path; no Save As; untitled is never saved  |
 | Recovery  | Best-effort panic snapshots under `UserSettings/Recovery/`          |
 | Languages | Initial list above, including MATLAB, Octave and Julia              |
+| Trade-off | Faster rendering and highlighting over a smaller memory footprint   |
 
 Toolchain check: the release binary must not import MinGW runtime DLLs
 (`libgcc_s_seh-1.dll`, `libwinpthread-1.dll`, `libstdc++-6.dll`).
@@ -889,7 +925,9 @@ also build with GNU. Linking uses Rust's bundled MinGW runtime
   Recovery files are written only on panic. No file watchers; external changes
   checked on activation.
 - **Threads:** UI thread, two startup threads, one worker, one search thread
-  (on first search), one save thread at a time.
+  (on first search), one save thread at a time. Syntax adds short-lived
+  threads: the query compile at startup and the whole-file parse of a file
+  above 128 KiB.
 - **Cancellation:** every job has a `CancelToken`; parsing and search check it
   per chunk; superseded revisions are rejected on arrival.
 - **Disabled paths:** syntax off → no parser, no queries. Large-file mode → no

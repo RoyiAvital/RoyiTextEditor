@@ -3,8 +3,10 @@
 //! sent untimed, then the steps one at a time; each is timed from its handling
 //! to the last presented frame of its work (search results included). The
 //! times are printed as `bench.<step>_ms=<value>` lines, followed by
-//! `bench.peak_private_mib=` (and `bench.refresh_ms=` when paced), then the
-//! editor closes.
+//! `bench.hl<step>_ms=` lines (the time from a step to the first frame
+//! highlighted from current syntax trees, when one came before the next
+//! step), `bench.peak_private_mib=` (and `bench.refresh_ms=` when paced),
+//! then the editor closes.
 //!
 //! A script is a comma-separated list of keys (`Ctrl+Shift+P`, `Down*40` for
 //! 40 presses) and quoted
@@ -12,15 +14,20 @@
 //! `--bench-select <start>..<end>` selects bytes before the setup;
 //! `--bench-handled` ends a step that draws nothing when it is handled (copies);
 //! `--bench-paced` sends a step one display refresh after the previous frame,
-//! like a held key.
+//! like a held key; with syntax highlighting it first waits (at most
+//! [`HIGHLIGHT_WAIT`]) for the step's highlighted frame. `--bench-full` starts
+//! once the whole file is highlighted (steady state) instead of the view.
 
 use std::io::Write;
 use std::ops::Range;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use rte_platform::{Ctx, Key};
 
 use crate::commands::parse_key;
+
+/// Longest wait of a paced step for its highlighted frame.
+pub const HIGHLIGHT_WAIT: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
@@ -37,6 +44,8 @@ pub struct Script {
     pub select: Option<Range<u64>>,
     pub handled: bool,
     pub paced: bool,
+    /// Start once the whole file is highlighted.
+    pub full: bool,
 }
 
 /// `<start>..<end>` byte offsets.
@@ -114,6 +123,7 @@ pub fn parse(keys: &str, runs: &str, setup: &str) -> Result<Script, String> {
         select: None,
         handled: false,
         paced: false,
+        full: false,
     })
 }
 
@@ -132,6 +142,14 @@ pub struct Driver {
     requested: bool,
     /// Milliseconds per step, in run order.
     times: Vec<Vec<f64>>,
+    /// The last timed step and its start, until a highlighted frame.
+    highlight: Option<(usize, Instant)>,
+    /// Step to highlighted frame: (step, milliseconds), in order.
+    highlighted: Vec<(usize, f64)>,
+    /// The document is highlighted (frames report their state).
+    syntax: bool,
+    /// A paced step waits for its highlighted frame since then.
+    waiting: Option<Instant>,
 }
 
 impl Driver {
@@ -147,6 +165,10 @@ impl Driver {
             shown: false,
             requested: false,
             times: vec![Vec::new(); steps],
+            highlight: None,
+            highlighted: Vec::new(),
+            syntax: false,
+            waiting: None,
         }
     }
 
@@ -167,9 +189,15 @@ impl Driver {
         self.script.select.take()
     }
 
-    /// Posts the next step unless one is in flight.
+    /// The script starts once the whole file is highlighted.
+    pub fn full(&self) -> bool {
+        self.script.full
+    }
+
+    /// Posts the next step unless one is in flight or the last one waits
+    /// for its highlighted frame.
     pub fn send(&mut self, ctx: &mut Ctx) {
-        if !self.sent && self.run < self.script.runs {
+        if !self.sent && self.waiting.is_none() && self.run < self.script.runs {
             match self.current() {
                 Step::Key(key) => ctx.post_key(key),
                 Step::Char(ch) => ctx.post_char(ch),
@@ -181,15 +209,26 @@ impl Driver {
     /// Starts timing when `step` is the posted one.
     pub fn arrived(&mut self, step: Step) {
         if self.sent && self.started.is_none() && step == self.current() {
-            self.started = Some(Instant::now());
+            let now = Instant::now();
+            self.started = Some(now);
             self.shown = false;
             self.requested = false;
+            // A step not highlighted before the next one is not counted.
+            self.highlight = (!self.in_setup()).then_some((self.step, now));
         }
     }
 
     /// After each event: a key whose work ended without a new frame is done
     /// (or, without any frame, cannot be timed). `busy`: work of the key runs.
     pub fn check_frame(&mut self, redraw: bool, busy: bool, ctx: &mut Ctx) {
+        if self
+            .waiting
+            .is_some_and(|since| since.elapsed() > HIGHLIGHT_WAIT)
+        {
+            self.waiting = None;
+            self.highlight = None;
+            self.next(ctx);
+        }
         if self.started.is_none() {
             return;
         }
@@ -205,7 +244,22 @@ impl Driver {
         }
     }
 
-    pub fn presented(&mut self, busy: bool, ctx: &mut Ctx) {
+    /// A frame was presented. `highlight`: `None` without syntax
+    /// highlighting, otherwise whether it was drawn from current trees.
+    pub fn presented(&mut self, busy: bool, highlight: Option<bool>, ctx: &mut Ctx) {
+        self.syntax = highlight.is_some();
+        if highlight == Some(true)
+            && let Some((step, started)) = self.highlight.take()
+        {
+            self.highlighted
+                .push((step, started.elapsed().as_secs_f64() * 1000.0));
+            if self.waiting.take().is_some() {
+                if self.run < self.script.runs {
+                    rte_platform::wait_for_composition();
+                }
+                self.next(ctx);
+            }
+        }
         if self.started.is_none() {
             return;
         }
@@ -232,13 +286,22 @@ impl Driver {
         if self.step == 0 {
             self.run += 1;
         }
+        if self.script.paced && self.syntax && self.highlight.is_some() {
+            self.waiting = Some(Instant::now());
+        } else if self.script.paced && self.run < self.script.runs {
+            rte_platform::wait_for_composition();
+            self.send(ctx);
+        } else {
+            self.next(ctx);
+        }
+    }
+
+    /// Sends the next step, or reports and closes after the last one.
+    fn next(&mut self, ctx: &mut Ctx) {
         if self.run == self.script.runs {
             self.report();
             ctx.close();
         } else {
-            if self.script.paced {
-                rte_platform::wait_for_composition();
-            }
             self.send(ctx);
         }
     }
@@ -249,6 +312,9 @@ impl Driver {
             for (step, times) in self.times.iter().enumerate() {
                 let _ = writeln!(out, "bench.{step}_ms={:.4}", times[run]);
             }
+        }
+        for (step, ms) in &self.highlighted {
+            let _ = writeln!(out, "bench.hl{step}_ms={ms:.4}");
         }
         let peak = rte_platform::peak_private_bytes() as f64 / (1024.0 * 1024.0);
         let _ = writeln!(out, "bench.peak_private_mib={peak:.2}");
@@ -351,7 +417,7 @@ mod tests {
         driver.arrived(Step::Key(key));
         let mut ctx = Ctx::headless(10, 10, 96);
         driver.check_frame(true, true, &mut ctx);
-        driver.presented(true, &mut ctx);
+        driver.presented(true, None, &mut ctx);
         assert!(driver.times[0].is_empty(), "still busy");
         driver.check_frame(false, false, &mut ctx);
         assert_eq!(driver.times[0].len(), 1);
@@ -371,7 +437,7 @@ mod tests {
             driver.arrived(Step::Key(key));
             let mut ctx = Ctx::headless(10, 10, 96);
             driver.check_frame(true, false, &mut ctx);
-            driver.presented(false, &mut ctx);
+            driver.presented(false, Some(true), &mut ctx);
             posted = ctx.posted_key();
             if posted.is_none() {
                 assert!(ctx.close_requested());
@@ -379,6 +445,28 @@ mod tests {
         }
         assert_eq!(driver.times[0].len(), 2);
         assert_eq!(driver.times[1].len(), 2);
+        assert_eq!(
+            driver.highlighted.len(),
+            4,
+            "each step reached a highlighted frame"
+        );
         assert_eq!(key_of(keys[1]).vk, 0x1B);
+    }
+
+    #[test]
+    fn paced_runs_wait_for_the_last_highlighted_frame() {
+        let mut script = parse("'x'", "1", "").unwrap();
+        script.paced = true;
+        let mut driver = Driver::new(script);
+        let mut ctx = Ctx::headless(10, 10, 96);
+        driver.send(&mut ctx);
+        driver.arrived(Step::Char('x'));
+        driver.check_frame(true, false, &mut ctx);
+        driver.presented(false, Some(false), &mut ctx);
+        assert_eq!(driver.times[0].len(), 1);
+        assert!(!ctx.close_requested(), "waits for the highlighted frame");
+        driver.presented(false, Some(true), &mut ctx);
+        assert_eq!(driver.highlighted.len(), 1);
+        assert!(ctx.close_requested());
     }
 }

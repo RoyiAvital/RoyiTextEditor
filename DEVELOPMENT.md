@@ -220,19 +220,17 @@ first; the workflow refuses to replace an existing release.
 ### Documentation
 
 The user documentation is an [mdBook](https://rust-lang.github.io/mdBook/)
-under `docs/`: pages in `docs/src` (navigation in `docs/src/index.md`),
+under `docs/`: pages in `docs/src` (navigation in `docs/src/SUMMARY.md`),
 configuration in `docs/book.toml` and the Material-like dark theme in
 `docs/theme`. It is published to GitHub Pages by the `Pages` workflow on pushes
 to `main` that change the documentation. Publishing needs the repository's
 **Settings > Pages > Source** set to **GitHub Actions** (once); until then the
 workflow only builds the book and shows a warning.
 
-`docs/src/index.md` defines sections, page order and hierarchy. Content lives
+`docs/src/SUMMARY.md` defines sections, page order and hierarchy. Content lives
 in separate files; the introduction is `docs/src/introduction.md`. The build
-temporarily generates mdBook's required `SUMMARY.md` from the index. An existing
-summary is restored afterwards; a build-created summary is removed, including
-on failure. Do not maintain a second navigation file. Live preview keeps the
-generated hierarchy synchronized when the index changes.
+reads the summary directly and regenerates all four screenshots for the book,
+restoring existing source assets afterwards.
 
 Serve it locally with live reload:
 
@@ -269,7 +267,7 @@ Kinds: `NOTE`, `TIP`, `IMPORTANT`, `WARNING` and `CAUTION`. Keys are written as
 ### Performance Benchmark
 
 The benchmark specification and the results of each version are in
-[Perfromance.md](Perfromance.md).
+[Performance.md](Performance.md).
 
 ```powershell
 cargo xtask bench-perf                 # Performance Benchmark v1
@@ -294,7 +292,7 @@ The output starts with the application name
 and version, the benchmark version, `rustc` and the CPU.
 
 For the release notes, `### Performance` holds the Short Benchmark table. When
-the version's full results are recorded in `Perfromance.md`, copy the matching
+the version's full results are recorded in `Performance.md`, copy the matching
 rows; otherwise run `cargo xtask bench-perf --short`.
 
 Measure on the reference machine on AC power, without other heavy load, and do

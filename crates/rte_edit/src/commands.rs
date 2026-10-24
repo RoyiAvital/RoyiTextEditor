@@ -84,7 +84,7 @@ pub fn apply(
 }
 
 /// Sorted edits; overlapping ranges and repeated insertion points merge.
-fn build(mut edits: Vec<(Range<u64>, Vec<u8>)>) -> Transaction {
+pub(crate) fn build(mut edits: Vec<(Range<u64>, Vec<u8>)>) -> Transaction {
     edits.sort_by_key(|(r, _)| (r.start, r.end));
     let mut out: Vec<(Range<u64>, Vec<u8>)> = Vec::with_capacity(edits.len());
     for (range, text) in edits {
@@ -228,7 +228,7 @@ pub fn delete_word_right(s: &Snapshot, sels: &Selections) -> Option<Command> {
 
 /// Lines touched by the selections; a selection ending at a line start does
 /// not include that line.
-fn covered_lines(s: &Snapshot, sels: &Selections) -> BTreeSet<u64> {
+pub(crate) fn covered_lines(s: &Snapshot, sels: &Selections) -> BTreeSet<u64> {
     let mut lines = BTreeSet::new();
     for sel in sels.as_slice() {
         let first = s.line_of(sel.start());
@@ -241,7 +241,7 @@ fn covered_lines(s: &Snapshot, sels: &Selections) -> BTreeSet<u64> {
     lines
 }
 
-fn indent_unit(opts: &EditOptions) -> Vec<u8> {
+pub(crate) fn indent_unit(opts: &EditOptions) -> Vec<u8> {
     if opts.insert_spaces {
         vec![b' '; opts.tab_width.max(1) as usize]
     } else {

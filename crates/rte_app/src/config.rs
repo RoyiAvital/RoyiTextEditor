@@ -9,6 +9,9 @@
 //!   multiCursorLimit: 10000   # most cursors, 1 to 1000000
 //! search:
 //!   replaceAllMaxMiB: 512     # memory Replace All may use, 1 to 4096
+//! syntax:
+//!   maxFileMiB: 32            # larger files are not highlighted, 1 to 1024
+//!   injections: true          # embedded languages (Markdown, HTML)
 //! ```
 
 use std::path::Path;
@@ -21,12 +24,17 @@ pub const RECENT_MAX: usize = 20;
 const RECENT_PROBLEM: &str = "palette.recentCount must be a number from 0 to 20";
 const CURSORS_PROBLEM: &str = "editor.multiCursorLimit must be a number from 1 to 1000000";
 const REPLACE_PROBLEM: &str = "search.replaceAllMaxMiB must be a number from 1 to 4096";
+const SYNTAX_MAX_PROBLEM: &str = "syntax.maxFileMiB must be a number from 1 to 1024";
+const INJECTIONS_PROBLEM: &str = "syntax.injections must be true or false";
+const SECTIONS: &[&str] = &["palette", "editor", "search", "syntax"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     pub recent_count: usize,
     pub multi_cursor_limit: usize,
     pub replace_all_max_mib: u64,
+    pub syntax_max_mib: u64,
+    pub injections: bool,
 }
 
 impl Default for Config {
@@ -35,6 +43,8 @@ impl Default for Config {
             recent_count: 3,
             multi_cursor_limit: 10_000,
             replace_all_max_mib: 512,
+            syntax_max_mib: 32,
+            injections: true,
         }
     }
 }
@@ -67,9 +77,10 @@ pub fn parse(text: &str) -> (Config, Option<String>) {
             for (key, value) in entries {
                 let section = key.clone();
                 let Value::Map(settings) = value else {
-                    problems.push(match key.as_str() {
-                        "palette" | "editor" | "search" => format!("{key} must be a map"),
-                        _ => format!("unknown setting {key}"),
+                    problems.push(if SECTIONS.contains(&key.as_str()) {
+                        format!("{key} must be a map")
+                    } else {
+                        format!("unknown setting {key}")
                     });
                     continue;
                 };
@@ -93,7 +104,17 @@ pub fn parse(text: &str) -> (Config, Option<String>) {
                             Some(n) => config.replace_all_max_mib = n,
                             None => problems.push(REPLACE_PROBLEM.to_owned()),
                         },
-                        ("palette" | "editor" | "search", name) => {
+                        ("syntax", "maxFileMiB") => match number(1024, 1) {
+                            Some(n) => config.syntax_max_mib = n,
+                            None => problems.push(SYNTAX_MAX_PROBLEM.to_owned()),
+                        },
+                        ("syntax", "injections") => match &value {
+                            Value::Scalar(s) if s == "true" || s == "false" => {
+                                config.injections = s == "true";
+                            }
+                            _ => problems.push(INJECTIONS_PROBLEM.to_owned()),
+                        },
+                        (section, name) if SECTIONS.contains(&section) => {
                             problems.push(format!("unknown setting {section}.{name}"));
                         }
                         _ => {
@@ -209,6 +230,19 @@ mod tests {
         assert!(problem.unwrap().contains("search.replaceAllMaxMiB"));
         let (_, problem) = parse("search:\n  other: 1\n");
         assert!(problem.unwrap().contains("unknown setting search.other"));
+    }
+
+    #[test]
+    fn reads_the_syntax_settings() {
+        let (config, problem) = parse("syntax:\n  maxFileMiB: 8\n  injections: false\n");
+        assert_eq!(problem, None);
+        assert_eq!((config.syntax_max_mib, config.injections), (8, false));
+        let (config, problem) = parse("syntax:\n  maxFileMiB: 0\n");
+        assert_eq!(config.syntax_max_mib, 32);
+        assert!(problem.unwrap().contains("syntax.maxFileMiB"));
+        let (config, problem) = parse("syntax:\n  injections: yes\n");
+        assert!(config.injections);
+        assert!(problem.unwrap().contains("syntax.injections"));
     }
 
     #[test]

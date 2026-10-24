@@ -39,7 +39,7 @@ RoyiTextEditor.exe [--read-only] [--syntax <id>] [file]
 `--syntax <id>` chooses the highlighting language (for example `--syntax json`
 for a `.ipynb` notebook); `--syntax none` or `--syntax off` (any case) turns
 highlighting off, as does `View: Toggle Syntax Highlighting` in the palette.
-It is accepted now and applies once syntax highlighting ships.
+An unknown id keeps the language of the file name and shows a notice.
 
 | Keys                                                | Action                                                 |
 | --------------------------------------------------- | ------------------------------------------------------ |
@@ -117,6 +117,38 @@ line at each.
 | `Shift+Alt`+drag, middle-drag                | Column selection                                 |
 | `Ctrl+Shift+Alt+Arrows` / `PgUp` / `PgDn`    | Column selection by keys                         |
 
+### Syntax Highlighting and Code
+
+Code is highlighted with built-in [tree-sitter](https://tree-sitter.github.io)
+grammars: Bash, C, C#, C++, CSS, Go, HTML, Java, JavaScript, JSON, Julia, Lua,
+Markdown, MATLAB, Octave, PowerShell, Python, Rust, SQL, TOML, TypeScript
+(and TSX), XML and YAML. The language follows the file name (or a `#!` line);
+`.m` files are MATLAB unless they look like Octave. The status line shows it.
+
+- The window opens at once with plain text; the highlights follow within
+  milliseconds. Large files are highlighted around the view first, then
+  completely in the background. Files above `syntax.maxFileMiB` (32 MiB)
+  stay plain text, also when an edit grows them past it.
+- Markdown highlights its inline elements, fenced code blocks (by the info
+  string, for example ` ```python `), YAML front matter and HTML blocks; HTML
+  highlights `<script>` and `<style>`. Comments, auto-closing pairs and
+  brackets follow the embedded language.
+
+| Keys                                  | Action                                          |
+| ------------------------------------- | ----------------------------------------------- |
+| `Ctrl+K M`                            | Change Language Mode (or Plain Text)            |
+| `Ctrl+/`                              | Toggle Line Comment                             |
+| `Shift+Alt+A`                         | Toggle Block Comment                            |
+| `Ctrl+Shift+\`                        | Go to the matching bracket                      |
+| `Shift+Alt+Right` / `Shift+Alt+Left`  | Expand / shrink the selection by syntax nodes   |
+| `Ctrl+Shift+O`                        | Go to a symbol (functions, classes, headings)   |
+
+Brackets, quotes and backticks close automatically (and are stepped over),
+`Backspace` in an empty pair deletes both, a selection is wrapped when an
+opening bracket or quote is typed, and `Enter` after an opening bracket (or a
+Python or YAML `:`) indents the new line. The bracket pair at the caret is
+marked.
+
 ### Command Palette
 
 Commands are grouped in families: `Application:`, `File:`, `Edit:`,
@@ -149,6 +181,9 @@ editor:
   multiCursorLimit: 10000 # most selections, 1 to 1,000,000
 search:
   replaceAllMaxMiB: 512   # memory for one Replace All [MiB], 1 to 4096
+syntax:
+  maxFileMiB: 32          # larger files are not highlighted, 1 to 1024
+  injections: true        # embedded languages (Markdown, HTML)
 ```
 
 ## Features
@@ -203,7 +238,7 @@ cargo bench -p rte_render                             # Full-frame render cost (
 cargo bench -p rte_edit                               # Worst-case caret movement latency
 cargo run --release -p rte_app -- <file>              # Run the editor
 cargo xtask bench-startup                             # Startup benchmark (gate: p95 < 100 ms)
-cargo xtask bench-perf                                # Performance Benchmark (Perfromance.md)
+cargo xtask bench-perf                                # Performance Benchmark (Performance.md)
 cargo xtask bench-perf --short                        # Short Benchmark: release-notes table
 cargo xtask package                                   # Release ZIP under target/package
 ```
@@ -221,7 +256,7 @@ Run the script directly to refresh (`-Force`) or to fetch without building.
 2. In `CHANGELOG.md`, move the `## [Unreleased]` entries under a new
    `## [X.Y.Z] - YYYY-MM-DD` section and keep an empty `## [Unreleased]` above it.
    For performance results, put the Short Benchmark table under
-   `### Performance` (see `Perfromance.md`: copied from the version's full
+   `### Performance` (see `Performance.md`: copied from the version's full
    results, or from `cargo xtask bench-perf --short` when there are none).
 3. Check locally: `.\.github\scripts\Resolve-Version.ps1`.
 4. Commit, then push an annotated tag: `git tag -a vX.Y.Z -m "X.Y.Z"` and
@@ -237,12 +272,12 @@ uploaded as a workflow artifact and nothing is published.
 
 ### Documentation
 
-[docs/src/index.md](docs/src/index.md) defines the sections and page hierarchy.
+[docs/src/SUMMARY.md](docs/src/SUMMARY.md) defines the sections and page hierarchy.
 Page content is separate, starting with
 [docs/src/introduction.md](docs/src/introduction.md).
 
-Build or preview through the script, which generates mdBook's required
-navigation file automatically:
+Build or preview through the script, which reads `SUMMARY.md` directly and
+regenerates screenshots for the book:
 
 ```powershell
 .\tools\Build-Docs.ps1
