@@ -273,7 +273,7 @@ pub static COMMANDS: &[CommandDef] = &[
     command(
         "workbench.action.quit",
         "Application: Quit",
-        &[alt(VK_F4)],
+        &[alt(VK_F4), ctrl_shift(VK_W)],
         false,
         Action::Quit,
     ),
@@ -709,6 +709,24 @@ pub static EDITING_KEYS: &[(&str, &str)] = &[
 #[cfg(test)]
 pub fn by_id(id: &str) -> Option<&'static CommandDef> {
     COMMANDS.iter().find(|c| c.id == id)
+}
+
+/// Commands that work without an open file (the empty state).
+pub fn works_without_file(action: Action) -> bool {
+    matches!(
+        action,
+        Action::ShowCommands
+            | Action::ShowFavorites
+            | Action::About
+            | Action::KeyboardShortcuts
+            | Action::Documentation
+            | Action::Quit
+            | Action::ZoomIn
+            | Action::ZoomOut
+            | Action::ZoomReset
+            | Action::ToggleReadOnly
+            | Action::ToggleSyntax
+    )
 }
 
 /// Registry index of the command `id`.

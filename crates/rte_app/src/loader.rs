@@ -2,8 +2,9 @@
 
 use std::fs::File;
 use std::io::{self, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -50,6 +51,33 @@ pub enum LoadEvent {
     },
     /// Reading failed; `snapshot` holds what was read before the error.
     Failed { snapshot: Snapshot, error: String },
+    /// Nothing was read: the path is a folder, or (when missing files are
+    /// not created) does not exist. Sent before any other event.
+    Rejected(String),
+}
+
+/// A running load: its events, and a stop flag the loader checks between
+/// blocks and before publishing. Dropping it stops the loader.
+pub struct Load {
+    pub events: Receiver<LoadEvent>,
+    stop: Arc<AtomicBool>,
+}
+
+impl Load {
+    /// Events from a loader without a stop flag of its own (tests).
+    #[cfg(test)]
+    pub fn new(events: Receiver<LoadEvent>) -> Load {
+        Load {
+            events,
+            stop: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+impl Drop for Load {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
 }
 
 /// Calls the wake function when dropped, also while unwinding from a panic.
@@ -66,27 +94,49 @@ pub type OnDone = Box<dyn FnOnce(&Snapshot) + Send>;
 
 /// Starts loading `path` on its own thread. `wake` runs after every event and
 /// once more when the thread ends, so the receiver also notices a loader that
-/// stopped without a final event (its sender is disconnected by then).
+/// stopped without a final event (its sender is disconnected by then). A
+/// missing file is a new, empty document when `create_missing`, otherwise
+/// [`LoadEvent::Rejected`].
 pub fn spawn(
     path: PathBuf,
     wake: impl Fn() + Clone + Send + 'static,
     on_done: Option<OnDone>,
-) -> Receiver<LoadEvent> {
+    create_missing: bool,
+) -> Load {
     let (tx, rx) = mpsc::channel();
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = stop.clone();
     thread::spawn(move || {
         let _final_wake = WakeOnDrop(wake.clone());
-        load(path, tx, wake, on_done);
+        load_until(path, tx, wake, on_done, create_missing, &flag);
     });
-    rx
+    Load { events: rx, stop }
 }
 
 /// Loads `path`, sending events to `tx` and calling `wake` after each send.
+#[cfg(test)]
 pub fn load(path: PathBuf, tx: Sender<LoadEvent>, wake: impl Fn(), on_done: Option<OnDone>) {
+    load_until(path, tx, wake, on_done, true, &AtomicBool::new(false));
+}
+
+/// [`load`] until `stop` is set: then no further block is read and nothing
+/// more is published (an event already being sent may still arrive).
+fn load_until(
+    path: PathBuf,
+    tx: Sender<LoadEvent>,
+    wake: impl Fn(),
+    on_done: Option<OnDone>,
+    create_missing: bool,
+    stop: &AtomicBool,
+) {
+    let stopped = || stop.load(Ordering::Relaxed);
     let send = |event| {
-        let _ = tx.send(event);
-        wake();
+        if !stopped() {
+            let _ = tx.send(event);
+            wake();
+        }
     };
-    match read(&path, &send, on_done) {
+    match read(&path, &send, on_done, create_missing, &stopped) {
         Ok(()) => {}
         Err((snapshot, error)) => send(LoadEvent::Failed { snapshot, error }),
     }
@@ -96,9 +146,23 @@ fn read(
     path: &PathBuf,
     send: &impl Fn(LoadEvent),
     on_done: Option<OnDone>,
+    create_missing: bool,
+    stopped: &impl Fn() -> bool,
 ) -> Result<(), (Snapshot, String)> {
     let mut file = match File::open(path) {
         Ok(file) => file,
+        // Windows reports a folder as not found or access denied.
+        Err(_) if path.is_dir() => {
+            send(LoadEvent::Rejected("Folders cannot be opened".to_owned()));
+            return Ok(());
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound && !create_missing => {
+            send(LoadEvent::Rejected(format!(
+                "{} was not found",
+                display_name(path)
+            )));
+            return Ok(());
+        }
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             send(LoadEvent::Done {
                 snapshot: Snapshot::empty(),
@@ -116,7 +180,12 @@ fn read(
         }
         Err(e) => return Err((Snapshot::empty(), e.to_string())),
     };
-    let total = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let meta = file.metadata().ok();
+    if meta.as_ref().is_some_and(|m| m.is_dir()) {
+        send(LoadEvent::Rejected("Folders cannot be opened".to_owned()));
+        return Ok(());
+    }
+    let total = meta.map_or(0, |m| m.len());
     let stamp = files::stamp_of(&file).ok();
     let mut hasher = (total <= HASH_LIMIT).then(Xxh3::new);
     let mut builder = TreeBuilder::new();
@@ -126,6 +195,9 @@ fn read(
     let mut last_publish: Option<Instant> = None;
     let mut first = true;
     loop {
+        if stopped() {
+            return Ok(());
+        }
         // Sized by what remains (a small probe at the expected end, in case the file grew).
         let standard = if first { FIRST_BLOCK } else { BLOCK };
         let remaining = usize::try_from(total.saturating_sub(loaded)).unwrap_or(usize::MAX);
@@ -166,6 +238,9 @@ fn read(
             None => builder.push_block(Arc::from(body)),
         }
         let more = n == size;
+        if stopped() {
+            return Ok(());
+        }
         if more && last_publish.is_none_or(|t| t.elapsed() >= PUBLISH_INTERVAL) {
             send(LoadEvent::Progress {
                 snapshot: builder.snapshot(),
@@ -203,6 +278,10 @@ fn read(
         // A file that changed size while loading keeps no hash; its stamp differs anyway.
         hash: hasher.filter(|_| loaded == stamp.size).map(|h| h.digest()),
     });
+    // A stopped load starts no syntax work and publishes nothing.
+    if stopped() {
+        return Ok(());
+    }
     if let Some(on_done) = on_done {
         on_done(&snapshot);
     }
@@ -219,6 +298,14 @@ fn read(
         read_ms: rte_platform::ms_since_process_start(),
     });
     Ok(())
+}
+
+/// File name of `path` for messages.
+pub fn display_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
 }
 
 /// Reads until `buf` is full or the file ends; returns the bytes read.
@@ -333,6 +420,81 @@ mod tests {
     }
 
     #[test]
+    fn folders_and_missing_drops_are_rejected_before_any_event() {
+        let run = |path: PathBuf, create_missing: bool| {
+            let (tx, rx) = mpsc::channel();
+            let hook_ran = Arc::new(AtomicBool::new(false));
+            let flag = hook_ran.clone();
+            let hook: OnDone = Box::new(move |_| flag.store(true, Ordering::SeqCst));
+            load_until(
+                path,
+                tx,
+                || {},
+                Some(hook),
+                create_missing,
+                &AtomicBool::new(false),
+            );
+            (
+                rx.try_iter().collect::<Vec<_>>(),
+                hook_ran.load(Ordering::SeqCst),
+            )
+        };
+        let (events, hook) = run(std::env::temp_dir(), true);
+        assert!(matches!(&events[..], [LoadEvent::Rejected(m)] if m.contains("Folders")));
+        assert!(!hook);
+        let missing = PathBuf::from("Z:\\definitely\\missing\\file.txt");
+        let (events, _) = run(missing.clone(), false);
+        assert!(matches!(&events[..], [LoadEvent::Rejected(m)] if m.contains("file.txt")));
+        let (events, _) = run(missing, true);
+        assert!(matches!(&events[..], [LoadEvent::Done { .. }]));
+    }
+
+    #[test]
+    fn a_stopped_load_publishes_nothing_more_and_runs_no_hook() {
+        let path = std::env::temp_dir().join(format!("rte_loader_{}_stop", std::process::id()));
+        let bytes = vec![b'x'; FIRST_BLOCK + BLOCK + 10];
+        std::fs::write(&path, &bytes).unwrap();
+        for stop_at in [0usize, 1] {
+            let (tx, rx) = mpsc::channel();
+            let stop = Arc::new(AtomicBool::new(stop_at == 0));
+            let hook_ran = Arc::new(AtomicBool::new(false));
+            let flag = hook_ran.clone();
+            let hook: OnDone = Box::new(move |_| flag.store(true, Ordering::SeqCst));
+            // Stopped before the start, or right after the first published prefix.
+            let sent = std::cell::Cell::new(0);
+            let wake = || {
+                sent.set(sent.get() + 1);
+                if sent.get() == stop_at {
+                    stop.store(true, Ordering::SeqCst);
+                }
+            };
+            load_until(path.clone(), tx, wake, Some(hook), true, &stop);
+            let events: Vec<_> = rx.try_iter().collect();
+            assert_eq!(events.len(), stop_at, "stopped at {stop_at}");
+            assert!(
+                events
+                    .iter()
+                    .all(|e| matches!(e, LoadEvent::Progress { .. }))
+            );
+            assert!(!hook_ran.load(Ordering::SeqCst), "stopped at {stop_at}");
+        }
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn dropping_a_load_stops_its_loader() {
+        let path = std::env::temp_dir().join(format!("rte_loader_{}_drop", std::process::id()));
+        std::fs::write(&path, vec![b'y'; FIRST_BLOCK + 10]).unwrap();
+        let load = spawn(path.clone(), || {}, None, true);
+        assert!(!load.stop.load(Ordering::SeqCst));
+        let stop = load.stop.clone();
+        drop(load);
+        assert!(stop.load(Ordering::SeqCst));
+        thread::sleep(Duration::from_millis(50));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn missing_file_is_a_new_empty_document() {
         let (tx, rx) = mpsc::channel();
         load(
@@ -383,8 +545,9 @@ mod tests {
                 counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             },
             None,
+            true,
         );
-        let events: Vec<_> = rx.iter().collect();
+        let events: Vec<_> = rx.events.iter().collect();
         assert!(matches!(events.last(), Some(LoadEvent::Done { .. })));
         // One wake for the event, one when the thread ends (just after the channel closes).
         let deadline = Instant::now() + Duration::from_secs(5);

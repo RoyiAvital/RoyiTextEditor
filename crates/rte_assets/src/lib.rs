@@ -9,3 +9,9 @@ pub static DEFAULT_FONT: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../assets/fonts/JetBrainsMono/JetBrainsMono-Regular.ttf"
 ));
+
+/// Bold face for emphasized title-strip text.
+pub static BOLD_FONT: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../assets/fonts/JetBrainsMono/JetBrainsMono-Bold.ttf"
+));

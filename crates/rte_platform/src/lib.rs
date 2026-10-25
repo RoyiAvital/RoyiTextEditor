@@ -43,11 +43,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     RegisterClassExW, SM_CXDOUBLECLK, SM_CXICON, SM_CXPADDEDBORDER, SM_CXSIZEFRAME, SM_CXSMICON,
     SM_CYDOUBLECLK, SM_CYICON, SM_CYSIZEFRAME, SM_CYSMICON, SW_SHOW, SW_SHOWNORMAL,
     SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetCursor,
-    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, WM_APP,
-    WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND,
-    WM_GETMINMAXINFO, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
-    WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST,
-    WM_PAINT, WM_SETCURSOR, WM_SIZE, WM_SYSKEYDOWN, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
+    TranslateMessage, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
+    WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+    WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCACTIVATE, WM_NCCALCSIZE,
+    WM_NCHITTEST, WM_PAINT, WM_SETCURSOR, WM_SIZE, WM_SYSKEYDOWN, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 
 const WM_WAKE: u32 = WM_APP + 1;
@@ -62,6 +62,10 @@ const APP_ICON: u16 = 1;
 const MK_LBUTTON: usize = 0x0001;
 /// `wParam` flag of mouse messages: middle button down.
 const MK_MBUTTON: usize = 0x0010;
+/// Files dropped from Explorer; `wParam` is the `HDROP`.
+const WM_DROPFILES: u32 = 0x0233;
+/// Extended window style accepting `WM_DROPFILES` (what `DragAcceptFiles` sets).
+const WS_EX_ACCEPTFILES: u32 = 0x0000_0010;
 
 /// DPI of the primary monitor. Per-monitor v2 awareness comes from the
 /// application manifest.
@@ -137,7 +141,7 @@ pub struct Key {
     pub alt: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     /// The first frame is on screen and input is accepted.
     Shown,
@@ -175,8 +179,18 @@ pub enum Event {
     /// The left button was released or the capture was lost.
     MouseUp,
     CloseRequested,
+    /// Files dropped on the window (the drop is already released), or why
+    /// the dropped file names could not be read.
+    FilesDropped(Result<Dropped, String>),
     /// Posted by a [`Waker`] from another thread.
     Wake,
+}
+
+/// The files of a drop: the first one and how many more came with it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Dropped {
+    pub path: std::path::PathBuf,
+    pub others: u32,
 }
 
 /// Window state visible to the application, plus deferred requests.
@@ -503,7 +517,7 @@ impl Window {
             };
             RegisterClassExW(&wc);
             let hwnd = CreateWindowExW(
-                0,
+                WS_EX_ACCEPTFILES,
                 class.as_ptr(),
                 title.as_ptr(),
                 WS_OVERLAPPEDWINDOW,
@@ -719,6 +733,70 @@ fn shell_open(hwnd: HWND, url: &str) {
             );
         }
     }
+}
+
+/// `DragQueryFileW` and `DragFinish`.
+#[derive(Clone, Copy)]
+struct DropApi {
+    query: unsafe extern "system" fn(*mut c_void, u32, *mut u16, u32) -> u32,
+    finish: unsafe extern "system" fn(*mut c_void),
+}
+
+/// The drop functions of shell32, which is loaded on the first drop (not at
+/// startup); `None` when they cannot be found.
+fn drop_api() -> Option<DropApi> {
+    static API: std::sync::OnceLock<Option<DropApi>> = std::sync::OnceLock::new();
+    *API.get_or_init(|| {
+        let query = library_proc("shell32.dll", c"DragQueryFileW")?;
+        let finish = library_proc("shell32.dll", c"DragFinish")?;
+        // SAFETY: both come from GetProcAddress for functions with these
+        // documented signatures.
+        unsafe {
+            Some(DropApi {
+                query: std::mem::transmute::<
+                    unsafe extern "system" fn() -> isize,
+                    unsafe extern "system" fn(*mut c_void, u32, *mut u16, u32) -> u32,
+                >(query),
+                finish: std::mem::transmute::<
+                    unsafe extern "system" fn() -> isize,
+                    unsafe extern "system" fn(*mut c_void),
+                >(finish),
+            })
+        }
+    })
+}
+
+/// Reads the first file of the drop `hdrop` and releases the drop (exactly
+/// once when the API is available; without it the drop cannot be released).
+fn take_drop(hdrop: *mut c_void, api: Option<DropApi>) -> Result<Dropped, String> {
+    let Some(api) = api else {
+        return Err("Drag and drop is not available: shell32 could not be loaded".to_owned());
+    };
+    // SAFETY: `hdrop` is the drop handle of WM_DROPFILES, valid until
+    // `finish`; the buffer holds `len + 1` units as passed.
+    let first = unsafe {
+        let count = (api.query)(hdrop, u32::MAX, null_mut(), 0);
+        let first = if count == 0 {
+            None
+        } else {
+            let len = (api.query)(hdrop, 0, null_mut(), 0);
+            let mut buf = vec![0u16; len as usize + 1];
+            let got = (api.query)(hdrop, 0, buf.as_mut_ptr(), len + 1);
+            (got > 0).then(|| {
+                buf.truncate(got as usize);
+                (buf, count)
+            })
+        };
+        (api.finish)(hdrop);
+        first
+    };
+    let (name, count) =
+        first.ok_or_else(|| "The dropped file name could not be read".to_owned())?;
+    use std::os::windows::ffi::OsStringExt;
+    Ok(Dropped {
+        path: std::ffi::OsString::from_wide(&name).into(),
+        others: count - 1,
+    })
 }
 
 fn point_of(lparam: LPARAM) -> (i32, i32) {
@@ -953,6 +1031,13 @@ unsafe extern "system" fn window_proc(
                 }
                 0
             }
+            WM_DROPFILES => {
+                // Released here, before the application sees the paths.
+                let dropped = take_drop(wparam as *mut c_void, drop_api());
+                SetForegroundWindow(hwnd);
+                dispatch(hwnd, Event::FilesDropped(dropped));
+                0
+            }
             WM_DESTROY => {
                 PostQuitMessage(0);
                 0
@@ -1066,5 +1151,82 @@ mod tests {
         assert_eq!(ctx.posted_key().map(|k| k.vk), Some(0x1B));
         ctx.post_char('é');
         assert_eq!(ctx.posted_char(), Some('é'));
+    }
+
+    /// A fake drop of two files, the first named `PATH`; counts releases.
+    mod fake_drop {
+        use super::*;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        pub static FINISHED: AtomicUsize = AtomicUsize::new(0);
+        const NAME: &str = r"C:\docs\a.txt";
+
+        pub unsafe extern "system" fn query(
+            _: *mut c_void,
+            i: u32,
+            buf: *mut u16,
+            cch: u32,
+        ) -> u32 {
+            let name: Vec<u16> = NAME.encode_utf16().collect();
+            match (i, buf.is_null()) {
+                (u32::MAX, _) => 2,
+                (_, true) => name.len() as u32,
+                _ => {
+                    let n = name.len().min(cch as usize - 1);
+                    // SAFETY: the caller passes a buffer of `cch` units.
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(name.as_ptr(), buf, n);
+                        *buf.add(n) = 0;
+                    }
+                    n as u32
+                }
+            }
+        }
+
+        pub unsafe extern "system" fn unreadable(
+            _: *mut c_void,
+            i: u32,
+            _: *mut u16,
+            _: u32,
+        ) -> u32 {
+            u32::from(i == u32::MAX)
+        }
+
+        pub unsafe extern "system" fn finish(_: *mut c_void) {
+            FINISHED.fetch_add(1, Ordering::SeqCst);
+        }
+
+        pub fn finished() -> usize {
+            FINISHED.load(Ordering::SeqCst)
+        }
+
+        pub const PATH: &str = NAME;
+    }
+
+    #[test]
+    fn drops_name_their_first_file_and_are_released_once() {
+        let before = fake_drop::finished();
+        let api = DropApi {
+            query: fake_drop::query,
+            finish: fake_drop::finish,
+        };
+        let dropped = take_drop(null_mut(), Some(api)).unwrap();
+        assert_eq!(dropped.path, std::path::PathBuf::from(fake_drop::PATH));
+        assert_eq!(dropped.others, 1);
+        assert_eq!(fake_drop::finished(), before + 1);
+
+        let before = fake_drop::finished();
+        let unreadable = DropApi {
+            query: fake_drop::unreadable,
+            finish: fake_drop::finish,
+        };
+        assert!(take_drop(null_mut(), Some(unreadable)).is_err());
+        assert_eq!(
+            fake_drop::finished(),
+            before + 1,
+            "released after a failure"
+        );
+
+        assert!(take_drop(null_mut(), None).unwrap_err().contains("shell32"));
     }
 }

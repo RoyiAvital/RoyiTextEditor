@@ -20,7 +20,8 @@ and the requirements and competition list in [DEVELOPMENT.md](../DEVELOPMENT.md)
 
 ### Included
 
-- One file per process. No tabs, projects, plug-ins or LSP.
+- One session per process, one file per session (see Principles, Single
+  session). No tabs, projects, plug-ins or LSP.
 - Main use: launched by a file manager, in edit or read-only mode. No history
   or sessions.
 - No menu. Every action is a command: Command Palette or keyboard shortcut.
@@ -76,6 +77,10 @@ and the requirements and competition list in [DEVELOPMENT.md](../DEVELOPMENT.md)
    stays bounded by explicit limits (`syntax.maxFileMiB`, the Replace All
    cap, the cursor limit), and startup memory is not traded. Highlighting
    off (`--syntax none`) restores the memory footprint of 0.3.0.
+8. **Single session.** Each application session (process) handles a single
+   file. It never launches other sessions, never closes them and is not
+   aware of them in any way: no spawning, no inter-process messages, no
+   discovery of other instances (the owner's design choice, 2026_10_25).
 
 ### Overview
 
@@ -182,9 +187,12 @@ struct Summary { bytes: u64, newlines: u64 }
   `LoadProgress { snapshot, bytes_loaded, total }`. The final snapshot makes
   the document editable. Prefix snapshots are complete trees over the bytes
   read so far; leaves never reference unread bytes.
-- **Load cancellation.** The loader checks its `CancelToken` between blocks.
-  Closing the window or a read error cancels it; a read error keeps the
-  loaded prefix read-only and reports the error. Nothing is ever written.
+- **Load cancellation.** The loader checks a stop flag before each block
+  read, after it, and before publishing the final snapshot (and the early
+  syntax hook). Closing or replacing the file, or closing the window,
+  stops it; an event already being sent is dropped with its receiver. A
+  read error keeps the loaded prefix read-only and reports the error.
+  Nothing is ever written.
 - **Edit.** An edit inside one leaf copies only the root-to-leaf path. Other
   edits use persistent B-tree split and concatenate (O(log² n)). Everything
   else is shared with older snapshots. Adjacent small pieces (≤ 4 KiB total)
@@ -522,8 +530,14 @@ measurably hurts cold start, move each grammar to a lazily loaded DLL.
 - **Clipboard.** `CF_UNICODETEXT` plus the private multi-selection format.
 - **Present.** `BitBlt` from a DIB section.
 - **Files.** Read via `CreateFileW`. Saving: see [Saving](#saving).
+- **Drag and drop.** The window style `WS_EX_ACCEPTFILES` makes Explorer
+  send `WM_DROPFILES`; `DragQueryFileW` / `DragFinish` (shell32, loaded on
+  the first drop) read the first path and release the drop before the
+  application sees it. No OLE (`RegisterDragDrop` would need COM at
+  startup). Drops onto an elevated window are blocked by Windows (UIPI).
 - **Lazy DLLs.** Startup imports only `kernel32`, `user32`, `gdi32`, `imm32`,
-  `dwmapi`. File dialogs (COM) and other rare APIs load via `LoadLibraryW` on first use.
+  `dwmapi`. File dialogs (COM), drops (shell32) and other rare APIs load via
+  `LoadLibraryW` on first use.
 
 ### App (`rte_app`)
 
@@ -533,8 +547,9 @@ measurably hurts cold start, move each grammar to a lazily loaded DLL.
   so bindings are familiar. Keymap and palette both dispatch through one
   `Editor::perform(Action)`. Bindings match modifiers exactly; keys that are
   not commands (movement, typing) stay in the editor, and unbound `Alt` keys
-  keep their system behavior. `Application: Quit` (`Alt+F4`) and `File: Close`
-  (`Ctrl+W`) both close the instance: one document per process. `Ctrl+Q` is
+  keep their system behavior. `Application: Quit` (`Alt+F4`,
+  `Ctrl+Shift+W`) ends the session; `File: Close` (`Ctrl+W`, `Ctrl+F4`)
+  closes the file and keeps the session in the empty state. `Ctrl+Q` is
   not bound (VS Code quits every window with it).
 - **Keymap.** Two-key chords (`Ctrl+K Ctrl+C`) with a pending-chord hint.
   `when` uses a fixed set of contexts (editor, palette, find widget, multi-cursor).
@@ -571,21 +586,24 @@ measurably hurts cold start, move each grammar to a lazily loaded DLL.
 
   | Lock         | Owner                         | Set                         | Cleared                  |
   | ------------ | ----------------------------- | --------------------------- | ------------------------ |
-  | `user`       | `--read-only`, toggle command | CLI or command              | Toggle command only      |
+  | `no_file`    | File lifecycle                | Empty state                 | A file opens             |
+  | `user`       | `--read-only`, toggle command | CLI or command; each file   | Toggle command only      |
   | `loading`    | Loader                        | Load start                  | Final snapshot published |
-  | `encoding`   | Decoder                       | Malformed UTF-16            | Never (process lifetime) |
-  | `load_error` | Loader                        | Read error                  | Never (process lifetime) |
+  | `encoding`   | Decoder                       | Malformed UTF-16            | Never (for the file)     |
+  | `load_error` | Loader                        | Read error                  | Never (for the file)     |
 
   Commands with `mutates = true` are refused (status-line notice) and shown
   disabled in the palette while any lock is set. Save is refused
-  under `encoding` and `load_error`. Read-only command:
+  under `no_file`, `encoding` and `load_error`. In the empty state only the
+  palette, About, Keyboard Shortcuts, Documentation, Quit, zoom and the
+  read-only and syntax toggles run. Read-only command:
   `workbench.action.files.toggleActiveEditorReadonlyInSession` (VS Code ID),
   status line shows `RO` and the reason.
 - **CLI.** `RoyiTextEditor.exe [--read-only] [--syntax <id>] [--trace-startup] [<path>]`.
 - **Configuration.** One file, `RoyiTextEditor.yaml`, next to the executable:
   settings plus a `keybindings:` section (VS Code semantics, including
-  `-command` removals). Read once at startup; changes apply to new instances.
-  **The application never writes it**, so multiple instances cannot conflict.
+  `-command` removals). Read once at startup; changes apply to sessions
+  started later. **The application never writes it.**
   Errors are reported on the status line and never block startup.
 - **Window placement** comes from the configuration (`window:` size, position,
   maximized or centered). No automatic placement memory.
@@ -594,12 +612,27 @@ measurably hurts cold start, move each grammar to a lazily loaded DLL.
   YAML 1.2 keeps `no`/`off` as strings. Only plain maps, lists and scalars are
   accepted; anchors, aliases, tags and multiple documents are rejected.
   Unknown keys are reported.
-- **Process model.** One document per process lifetime; no in-place reload of
-  another file. Open / New / Quick Open spawn a new process. When the current
-  document is untitled and unmodified, it exits after the spawn.
-  `Ctrl+,` opens `RoyiTextEditor.yaml` in a new instance.
-- **Dirty close.** In-window prompt strip: Save / Don't Save / Cancel; for an
-  untitled document: Discard / Cancel.
+- **Process model.** One session per process, handling a single file
+  (Principles, Single session). A session never launches, closes or
+  communicates with other sessions. Commands that would need another
+  session (New Window, Open in a new instance, opening the configuration
+  file) are not provided.
+- **File lifecycle** (`editor/lifecycle.rs`). Without a file the session is
+  in the **empty state**: a centered `Drop a file here to open it`, no
+  gutter or caret, the `no_file` lock. A file comes from the command line
+  or is dropped on the window. A dropped file loads while the current state
+  stays; it replaces it when the loader's first event confirms a file
+  (folders and missing paths are refused before anything changes) and the
+  current file still has no unsaved changes, no save running and no prompt.
+  Of several dropped files the first opens. `File: Close` returns to the
+  empty state. Replacing or closing resets every per-file state (text,
+  history, selections, language, syntax thread, search box, caches);
+  `--read-only` applies to every file, `--syntax` to the command-line file.
+  Search generations only grow across files, so a new file's requests are
+  never older than a cancellation; the count checkpoints holding the old
+  text are freed.
+- **Dirty close.** In-window prompt strip: Save / Don't Save / Cancel, then
+  the empty state (`File: Close`) or exit (`Application: Quit`).
 - **Crash recovery** (best effort):
   - After each transaction the UI publishes the current `Snapshot` (an `Arc`
     clone) into a recovery slot.
@@ -607,7 +640,7 @@ measurably hurts cold start, move each grammar to a lazily loaded DLL.
     `UserSettings/Recovery/<name>.<pid>.<timestamp>.recovery` plus a `.meta`
     file (original path, encoding). Unique names; no shared files.
   - When a file is opened, recovery entries for its path are checked after the
-    first frame; an in-window strip offers Open (new instance, untitled) or
+    first frame; an in-window strip offers Recover (in this session) or
     Discard.
   - Limits: no coverage for process kill, power loss or allocation-failure
     aborts. Save failures keep their own recovery copies (see [Saving](#saving)).
@@ -671,11 +704,11 @@ tests can inject each outcome.
   size and timestamp are not detected.
 - **New files** are created only from the command line: a path that does not
   exist opens an empty document, and its first save creates the file. There
-  is no Save As. A document started without a path is an untitled scratch
-  document: editable, never saved (Save shows a notice), marked as at risk.
+  is no Save As. Without a path the session is in the empty state; there is
+  no untitled document.
 - **Close during a save:** input is disabled and "Saving…" is shown until the
-  save finishes. Clean afterwards → exit. Failed or dirty → the dirty-close
-  prompt.
+  save finishes. Clean afterwards → exit (Quit) or the empty state (Close).
+  Failed or dirty → the dirty-close prompt.
 - **External changes** are also checked on `WM_ACTIVATE` (identity, size and
   time; no hashing on activation).
 
@@ -745,10 +778,10 @@ General:
 | -------------------- | ---------------------- | ----------------------------------------- |
 | `Ctrl+Shift+P`, `F1` | Show Command Palette   | Kept                                      |
 | `Ctrl+P`             | Quick Open, Go to File | Adapted: recent and favorite commands     |
-| `Ctrl+Shift+N`       | New window/instance    | Adapted: new process                      |
-| `Ctrl+Shift+W`       | Close window/instance  | Kept                                      |
-| `Ctrl+,`             | User Settings          | Adapted: opens config file                |
-| `Ctrl+K Ctrl+S`      | Keyboard Shortcuts     | Adapted: opens config file                |
+| `Ctrl+Shift+N`       | New window/instance    | Dropped: single session                   |
+| `Ctrl+Shift+W`       | Close window/instance  | Adapted: quits this session               |
+| `Ctrl+,`             | User Settings          | Dropped: single session                   |
+| `Ctrl+K Ctrl+S`      | Keyboard Shortcuts     | Adapted: Keyboard Shortcuts panel         |
 | `Ctrl+K M`           | Change Language Mode   | Kept; also `--syntax <id>`                |
 
 Basic Editing:
@@ -823,7 +856,7 @@ Multi-cursor and Selection:
 Implicit essentials (not in the sheet): typing, `Backspace`/`Delete` and their
 `Ctrl` word variants, arrows / `Ctrl+Arrows` / `PgUp` / `PgDn` with `Shift`,
 `Ctrl+A`, `Ctrl+Z`, `Ctrl+Y` / `Ctrl+Shift+Z`, `Ctrl+V`, `Ctrl+S`,
-`Ctrl+O`, `Ctrl+N` (untitled scratch instance), `Ctrl+W` / `Ctrl+F4`, `Tab` / `Shift+Tab`,
+`Ctrl+O` (later; opens into this session), `Ctrl+W` / `Ctrl+F4`, `Tab` / `Shift+Tab`,
 `Esc` (collapse carets, close overlay), `Insert`, `F11`, `Ctrl+=` / `Ctrl+-` (zoom),
 Toggle Read-Only (palette; no default key, as VS Code).
 
@@ -842,7 +875,7 @@ Toggle Read-Only (palette; no default key, as VS Code).
 | Codegen   | `-C target-cpu=x86-64-v3` (AVX2, BMI2, FMA); no older CPUs          |
 | Fonts     | JetBrains Mono (default), Cascadia Mono, Fira Mono, Iosevka, Lilex  |
 | Config    | One `RoyiTextEditor.yaml` next to the executable; never written     |
-| Process   | One document per process lifetime; Open spawns a new process        |
+| Process   | Single session per process; never launches or knows other sessions |
 | Caret     | Steady in v1; blinking later                                        |
 | Scrolling | Mode setting; v1 ships the immediate mode only                      |
 | Syntax    | Injections in v1, on: HTML script/style, Markdown inline/fences     |
@@ -860,7 +893,7 @@ Toggle Read-Only (palette; no default key, as VS Code).
 | Read-only | `--read-only` and toggle command; central edit-permission locks     |
 | Regex     | Automata engine; `fancy-regex` for lookaround and backreferences    |
 | Saving    | `ReplaceFileW` with backup; verified cleanup; no blind fallback     |
-| New files | Only from a command-line path; no Save As; untitled is never saved  |
+| New files | Only from a command-line path; no Save As; no untitled document     |
 | Recovery  | Best-effort panic snapshots under `UserSettings/Recovery/`          |
 | Languages | Initial list above, including MATLAB, Octave and Julia              |
 | Trade-off | Faster rendering and highlighting over a smaller memory footprint   |
@@ -1977,3 +2010,20 @@ cargo test -p rte_app -p rte_view -p rte_render -p rte_platform
   and a native interactive run were not run.
 - An offscreen render at zoom 6 shows the palette at the zoom-0 size with a
   query selection; the probe test was removed afterwards.
+
+### 2026_10_25 - Claude Opus 5.5
+
+- Role: Reviewer
+- Activity: Review
+- Agent: GitHub Copilot
+- Model: Claude Opus 5.5
+- Effort: High
+- Context Window: 872K
+- Outcome: Added the owner's single-session guideline as Principle 8: a
+  session handles one file and never launches, closes or is aware of other
+  sessions. Aligned the scope, process model, configuration, crash recovery,
+  command coverage (`Ctrl+Shift+N` and `Ctrl+,` dropped, `Ctrl+Shift+W` quits
+  this session, `Ctrl+K Ctrl+S` shows the shortcuts panel, `Ctrl+N` removed)
+  and the Process decision. Open: the palette state re-read that keeps
+  other instances' changes, and DataSafety001's new-instance recovery and
+  live-journal detection, must be reconciled with the principle.

@@ -57,6 +57,38 @@ the UI thread, reject stale asynchronous results, and wake the window only
 when there is new work to present. These boundaries are also described in the
 [architecture plan](https://github.com/RoyiAvital/RoyiTextEditor/blob/main/Plan/Architecture.md).
 
+## One File per Session
+
+A session (process) handles one file at a time and never starts, closes or
+contacts another session. `editor/lifecycle.rs` owns the transitions:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Empty: no file argument
+    [*] --> Open: file argument
+    Empty --> Pending: file dropped
+    Open --> Pending: file dropped, no unsaved changes
+    Pending --> Open: loader confirms a file
+    Pending --> Empty: folder or missing (from the empty state)
+    Pending --> Open: folder, or unsaved changes meanwhile (old file kept)
+    Open --> Empty: Ctrl+W (after Save or Don't Save)
+    Empty --> [*]: Alt+F4
+    Open --> [*]: Alt+F4 (after Save or Don't Save)
+```
+
+- A dropped file loads while the current file stays; it replaces it only
+  when its loader's first answer is a file and the current file still has
+  no unsaved changes.
+- Replacing or closing a file resets every per-file state: the loader is
+  stopped (it checks a stop flag between blocks and before publishing), the
+  syntax thread is dropped (its trees are freed on that thread) and the
+  search box is closed. Search generations only grow, and the count
+  checkpoints holding the old text are freed.
+- The empty state is the `no_file` edit lock: edits and saves are refused,
+  and only the empty-state commands run (`works_without_file`).
+- Drops arrive as `WM_DROPFILES` (the `WS_EX_ACCEPTFILES` window style);
+  `shell32` is loaded on the first drop, so startup is unchanged.
+
 ## Syntax Threads
 
 Highlighting starts while the window is still being created. The work runs

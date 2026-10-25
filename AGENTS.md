@@ -138,24 +138,28 @@ records.
 ## Runtime and Compatibility Requirements
 
 - Disabled optional features must avoid feature-specific background jobs, I/O,
-  model scans, timers, and recurring signal work unless the task explicitly
+  model scans, timers, and recurring wake-ups unless the task explicitly
   documents and justifies otherwise.
-- Qt widgets and models stay on the Qt thread. Workers receive immutable plain
-  data and return results through queued signals or equivalent safe dispatch.
+- Single session: each application session handles a single file. It never
+  launches, closes or communicates with other sessions and is not aware of
+  them in any way.
+- Editor, document and view state stay on the UI (window) thread. Workers
+  receive immutable snapshots or plain data and return results through
+  channels and a wake-up of the window.
 - Long-running work must support cancellation or stale-result rejection.
-- Preserve the public `fman` plug-in API unless a task explicitly approves a
-  compatibility break and migration path.
+- Keep the command line, the configuration file keys and the command IDs
+  compatible unless a task explicitly approves a break and a migration path.
 - Keep Windows portability: mutable state belongs under `UserSettings`, and
   changes must not intentionally write to the Windows Registry.
-- Prefer existing repository abstractions and keep upstream mergeability in
-  mind; document unavoidable fork-specific coupling.
+- Prefer existing repository abstractions.
 
 ## Test Requirements
 
 - Add focused regression tests for behavior changed by the task.
-- Match test breadth to risk: unit tests for pure logic, Qt integration tests
-  for signals/widgets/thread affinity, and end-to-end smoke tests for startup,
-  persistence, packaging, or external tools.
+- Match test breadth to risk: unit tests for pure logic, headless editor
+  integration tests (`Ctx::headless`) for input, worker replies and drawing,
+  and end-to-end smoke tests for startup, persistence, packaging, or external
+  tools.
 - State the exact focused validation commands in the final report and, when one
   exists, the task document.
 - Run the narrowest relevant test immediately after the first substantive edit,

@@ -5,7 +5,7 @@
 
 `RoyiTextEditor` is a portable, keyboard workflow focused, lightweight and performance oriented Text and Code Editor. 
 
-The _File Manager_ focuses on:
+The editor focuses on:
  - **Minimalistic** and focused UI.
  - High performance to generate **reactive** experience.
  - **Commands** through _Command Center_ / _Command Palette_.
@@ -61,7 +61,8 @@ An unknown id keeps the language of the file name and shows a notice.
 | Wheel, `Ctrl+Up` / `Ctrl+Down`                      | Scroll lines                                           |
 | `Shift`+wheel                                       | Horizontal scrolling                                   |
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0`, `Ctrl`+wheel        | Zoom in / out / reset                                  |
-| `Ctrl+W`, `Ctrl+F4`, `Alt+F4`                       | Close / quit; unsaved changes ask first                |
+| `Ctrl+W`, `Ctrl+F4`                                 | Close the file (back to the empty state)               |
+| `Alt+F4`, `Ctrl+Shift+W`                            | Quit; unsaved changes ask first                        |
 | `Ctrl+Shift+P`, `F1`                                | Command Palette: all commands, fuzzy search            |
 | `Ctrl+P`                                            | Recent and favorite commands                           |
 
@@ -69,9 +70,28 @@ Unsaved changes show `●` in the title strip. Saving replaces the file
 atomically; when another program changed the file, the editor asks before
 overwriting it.
 
-New files are created only from the command line: a path that does not exist
-opens an empty document and the first save creates it. Without a path the
-editor opens an untitled scratch document that cannot be saved (amber marker).
+### Files and Sessions
+
+Each session (window) edits one file and never starts, closes or talks to
+another session. A file comes from the command line or is dragged onto the
+window:
+
+- **No file:** started without a path, or after `Ctrl+W`, the window shows
+  the empty state, `Drop a file here to open it`. Nothing can be edited; the
+  palette, About, Keyboard Shortcuts, zoom and `Alt+F4` work.
+- **Drag and drop:** a file dropped on the empty state, or on a file without
+  unsaved changes, opens in its place. With unsaved changes (or a save
+  running) nothing opens and the status line says why. Of several files only
+  the first opens; folders are refused.
+- **Close:** `Ctrl+W` / `Ctrl+F4` close the file (asking first about unsaved
+  changes) and the window stays in the empty state; `Alt+F4` /
+  `Ctrl+Shift+W` quit.
+- **New files** are created only from the command line: a path that does not
+  exist opens an empty document and the first save creates it.
+- `--read-only` applies to every file opened in the session; `--syntax`
+  applies to the file named on the command line.
+- Windows does not deliver drops from Explorer to an editor running as
+  administrator.
 
 ### Search and Replace
 
@@ -165,7 +185,7 @@ keys, `Ctrl+A` and `Ctrl+V`.
 - `Ctrl+P` lists the last commands run from the palette, then the favorites.
 - `Application: Keyboard Shortcuts` shows all keys; `Application: About` shows
   the version and links; `Application: Documentation` opens the online
-  documentation; `Application: Quit` (`Alt+F4`) closes the editor.
+  documentation; `Application: Quit` (`Alt+F4`, `Ctrl+Shift+W`) closes the editor.
 
 Favorites and recent commands are kept in `UserSettings/Palette.json` beside
 the executable. A file the editor cannot read or does not accept is left

@@ -12,6 +12,7 @@ use rte_view::{
 };
 
 static FONT: &[u8] = rte_assets::DEFAULT_FONT;
+static BOLD_FONT: &[u8] = rte_assets::BOLD_FONT;
 
 fn main() {
     divan::main();
@@ -45,7 +46,8 @@ fn combining_marks(bencher: Bencher) {
 }
 
 fn frames(bencher: Bencher, snapshot: &Snapshot, width: u32, height: u32, px: f32) {
-    let mut renderer = Renderer::new(Cow::Borrowed(FONT), px).unwrap();
+    let mut renderer =
+        Renderer::new_with_bold(Cow::Borrowed(FONT), Cow::Borrowed(BOLD_FONT), px).unwrap();
     renderer.warm_ascii();
     let cell = renderer.cell();
     let options = Options::default();
@@ -78,6 +80,7 @@ fn frames(bencher: Bencher, snapshot: &Snapshot, width: u32, height: u32, px: f3
             selections: &[Selection::new(100, 300_000)],
             caret: CaretStyle::Bar,
             highlights: Default::default(),
+            empty: None,
         };
         view.build(&frame, &mut list);
         renderer.draw(

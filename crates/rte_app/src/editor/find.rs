@@ -1120,6 +1120,26 @@ pub(super) struct PendingOp {
 }
 
 impl Editor {
+    /// Ends the search of a closed or replaced file: the box closes and its
+    /// scope is dropped, the query and options stay. Generations only grow,
+    /// so the next file's requests are never older than a cancellation;
+    /// replies of the old text are dropped, and the count checkpoints
+    /// holding it are freed.
+    pub(super) fn reset_search(&mut self) {
+        self.close_find();
+        if let Some(f) = &mut self.find {
+            f.scope = None;
+            f.replace_open = false;
+            f.invalidate(&Snapshot::empty());
+        }
+        self.op_generation += 1;
+        self.pending_op = None;
+        if let Some(t) = &self.search {
+            t.cancel(Lane::Op, self.op_generation);
+            t.release();
+        }
+    }
+
     /// Sends an operation; `from_box` binds it to the search-box input.
     pub(super) fn send_op(&mut self, purpose: OpPurpose, query: Query, work: Work, from_box: bool) {
         self.op_generation += 1;

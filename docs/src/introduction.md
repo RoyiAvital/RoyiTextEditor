@@ -34,11 +34,32 @@ RoyiTextEditor.exe [--read-only] [--syntax <id>] [file]
 
 | Option          | Effect                                                                                     |
 | --------------- | ------------------------------------------------------------------------------------------ |
-| `--read-only`   | Open the file without allowing edits                                                       |
+| `--read-only`   | Open files without allowing edits                                                          |
 | `--syntax <id>` | Highlighting language, e.g. `json` ([ids](cli.md#syntax-ids)); `none` or `off` disables it |
 
 New files are created only from the command line: a path that does not exist
 opens an empty document and the first save creates it.
+
+## One File per Session
+
+Each window is a session that edits one file. It never starts, closes or
+talks to another session. This keeps the editor simple and fast, and fits
+its main use: opening a file from a file manager.
+
+- **Empty state.** Started without a file, or after <kbd>Ctrl</kbd>+<kbd>W</kbd>,
+  the window shows `Drop a file here to open it`. Nothing can be edited; the
+  Command Palette, About, Keyboard Shortcuts and zoom still work.
+- **Drag and drop.** Drop a file on the window to open it. It replaces the
+  current file only when that file has no unsaved changes; otherwise the
+  status line asks you to save or close it first. Only the first of several
+  dropped files opens; folders are refused.
+- **Close and quit.** <kbd>Ctrl</kbd>+<kbd>W</kbd> closes the file and keeps
+  the window; <kbd>Alt</kbd>+<kbd>F4</kbd> quits. Both ask first about
+  unsaved changes.
+
+> [!NOTE]
+> Windows does not deliver drops from Explorer to an editor running as
+> administrator.
 
 ## Keys
 
@@ -53,7 +74,8 @@ opens an empty document and the first save creates it.
 | <kbd>Ctrl</kbd>+<kbd>C</kbd> / <kbd>X</kbd> / <kbd>V</kbd>                                 | Copy / cut / paste (whole line without a selection) |
 | <kbd>Ctrl</kbd>+<kbd>S</kbd>                                                               | Save                                                |
 | <kbd>Ctrl</kbd>+<kbd>=</kbd> / <kbd>Ctrl</kbd>+<kbd>-</kbd> / <kbd>Ctrl</kbd>+<kbd>0</kbd> | Zoom in / out / reset                               |
-| <kbd>Ctrl</kbd>+<kbd>W</kbd>, <kbd>Alt</kbd>+<kbd>F4</kbd>                                 | Close; unsaved changes ask first                    |
+| <kbd>Ctrl</kbd>+<kbd>W</kbd>                                                               | Close the file (back to the empty state)            |
+| <kbd>Alt</kbd>+<kbd>F4</kbd>, <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>W</kbd>                | Quit; unsaved changes ask first                     |
 | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd>, <kbd>F1</kbd>                               | Command Palette                                     |
 | <kbd>Ctrl</kbd>+<kbd>P</kbd>                                                               | Recent and favorite commands                        |
 | <kbd>Ctrl</kbd>+<kbd>F</kbd> / <kbd>Ctrl</kbd>+<kbd>H</kbd>                                | Find / replace                                      |

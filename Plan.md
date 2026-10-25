@@ -13,3 +13,4 @@
 - [Search and Multi-Cursor](Done/SearchAndMultiCursor.md)
 - [Syntax Highlighting and Code Awareness](Done/SyntaxHighlighting.md)
 - [Syntax Performance](Done/SyntaxPerformance.md)
+- [Empty State and Drag and Drop](Done/EmptyStateAndDragDrop.md)

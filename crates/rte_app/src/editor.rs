@@ -4,6 +4,7 @@
 mod code;
 mod cursors;
 mod find;
+mod lifecycle;
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -13,7 +14,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};
 
 use rte_edit::{self as edit, Command, EditOptions, Selection, Selections};
-use rte_platform::{App, Ctx, Event, Key};
+use rte_platform::{App, Ctx, Dropped, Event, Key};
 use rte_render::{Renderer, Target};
 use rte_syntax::Lang;
 use rte_text::{Encoding, LineEnding, Snapshot};
@@ -26,10 +27,12 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::bench;
 use crate::clip;
-use crate::commands::{self, Action, COMMANDS, CommandDef, EDITING_KEYS, key_name, vk::*};
+use crate::commands::{
+    self, Action, COMMANDS, CommandDef, EDITING_KEYS, key_name, vk::*, works_without_file,
+};
 use crate::document::{Document, Locks};
 use crate::favorites::{self, FileStorage, MAX_FAVORITES, Store};
-use crate::loader::{FileInfo, LoadEvent};
+use crate::loader::{self, FileInfo, Load, LoadEvent, display_name};
 use crate::palette::{Item, Mode, Motion, Palette};
 use crate::save::{self, Baseline, FileOps, SaveOutcome, SaveRequest};
 use crate::search::SearchThread;
@@ -48,9 +51,29 @@ const WHEEL_COLUMNS: i32 = 6;
 const REVEAL_MARGIN: u64 = 4;
 /// Selections up to this size show a character count.
 const COUNT_LIMIT: u64 = 64 * 1024;
+/// Shown in the body of the empty state.
+const EMPTY_HINT: &str = "Drop a file here to open it";
 
 /// Wakes the window thread from worker threads.
 pub type Wake = Arc<dyn Fn() + Send + Sync>;
+
+/// What follows once unsaved changes are settled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Exit {
+    /// `Application: Quit` or the window close request.
+    Quit,
+    /// `File: Close`: back to the empty state.
+    CloseFile,
+}
+
+/// A dropped file loading while the current state stays: it replaces the
+/// current file only once its loader confirms it is a file.
+struct PendingOpen {
+    path: PathBuf,
+    load: Load,
+    /// Shown once the file is open.
+    notice: Option<String>,
+}
 
 enum LoadStatus {
     Loading { loaded: u64, total: u64 },
@@ -110,7 +133,8 @@ struct Panel {
 /// A question shown in the status line until answered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Prompt {
-    DirtyClose,
+    /// Unsaved changes, then what to do once they are saved or dropped.
+    DirtyClose(Exit),
     /// The file changed on disk; `Baseline` is the version found there.
     Conflict(Baseline),
 }
@@ -157,7 +181,9 @@ pub struct Editor {
     size: (u32, u32),
     title: String,
     status: LoadStatus,
-    loads: Option<Receiver<LoadEvent>>,
+    loads: Option<Load>,
+    /// A dropped file waiting for its loader's first answer.
+    pending: Option<PendingOpen>,
     settings: Settings,
     dpi: u32,
     zoom: i32,
@@ -167,12 +193,13 @@ pub struct Editor {
     prompt: Option<Prompt>,
     saving: Option<Receiver<SaveOutcome>>,
     save_queued: bool,
-    /// Close once the running save finishes.
-    closing: bool,
+    /// Quit or close the file once the running save finishes.
+    closing: Option<Exit>,
     drag: Option<Drag>,
     files: Arc<dyn FileOps>,
     wake: Wake,
-    shown_dirty: bool,
+    /// Window title last set (main sets the first one).
+    shown_title: String,
     /// Column of the last queried caret: snapshot, offset, tab width, column.
     caret_column: RefCell<Option<(Snapshot, u64, u32, u64)>>,
     /// A frame was drawn (traced as `first_paint`).
@@ -277,19 +304,14 @@ static ABOUT_ICON: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/about_icon.
 /// "The Zen of Royi Text Editor", shown in the About panel.
 const MANIFEST: &str = include_str!("../../../Meta/Manifest.md");
 
-/// Window title for `path`, marked when the document has unsaved changes.
+/// Window title for `path` (the application name alone without a file),
+/// marked when the document has unsaved changes.
 pub fn window_title(path: Option<&Path>, dirty: bool) -> String {
-    let name = path.map_or_else(
-        || "Untitled".to_owned(),
-        |p| {
-            p.file_name().map_or_else(
-                || p.display().to_string(),
-                |n| n.to_string_lossy().into_owned(),
-            )
-        },
-    );
+    let Some(path) = path else {
+        return APP_NAME.to_owned();
+    };
     let mark = if dirty { "\u{25CF} " } else { "" };
-    format!("{mark}{name} - {APP_NAME}")
+    format!("{mark}{} - {APP_NAME}", display_name(path))
 }
 
 impl Editor {
@@ -297,7 +319,7 @@ impl Editor {
     pub fn new(
         path: Option<&Path>,
         first: Option<LoadEvent>,
-        loads: Option<Receiver<LoadEvent>>,
+        loads: Option<Load>,
         renderer: Renderer,
         dpi: u32,
         mut settings: Settings,
@@ -305,8 +327,9 @@ impl Editor {
         files: Arc<dyn FileOps>,
         wake: Wake,
     ) -> Editor {
-        let title = path.map_or_else(|| "Untitled".to_owned(), |p| p.display().to_string());
+        let title = path.map_or_else(String::new, |p| p.display().to_string());
         let mut doc = Document::new(EditOptions::default());
+        doc.locks.no_file = path.is_none();
         doc.locks.user = settings.read_only;
         doc.locks.loading = loads.is_some();
         let notice = settings.notice.clone();
@@ -334,6 +357,7 @@ impl Editor {
                 LoadStatus::Ready
             },
             loads,
+            pending: None,
             settings,
             dpi,
             zoom: 0,
@@ -343,11 +367,11 @@ impl Editor {
             prompt: None,
             saving: None,
             save_queued: false,
-            closing: false,
+            closing: None,
             drag: None,
             files,
             wake,
-            shown_dirty: false,
+            shown_title: window_title(path, false),
             caret_column: RefCell::new(None),
             painted: false,
             highlighting,
@@ -377,15 +401,15 @@ impl Editor {
             symbol_offsets: Vec::new(),
             marked: (false, false),
         };
-        editor.choose_initial_language();
+        // `--syntax` belongs to the command-line file; without one it is unused.
+        if editor.path.is_some() {
+            editor.choose_initial_language();
+        }
         if let Some(event) = first {
             editor.apply_load(event);
         }
         // Events queued before the waker existed produced no wake-up.
         editor.drain_loads();
-        if editor.path.is_none() {
-            editor.restart_syntax();
-        }
         editor
     }
 
@@ -439,6 +463,10 @@ impl Editor {
         let Some(lang) = self.language else {
             return;
         };
+        // The empty state runs no syntax work, whatever the language.
+        if self.no_file() {
+            return;
+        }
         if !self.highlighting || !matches!(self.status, LoadStatus::Ready) {
             return;
         }
@@ -549,12 +577,12 @@ impl Editor {
     /// Applies queued load events. A loader that disconnects before its final
     /// event becomes a visible failure instead of an endless "Loading".
     fn drain_loads(&mut self) {
-        let Some(rx) = &self.loads else {
+        let Some(load) = &self.loads else {
             return;
         };
         let mut events = Vec::new();
         let disconnected = loop {
-            match rx.try_recv() {
+            match load.events.try_recv() {
                 Ok(event) => events.push(event),
                 Err(TryRecvError::Empty) => break false,
                 Err(TryRecvError::Disconnected) => break true,
@@ -609,6 +637,11 @@ impl Editor {
                 self.doc.load(snapshot);
                 self.doc.locks.load_error = true;
                 self.status = LoadStatus::Failed(error);
+            }
+            // A folder named on the command line: the empty state.
+            LoadEvent::Rejected(reason) => {
+                self.reset_document(None);
+                self.notice = Some(reason);
             }
         }
         self.clamp_scroll();
@@ -839,12 +872,6 @@ impl Editor {
 
     /// `Ctrl+S`. Returns false when saving is refused.
     fn request_save(&mut self) -> bool {
-        if self.path.is_none() {
-            self.notice = Some(
-                "Untitled documents cannot be saved; start the editor with a file path".to_owned(),
-            );
-            return false;
-        }
         if let Some(reason) = self.doc.locks.save_refusal() {
             self.notice = Some(format!("Cannot save: {reason}"));
             return false;
@@ -913,21 +940,26 @@ impl Editor {
         if self.save_queued {
             self.save_queued = false;
             self.start_save(self.baseline);
-        } else if self.closing && self.prompt.is_none() {
-            self.closing = false;
+        } else if let Some(exit) = self.closing
+            && self.prompt.is_none()
+        {
+            self.closing = None;
             if self.doc.is_dirty() {
-                self.prompt = Some(Prompt::DirtyClose);
+                self.prompt = Some(Prompt::DirtyClose(exit));
             } else {
-                ctx.close();
+                self.finish_exit(exit, ctx);
             }
         }
     }
 
+    /// Quit (`Alt+F4`, `Ctrl+Shift+W`, the window close request), asking
+    /// first about unsaved changes; waits for a running save.
     fn request_close(&mut self, ctx: &mut Ctx) {
+        self.pending = None;
         if self.saving.is_some() {
-            self.closing = true;
+            self.closing = Some(Exit::Quit);
         } else if self.doc.is_dirty() {
-            self.prompt = Some(Prompt::DirtyClose);
+            self.prompt = Some(Prompt::DirtyClose(Exit::Quit));
         } else {
             ctx.close();
         }
@@ -938,17 +970,20 @@ impl Editor {
         match (prompt, key.vk) {
             (_, VK_ESCAPE) => {
                 self.prompt = None;
-                self.closing = false;
+                self.closing = None;
             }
-            (Prompt::DirtyClose, VK_RETURN | VK_S) if plain && self.path.is_some() => {
+            (Prompt::DirtyClose(exit), VK_RETURN | VK_S) if plain => {
                 self.prompt = None;
-                self.closing = true;
+                self.closing = Some(exit);
                 if !self.request_save() {
-                    self.closing = false;
-                    self.prompt = Some(Prompt::DirtyClose);
+                    self.closing = None;
+                    self.prompt = Some(Prompt::DirtyClose(exit));
                 }
             }
-            (Prompt::DirtyClose, VK_D | VK_N) if plain => ctx.close(),
+            (Prompt::DirtyClose(exit), VK_D | VK_N) if plain => {
+                self.prompt = None;
+                self.finish_exit(exit, ctx);
+            }
             (Prompt::Conflict(disk), VK_O) if plain => {
                 self.prompt = None;
                 self.start_save(Some(disk));
@@ -962,7 +997,7 @@ impl Editor {
             self.prompt_key(prompt, key, ctx);
             return true;
         }
-        if self.closing {
+        if self.closing.is_some() {
             return true;
         }
         if let Some(first) = self.chord.take() {
@@ -1015,17 +1050,25 @@ impl Editor {
             self.perform(def.action, ctx);
             return true;
         }
+        if self.no_file() {
+            return false;
+        }
         self.edit_key(key)
     }
 
     /// Runs a registry command (from a key or the palette).
     fn perform(&mut self, action: Action, ctx: &mut Ctx) {
+        if self.no_file() && !works_without_file(action) && action != Action::Close {
+            self.notice = Some("No file is open".to_owned());
+            return;
+        }
         let (s, sels) = (&self.doc.snapshot, &self.doc.selections);
         match action {
             Action::Save => {
                 self.request_save();
             }
-            Action::Close | Action::Quit => self.request_close(ctx),
+            Action::Close => self.close_file(),
+            Action::Quit => self.request_close(ctx),
             Action::ToggleReadOnly => {
                 self.doc.locks.user = !self.doc.locks.user;
                 let state = if self.doc.locks.user { "on" } else { "off" };
@@ -1215,7 +1258,7 @@ impl Editor {
     }
 
     fn typed(&mut self, ch: char) {
-        if self.prompt.is_some() || self.closing || ch < ' ' || ch == '\u{7F}' {
+        if self.prompt.is_some() || self.closing.is_some() || ch < ' ' || ch == '\u{7F}' {
             return;
         }
         if std::mem::take(&mut self.skip_space) && ch == ' ' {
@@ -1234,6 +1277,9 @@ impl Editor {
         }
         if self.find_focused() {
             self.find_typed(ch);
+            return;
+        }
+        if self.no_file() {
             return;
         }
         self.notice = None;
@@ -1698,7 +1744,7 @@ impl Editor {
     }
 
     fn mouse_down(&mut self, x: i32, y: i32, clicks: u32, shift: bool, alt: bool, middle: bool) {
-        if self.prompt.is_some() || self.closing {
+        if self.prompt.is_some() || self.closing.is_some() || self.no_file() {
             return;
         }
         if self.find_open() && self.find_click(x, y) {
@@ -1791,25 +1837,27 @@ impl Editor {
     }
 
     fn status_text(&self) -> (String, String) {
-        let name = self.path.as_deref().map_or_else(
-            || "Untitled".to_owned(),
-            |p| {
-                p.file_name()
-                    .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
-            },
-        );
-        let left = match (self.prompt, self.path.is_some()) {
-            (Some(Prompt::DirtyClose), true) => {
-                format!("Save changes to {name}?   Enter: Save   D: Don't Save   Esc: Cancel")
+        if self.no_file() {
+            let left = self.notice.clone().unwrap_or_default();
+            let mut right = Vec::new();
+            if self.doc.locks.user {
+                right.push("Read-only");
             }
-            (Some(Prompt::DirtyClose), false) => {
-                "Discard the untitled document?   D: Discard   Esc: Cancel".to_owned()
+            if !self.highlighting {
+                right.push("Syntax off");
             }
-            (Some(Prompt::Conflict(_)), _) => {
+            return (left, right.join("  \u{00B7}  "));
+        }
+        let name = self.path.as_deref().map(display_name).unwrap_or_default();
+        let left = match self.prompt {
+            Some(Prompt::DirtyClose(_)) => {
+                format!("Save changes to {name}?   Enter: Save   D: Discard   Esc: Cancel")
+            }
+            Some(Prompt::Conflict(_)) => {
                 format!("{name} changed on disk.   O: Overwrite   Esc: Cancel")
             }
-            (None, _) if self.saving.is_some() => "Saving\u{2026}".to_owned(),
-            (None, _) => match (&self.notice, &self.status) {
+            None if self.saving.is_some() => "Saving\u{2026}".to_owned(),
+            None => match (&self.notice, &self.status) {
                 (Some(notice), _) => notice.clone(),
                 (None, LoadStatus::Loading { loaded, total }) => {
                     format!("Loading {}%", loaded * 100 / (*total).max(1))
@@ -1881,6 +1929,7 @@ impl App for Editor {
     fn event(&mut self, event: Event, ctx: &mut Ctx) -> bool {
         self.size = ctx.size();
         let before = self.visible();
+        let layout_changed = matches!(event, Event::Shown | Event::Resized { .. });
         let mut handled = true;
         match event {
             Event::Shown => {
@@ -1960,7 +2009,9 @@ impl App for Editor {
             }
             Event::MouseUp => self.drag = None,
             Event::CloseRequested => self.request_close(ctx),
+            Event::FilesDropped(dropped) => self.files_dropped(dropped),
             Event::Wake => {
+                self.drain_pending();
                 self.drain_loads();
                 self.drain_saves(ctx);
                 self.drain_store();
@@ -1970,17 +2021,16 @@ impl App for Editor {
             }
         }
         self.sync_syntax();
-        let dirty = self.doc.is_dirty();
-        if dirty != self.shown_dirty {
-            self.shown_dirty = dirty;
-            ctx.set_title(&window_title(self.path.as_deref(), dirty));
+        let title = window_title(self.path.as_deref(), self.doc.is_dirty());
+        if title != self.shown_title {
+            ctx.set_title(&title);
+            self.shown_title = title;
         }
         if self.prompt.is_some() {
             self.popup = None;
         }
         self.sync_find();
         self.sync_ui_renderer();
-        let layout_changed = matches!(event, Event::Shown | Event::Resized { .. });
         let redraw = layout_changed || !self.visible().same(&before);
         if redraw {
             ctx.redraw();
@@ -2019,14 +2069,8 @@ impl App for Editor {
         let cell = self.renderer.cell();
         let layout = self.layout();
         let (left, right) = self.status_text();
-        let title_mark = self.doc.is_dirty().then(|| {
-            if self.path.is_some() {
-                self.theme.unsaved
-            } else {
-                self.theme.at_risk
-            }
-        });
-        let caret = if self.prompt.is_some() {
+        let title_mark = self.doc.is_dirty().then_some(self.theme.unsaved);
+        let caret = if self.prompt.is_some() || self.no_file() {
             CaretStyle::Hidden
         } else if self.doc.options.overtype {
             CaretStyle::Underline
@@ -2072,6 +2116,7 @@ impl App for Editor {
                     brackets: &brackets,
                 }
             },
+            empty: self.path.is_none().then_some(EMPTY_HINT),
         };
         self.view.build(&frame, &mut self.list);
         self.draw_popup();
@@ -2103,7 +2148,8 @@ impl App for Editor {
     }
 
     fn is_text(&self, x: i32, y: i32) -> bool {
-        self.layout().text.contains(x, y)
+        !self.no_file()
+            && self.layout().text.contains(x, y)
             && !self.popup_area().is_some_and(|r| r.contains(x, y))
             && !self
                 .find_geometry()
@@ -2111,10 +2157,14 @@ impl App for Editor {
     }
 }
 
-/// Whether `def` can run under `locks`; Save also needs a path.
+/// Whether `def` can run under `locks`; without a file only the commands
+/// of the empty state run.
 fn enabled(def: &CommandDef, locks: Locks, has_path: bool) -> bool {
+    if !has_path {
+        return works_without_file(def.action);
+    }
     match def.action {
-        Action::Save => has_path && locks.save_refusal().is_none(),
+        Action::Save => locks.save_refusal().is_none(),
         _ => !def.mutates || locks.edit_refusal().is_none(),
     }
 }
@@ -2243,7 +2293,12 @@ mod tests {
     }
 
     fn renderer() -> Renderer {
-        Renderer::new(Cow::Borrowed(rte_assets::DEFAULT_FONT), 14.0).unwrap()
+        Renderer::new_with_bold(
+            Cow::Borrowed(rte_assets::DEFAULT_FONT),
+            Cow::Borrowed(rte_assets::BOLD_FONT),
+            14.0,
+        )
+        .unwrap()
     }
 
     fn settings(read_only: bool, exit_after_load: bool) -> Settings {
@@ -2289,7 +2344,7 @@ mod tests {
         Editor::new(
             Some(&path()),
             first,
-            Some(loads),
+            Some(Load::new(loads)),
             renderer(),
             96,
             settings(false, true),
@@ -2314,7 +2369,7 @@ mod tests {
         Editor::new(
             Some(&path()),
             None,
-            Some(rx),
+            Some(Load::new(rx)),
             renderer(),
             96,
             settings(read_only, false),
@@ -2481,28 +2536,44 @@ mod tests {
     }
 
     #[test]
-    fn untitled_documents_are_never_saved() {
-        let mut editor = Editor::new(
-            None,
-            None,
-            None,
-            renderer(),
-            96,
-            settings(false, false),
-            Trace::new(false),
-            Arc::new(FakeFiles::default()),
-            Arc::new(|| {}),
-        );
+    fn starting_without_a_file_shows_the_empty_state() {
+        let mut editor = empty_editor(false);
         let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(Event::Shown, &mut ctx);
+        assert!(editor.no_file() && editor.doc.locks.no_file);
+        assert_eq!(window_title(None, false), APP_NAME);
+        // Typing, clicks and editing commands change nothing.
         type_text(&mut editor, &mut ctx, "x");
+        editor.event(click(200, 200), &mut ctx);
+        editor.event(key(VK_V, true, false), &mut ctx);
+        assert!(editor.doc.snapshot.is_empty());
         editor.event(key(VK_S, true, false), &mut ctx);
         assert!(editor.saving.is_none());
-        assert!(editor.notice.as_deref().unwrap().starts_with("Untitled"));
-        editor.event(Event::CloseRequested, &mut ctx);
-        assert!(editor.status_text().0.starts_with("Discard"));
-        editor.event(key(VK_S, false, false), &mut ctx);
+        assert_eq!(editor.notice.as_deref(), Some("No file is open"));
+        editor.event(key(VK_F, true, false), &mut ctx);
+        assert!(!editor.find_open());
+        // Close keeps the window; the palette dims all but the empty-state commands.
+        editor.event(key(VK_W, true, false), &mut ctx);
+        assert!(editor.notice.as_deref().unwrap().contains("Alt+F4"));
         assert!(!ctx.close_requested());
-        editor.event(key(VK_D, false, false), &mut ctx);
+        let locks = editor.doc.locks;
+        for def in COMMANDS {
+            assert_eq!(
+                enabled(def, locks, false),
+                works_without_file(def.action),
+                "{}",
+                def.label
+            );
+        }
+        let (left, right) = editor.status_text();
+        assert!(left.contains("Alt+F4"), "the notice: {left}");
+        assert_eq!(right, "", "no position, encoding or language");
+        // Quit needs no answer.
+        editor.event(key(VK_W, true, true), &mut ctx);
+        assert!(ctx.close_requested());
+        let mut editor = empty_editor(false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(Event::CloseRequested, &mut ctx);
         assert!(ctx.close_requested());
     }
 
@@ -2578,14 +2649,20 @@ mod tests {
         let mut ctx = Ctx::headless(800, 600, 96);
         type_text(&mut editor, &mut ctx, "a");
         editor.event(Event::CloseRequested, &mut ctx);
-        assert_eq!(editor.prompt, Some(Prompt::DirtyClose));
+        assert_eq!(editor.prompt, Some(Prompt::DirtyClose(Exit::Quit)));
+        let prompt = editor.status_text().0;
+        assert!(prompt.contains("D: Discard"));
+        assert!(!prompt.contains("Don't Save"));
         editor.event(key(VK_ESCAPE, false, false), &mut ctx);
         assert_eq!(editor.prompt, None);
         assert!(!ctx.close_requested());
+        // Close asks too; after the save the file closes and the session stays.
         editor.event(key(VK_W, true, false), &mut ctx);
+        assert_eq!(editor.prompt, Some(Prompt::DirtyClose(Exit::CloseFile)));
         editor.event(key(VK_RETURN, false, false), &mut ctx);
         settle(&mut editor, &mut ctx);
-        assert!(ctx.close_requested());
+        assert!(!ctx.close_requested());
+        assert!(editor.no_file());
         assert_eq!(files.get(&path()).unwrap(), b"a");
 
         let mut editor = editor_on(&files, b"", false);
@@ -2632,32 +2709,311 @@ mod tests {
         assert!(!editor.doc.is_dirty(), "undo reaches the saved text");
     }
 
-    #[test]
-    fn a_pristine_untitled_document_closes_without_asking() {
-        let untitled = || {
-            Editor::new(
-                None,
-                None,
-                None,
-                renderer(),
-                96,
-                settings(false, false),
-                Trace::new(false),
-                Arc::new(FakeFiles::default()),
-                Arc::new(|| {}),
-            )
+    /// An editor started without a file.
+    fn empty_editor(read_only: bool) -> Editor {
+        Editor::new(
+            None,
+            None,
+            None,
+            renderer(),
+            96,
+            settings(read_only, false),
+            Trace::new(false),
+            Arc::new(FakeFiles::default()),
+            Arc::new(|| {}),
+        )
+    }
+
+    /// A real file for drops (the loader reads the disk), removed on drop.
+    struct TempFile(PathBuf);
+
+    impl TempFile {
+        fn new(name: &str, text: &[u8]) -> TempFile {
+            // Unique per call: tests run in parallel and reuse names.
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let dir = std::env::temp_dir().join(format!(
+                "rte_drop_{}_{n}_{}",
+                std::process::id(),
+                name.replace('.', "_")
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join(name);
+            std::fs::write(&path, text).unwrap();
+            TempFile(path)
+        }
+    }
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            if let Some(dir) = self.0.parent() {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        }
+    }
+
+    fn drop_file(editor: &mut Editor, ctx: &mut Ctx, path: &Path, others: u32) {
+        let dropped = Dropped {
+            path: path.to_path_buf(),
+            others,
         };
-        let mut editor = untitled();
+        editor.event(Event::FilesDropped(Ok(dropped)), ctx);
+    }
+
+    /// Wakes the editor until no dropped file is pending and none is loading.
+    fn settle_open(editor: &mut Editor, ctx: &mut Ctx) {
+        pump(editor, ctx, |e| {
+            e.pending.is_none() && !matches!(e.status, LoadStatus::Loading { .. })
+        });
+    }
+
+    #[test]
+    fn dropping_a_file_opens_it_in_the_empty_state() {
+        let file = TempFile::new("dropped.txt", b"hello");
+        let mut editor = empty_editor(false);
         let mut ctx = Ctx::headless(800, 600, 96);
-        assert!(editor.status_text().1.starts_with("Ln 1"));
-        editor.event(Event::CloseRequested, &mut ctx);
-        assert!(ctx.close_requested());
-        let mut editor = untitled();
+        drop_file(&mut editor, &mut ctx, &file.0, 0);
+        assert!(
+            editor
+                .notice
+                .as_deref()
+                .unwrap()
+                .starts_with("Opening dropped.txt")
+        );
+        settle_open(&mut editor, &mut ctx);
+        assert_eq!(editor.path.as_deref(), Some(file.0.as_path()));
+        assert_eq!(text(&editor), "hello");
+        assert!(!editor.doc.locks.no_file);
+        assert_eq!(
+            ctx.requested_title(),
+            Some(window_title(Some(&file.0), false).as_str())
+        );
+        type_text(&mut editor, &mut ctx, "x");
+        assert_eq!(text(&editor), "xhello", "editable");
+    }
+
+    #[test]
+    fn a_dropped_file_replaces_a_clean_file_and_resets_its_state() {
+        let file = TempFile::new("next.py", b"def f():\n    pass\n");
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, b"cat cat cat\n", false);
         let mut ctx = Ctx::headless(800, 600, 96);
+        // History, cursor history, a toggled lock and a search with a scope.
         type_text(&mut editor, &mut ctx, "x");
         editor.event(key(VK_Z, true, false), &mut ctx);
-        editor.event(Event::CloseRequested, &mut ctx);
+        editor.event(key(VK_D, true, false), &mut ctx);
+        editor.event(key(VK_F, true, false), &mut ctx);
+        type_text(&mut editor, &mut ctx, "cat");
+        editor.find.as_mut().unwrap().scope = Some(0..3);
+        editor.event(key(VK_ESCAPE, false, false), &mut ctx);
+        assert!(!editor.doc.is_dirty());
+        drop_file(&mut editor, &mut ctx, &file.0, 2);
+        settle_open(&mut editor, &mut ctx);
+        assert_eq!(text(&editor), "def f():\n    pass\n");
+        assert_eq!(editor.doc.history.undo_len(), 0);
+        assert_eq!(editor.doc.history.redo_len(), 0);
+        assert!(editor.cursor_history.is_empty());
+        let f = editor.find.as_ref().unwrap();
+        assert!(!f.open && f.scope.is_none());
+        assert!(f.find.as_str().starts_with("cat"), "the query stays");
+        assert_eq!(editor.language.map(|l| l.id), Some("python"));
+        assert!(editor.syntax.is_some());
+        assert_eq!(
+            editor.notice.as_deref(),
+            Some("Only one file opens at a time; 2 more ignored")
+        );
+    }
+
+    #[test]
+    fn drops_onto_unsaved_changes_or_a_running_save_are_refused() {
+        let file = TempFile::new("other.txt", b"other");
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, b"mine", false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        type_text(&mut editor, &mut ctx, "x");
+        drop_file(&mut editor, &mut ctx, &file.0, 0);
+        assert!(editor.pending.is_none());
+        assert_eq!(
+            editor.notice.as_deref(),
+            Some("test.txt has unsaved changes; save or close it to open other.txt")
+        );
+        assert_eq!(text(&editor), "xmine");
+        // During a save.
+        let (open, gate) = mpsc::channel();
+        *files.gate.lock().unwrap() = Some(gate);
+        editor.event(key(VK_S, true, false), &mut ctx);
+        drop_file(&mut editor, &mut ctx, &file.0, 0);
+        assert!(editor.notice.as_deref().unwrap().contains("is being saved"));
+        open.send(()).unwrap();
+        settle(&mut editor, &mut ctx);
+        assert_eq!(text(&editor), "xmine");
+        // Edited while the dropped file loads: the file stays.
+        drop_file(&mut editor, &mut ctx, &file.0, 0);
+        assert!(editor.pending.is_some());
+        type_text(&mut editor, &mut ctx, "y");
+        settle_open(&mut editor, &mut ctx);
+        assert_eq!(text(&editor), "xymine");
+        assert!(
+            editor
+                .notice
+                .as_deref()
+                .unwrap()
+                .contains("unsaved changes")
+        );
+    }
+
+    #[test]
+    fn folders_failed_drops_and_prompts_leave_the_file_as_it_is() {
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, &b"line\n".repeat(200), false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(key(VK_DOWN, true, false), &mut ctx);
+        editor.event(key(VK_END, true, false), &mut ctx);
+        let (scroll, sels) = (editor.scroll, editor.doc.selections.clone());
+        drop_file(&mut editor, &mut ctx, &std::env::temp_dir(), 0);
+        settle_open(&mut editor, &mut ctx);
+        assert_eq!(editor.notice.as_deref(), Some("Folders cannot be opened"));
+        assert_eq!(editor.path, Some(path()));
+        assert_eq!((editor.scroll, &editor.doc.selections), (scroll, &sels));
+        // A drop the platform could not read: one notice, nothing else.
+        let error = "The dropped file name could not be read".to_owned();
+        editor.event(Event::FilesDropped(Err(error.clone())), &mut ctx);
+        assert_eq!(editor.notice.as_deref(), Some(error.as_str()));
+        assert!(editor.pending.is_none());
+        // While a question is shown, drops are ignored.
+        type_text(&mut editor, &mut ctx, "x");
+        editor.event(key(VK_W, true, false), &mut ctx);
+        let file = TempFile::new("ignored.txt", b"");
+        drop_file(&mut editor, &mut ctx, &file.0, 0);
+        assert!(editor.pending.is_none());
+        assert!(editor.prompt.is_some());
+    }
+
+    #[test]
+    fn closing_returns_to_the_empty_state() {
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, b"abc", false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(key(VK_W, true, false), &mut ctx);
+        assert!(editor.no_file() && !ctx.close_requested());
+        assert_eq!(ctx.requested_title(), Some(APP_NAME));
+
+        let mut editor = editor_on(&files, b"abc", false);
+        type_text(&mut editor, &mut ctx, "x");
+        editor.event(key(VK_F4, true, false), &mut ctx);
+        assert_eq!(editor.prompt, Some(Prompt::DirtyClose(Exit::CloseFile)));
+        editor.event(key(VK_ESCAPE, false, false), &mut ctx);
+        assert!(!editor.no_file());
+        editor.event(key(VK_W, true, false), &mut ctx);
+        editor.event(key(VK_D, false, false), &mut ctx);
+        assert!(editor.no_file() && !ctx.close_requested());
+        assert_eq!(
+            files.get(&path()).unwrap(),
+            b"abc",
+            "Don't Save keeps the file"
+        );
+        // Quit from the empty state.
+        let alt_f4 = Event::Key(Key {
+            vk: VK_F4,
+            ctrl: false,
+            shift: false,
+            alt: true,
+        });
+        editor.event(alt_f4, &mut ctx);
         assert!(ctx.close_requested());
+    }
+
+    #[test]
+    fn read_only_and_the_syntax_choice_follow_their_files() {
+        let file = TempFile::new("next.py", b"x = 1\n");
+        let files = Arc::new(FakeFiles::default());
+        files.put(&path(), b"{}");
+        let (tx, rx) = mpsc::channel();
+        tx.send(done(b"{}")).unwrap();
+        drop(tx);
+        let mut settings = settings(true, false);
+        settings.syntax = Some("json".to_owned());
+        let mut editor = Editor::new(
+            Some(&path()),
+            None,
+            Some(Load::new(rx)),
+            renderer(),
+            96,
+            settings,
+            Trace::new(false),
+            files,
+            Arc::new(|| {}),
+        );
+        let mut ctx = Ctx::headless(800, 600, 96);
+        assert_eq!(editor.language.map(|l| l.id), Some("json"));
+        // Toggled off for this file; the next one is read-only again.
+        editor.perform(Action::ToggleReadOnly, &mut ctx);
+        assert!(!editor.doc.locks.user);
+        drop_file(&mut editor, &mut ctx, &file.0, 0);
+        settle_open(&mut editor, &mut ctx);
+        assert!(editor.doc.locks.user);
+        assert_eq!(editor.language.map(|l| l.id), Some("python"));
+    }
+
+    #[test]
+    fn a_syntax_choice_without_a_file_starts_no_syntax_work() {
+        let file = TempFile::new("next.py", b"x = 1\n");
+        let mut settings = settings(false, false);
+        settings.syntax = Some("json".to_owned());
+        let mut editor = Editor::new(
+            None,
+            None,
+            None,
+            renderer(),
+            96,
+            settings,
+            Trace::new(false),
+            Arc::new(FakeFiles::default()),
+            Arc::new(|| {}),
+        );
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(Event::Shown, &mut ctx);
+        assert!(
+            editor.language.is_none(),
+            "--syntax waits for a command-line file"
+        );
+        for _ in 0..2 {
+            editor.perform(Action::ToggleSyntax, &mut ctx);
+            assert!(editor.no_file() && editor.syntax.is_none());
+        }
+        assert!(editor.highlighting, "the toggle stays a preference");
+        drop_file(&mut editor, &mut ctx, &file.0, 0);
+        settle_open(&mut editor, &mut ctx);
+        assert_eq!(editor.language.map(|l| l.id), Some("python"));
+        assert!(editor.syntax.is_some());
+    }
+
+    #[test]
+    fn a_new_file_searches_after_a_busy_search_of_the_old_one() {
+        let file = TempFile::new("b.txt", b"cat dog cat");
+        let files = Arc::new(FakeFiles::default());
+        let text_a = "cat ".repeat(50_000);
+        let mut editor = editor_on(&files, text_a.as_bytes(), false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(key(VK_F, true, false), &mut ctx);
+        // Many case-insensitive queries: generations climb on the search thread.
+        for _ in 0..30 {
+            type_text(&mut editor, &mut ctx, "c");
+            editor.event(key(VK_BACK, false, false), &mut ctx);
+        }
+        type_text(&mut editor, &mut ctx, "cat");
+        let old = editor.find.as_ref().unwrap().generation;
+        drop_file(&mut editor, &mut ctx, &file.0, 0);
+        settle_open(&mut editor, &mut ctx);
+        assert!(editor.find.as_ref().unwrap().generation > old);
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            !editor.search.as_ref().unwrap().holds_checkpoints(),
+            "the old text is released"
+        );
+        editor.event(key(VK_F, true, false), &mut ctx);
+        pump(&mut editor, &mut ctx, |e| counter(e).ends_with("of 2"));
+        assert_eq!(text(&editor), "cat dog cat");
     }
 
     #[test]
@@ -2677,7 +3033,7 @@ mod tests {
         ];
         for event in unchanged {
             let mut ctx = Ctx::headless(800, 600, 96);
-            editor.event(event, &mut ctx);
+            editor.event(event.clone(), &mut ctx);
             assert!(!ctx.redraw_requested(), "{event:?}");
         }
         let mut ctx = Ctx::headless(800, 600, 96);
@@ -2856,7 +3212,7 @@ mod tests {
         Editor::new(
             Some(Path::new(name)),
             None,
-            Some(rx),
+            Some(Load::new(rx)),
             renderer(),
             96,
             settings(false, false),
@@ -2916,7 +3272,7 @@ mod tests {
             let editor = Editor::new(
                 Some(Path::new(r"C:\src\main.rs")),
                 None,
-                Some(rx),
+                Some(Load::new(rx)),
                 renderer(),
                 96,
                 settings,
@@ -2959,7 +3315,7 @@ mod tests {
             let mut editor = Editor::new(
                 Some(Path::new(r"C:\src\main.rs")),
                 first,
-                Some(rx),
+                Some(Load::new(rx)),
                 renderer(),
                 96,
                 settings,
@@ -3551,7 +3907,7 @@ mod tests {
             Event::Wake,
         ] {
             let mut ctx = Ctx::headless(800, 600, 96);
-            editor.event(event, &mut ctx);
+            editor.event(event.clone(), &mut ctx);
             assert!(!ctx.redraw_requested(), "{event:?}");
         }
         for event in [
@@ -3560,7 +3916,7 @@ mod tests {
             key(VK_HOME, false, true),
         ] {
             let mut ctx = Ctx::headless(800, 600, 96);
-            editor.event(event, &mut ctx);
+            editor.event(event.clone(), &mut ctx);
             assert!(ctx.redraw_requested(), "{event:?}");
         }
     }

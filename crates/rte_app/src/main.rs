@@ -163,8 +163,10 @@ fn main() {
         .highlighting()
         .then(|| EarlySyntax::new(Mutex::new(Default::default())));
     let chosen = args.syntax.as_deref().and_then(rte_syntax::by_id);
-    // The highlight query compiles while the file is read.
-    if let Some(lang) = chosen.or_else(|| rte_syntax::detect(args.path.as_deref()?, b""))
+    // The highlight query compiles while the file is read (a `--syntax`
+    // choice applies only to the command-line file).
+    if let Some(path) = args.path.as_deref()
+        && let Some(lang) = chosen.or_else(|| rte_syntax::detect(path, b""))
         && early.is_some()
     {
         rte_syntax::warm(lang.grammar);
@@ -180,12 +182,16 @@ fn main() {
             syntax::early_start(slot, path.clone(), chosen, max, injections, wake.clone())
         });
         let wake = wake.clone();
-        loader::spawn(path, move || wake(), on_done)
+        loader::spawn(path, move || wake(), on_done, true)
     });
     let px = (BASE_PX * dpi as f32 / 96.0).round();
     let glyphs = thread::spawn(move || {
-        let mut renderer = Renderer::new(Cow::Borrowed(rte_assets::DEFAULT_FONT), px)
-            .expect("embedded font is valid");
+        let mut renderer = Renderer::new_with_bold(
+            Cow::Borrowed(rte_assets::DEFAULT_FONT),
+            Cow::Borrowed(rte_assets::BOLD_FONT),
+            px,
+        )
+        .expect("embedded fonts are valid");
         renderer.warm_ascii();
         renderer
     });
@@ -202,7 +208,7 @@ fn main() {
     let _ = waker.set(window.waker());
     trace.mark("window_created");
 
-    let first = loads.as_ref().and_then(|rx| rx.recv().ok());
+    let first = loads.as_ref().and_then(|load| load.events.recv().ok());
     trace.mark("first_snapshot");
     let renderer = glyphs.join().expect("glyph thread");
     trace.mark("glyphs_ready");

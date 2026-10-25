@@ -598,7 +598,8 @@ fixture generation on a first run; faster is better.
 
 - Builds the release binary, then runs every test in fresh processes.
 - **Load tests** launch `RoyiTextEditor.exe --trace-startup --exit-after-load
-  [--read-only] [--syntax <id>] <file>`. Times are measured from process
+  [--read-only] [--syntax <id>] <file>` (L26 without a file: an empty
+  state). Times are measured from process
   creation (as in `cargo xtask bench-startup`):
   - **First paint:** the first frame is drawn into the back buffer. This is the
     compared startup metric.
@@ -751,6 +752,7 @@ Each code fixture repeats a block containing every highlighted element:
 | L20-L21 | Load and highlight 50,000 lines (Python, C) | `code.py`, `code.c`             | 5 processes each  | 5 each  |
 | L22     | Load and highlight single-line JSON         | `line.json`                     | 5 processes       | 10      |
 | L23-L25 | Load and highlight 10,000 lines (Py, C, TS) | `10k.py`, `10k.c`, `10k.ts`     | 10 processes each | 2 each  |
+| L26     | Start empty session                         | None                            | 20 processes      | 2       |
 | U01     | Show and close the Command Palette          | `small.py`                      | 30                | 1       |
 | U02     | Show and close favorites (`Ctrl+P`)         | `small.py`                      | 30                | 1       |
 | C01-C03 | Copy 1 KiB, 1 MiB, 64 MiB                   | `large.log`                     | 20, 5, 3          | 2       |

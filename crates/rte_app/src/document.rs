@@ -11,6 +11,9 @@ const JOURNAL_MAX: usize = 64;
 /// Independent locks; each has one owner (Architecture, App: Edit permission).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Locks {
+    /// No file is open (the empty state); owned by the editor's file
+    /// lifecycle.
+    pub no_file: bool,
     /// `--read-only` or the toggle command.
     pub user: bool,
     /// Set until the final snapshot is published.
@@ -29,7 +32,9 @@ impl Locks {
 
     /// Why saving is refused, if it is.
     pub fn save_refusal(&self) -> Option<&'static str> {
-        if self.loading {
+        if self.no_file {
+            Some("no file is open")
+        } else if self.loading {
             Some("still loading")
         } else if self.encoding {
             Some("malformed UTF-16")
@@ -187,6 +192,10 @@ mod tests {
     #[test]
     fn every_lock_refuses_every_mutation() {
         let locks = [
+            Locks {
+                no_file: true,
+                ..Locks::default()
+            },
             Locks {
                 user: true,
                 ..Locks::default()

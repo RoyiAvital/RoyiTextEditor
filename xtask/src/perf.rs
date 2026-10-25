@@ -244,6 +244,7 @@ const LOAD_TESTS: &[LoadTest] = &[
         highlight: true,
         ..test("L25", "TypeScript, 10,000 lines", "10k.ts", 10, 2, false)
     },
+    test("L26", "Start empty session", "", 20, 2, false),
 ];
 
 /// An interaction test: one process loads the fixture, sends the untimed
@@ -1217,7 +1218,10 @@ fn run_load(exe: &Path, t: &LoadTest) -> Result<Samples, String> {
         if let Some(id) = t.syntax {
             command.args(["--syntax", id]);
         }
-        command.arg(&path);
+        // An empty fixture name starts the editor without a file.
+        if !t.fixture.is_empty() {
+            command.arg(&path);
+        }
         let trace = run_traced(&mut command, Duration::from_secs(10))
             .and_then(|out| parse_trace(&out))
             .map_err(|e| format!("{}: {e}", t.id))?;
@@ -1232,7 +1236,9 @@ fn run_load(exe: &Path, t: &LoadTest) -> Result<Samples, String> {
         };
         samples.first_paint.push(value("first_paint")?);
         samples.first_frame.push(value("first_frame")?);
-        samples.loaded.push(value("file_read")?);
+        if !t.fixture.is_empty() {
+            samples.loaded.push(value("file_read")?);
+        }
         if t.highlight {
             samples.first_highlighted.push(value("highlighted")?);
             samples.highlighted.push(value("fully_highlighted")?);

@@ -8,11 +8,13 @@
 
  - Speed
    Most important feature. Time to load empty file, time to load short file, time to show command palette, keystroke rendering delay.  
-   Aim for less than 100 [Mili Sec] load time for a short file.  
-   Aim for small memory footprint.
- - Single File  
+   Aim for less than 50 [Mili Sec] load time for a short file.  
+   Aim for small memory footprint when it serves the performance need.
+ - Single File & Single Session  
    Editing a single file.
-   Includes line numbering.
+   Single session. No awareness of other session.
+   No ability to interact, launch or close other session.
+   Each application window is self contained.
  - No Menus / Keyboard Focused
    All window is dedicated to text.  
    Commands through the _Command Palette_ / _Command Center_.
@@ -25,8 +27,8 @@
  - Syntax Highlighting  
    Efficient Tree Sitter based Syntax Highlighting engine.
  - _Command Center_ / _Command Palette_ Driven  
-   Access all commands by <kbd>Ctrl</kbf>+<kbd>Shift</kbf>+<kbd>P</kbf>.  
-   Access last 3 commands and favorites commands by <kbd>Ctrl</kbf>+<kbd>P</kbf>.  
+   Access all commands by <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd>.  
+   Access last 3 commands and favorites commands by <kbd>Ctrl</kbd>+<kbd>P</kbd>.  
  - VS Code Compatibility  
    Replicates VS Code text features: General, Basic Editing, Navigation, Search and Replace, Multi Cursor and Selection.  
    See [VS Code Keyboard Shortcuts Windows](https://code.visualstudio.com/shortcuts/keyboard-shortcuts-windows.pdf).
@@ -51,6 +53,10 @@
  - Optimized for Use from a File Manager
    Optimized for the use case of being launched from a _File Manager_.  
    No need for _Save As_ or _New File_ operations within the application.  
+   A file is opened from the command line or by _Drag & Drop_ onto the window.  
+   Without a file the window shows an _Empty State_: nothing to edit, so nothing to lose.  
+   Closing a file (<kbd>Ctrl</kbd>+<kbd>W</kbd>) returns to the empty state; <kbd>Alt</kbd>+<kbd>F4</kbd> quits.  
+   An editable document that can not be saved (an _Untitled_ scratch) does not exist.
  - Configuration File
    Based on a single `yaml` file next to the executable: `RoyiTextEditor.yaml`.  
    The application only reads it.

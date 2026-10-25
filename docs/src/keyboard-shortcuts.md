@@ -19,7 +19,8 @@ binding exactly. For example, `Ctrl+Shift+S` is not Save.
 | `Ctrl+Z`; `Ctrl+Y` / `Ctrl+Shift+Z`                                             | Undo; redo                                                               |
 | `Ctrl+C` / `Ctrl+X` / `Ctrl+V`                                                  | Copy; cut; paste. Copy or cut the current line when nothing is selected. |
 | `Ctrl+S`                                                                        | Save                                                                     |
-| `Ctrl+W`; `Ctrl+F4`; `Alt+F4`                                                   | Close the document; close the document; quit the application             |
+| `Ctrl+W`; `Ctrl+F4`                                                             | Close the file and return to the empty state (unsaved changes ask first) |
+| `Alt+F4`; `Ctrl+Shift+W`                                                        | Quit the application (unsaved changes ask first)                         |
 | `Ctrl+Shift+P`; `F1`                                                            | Open the Command Palette                                                 |
 | `Ctrl+P`                                                                        | Show recent and favorite commands                                        |
 | `Ctrl+Space` (palette)                                                          | Add or remove the selected command from favorites                        |

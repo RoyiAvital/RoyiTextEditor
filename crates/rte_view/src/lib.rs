@@ -281,6 +281,7 @@ pub struct Glyph {
     pub x: i32,
     pub y: i32,
     pub ch: char,
+    pub bold: bool,
     pub color: Color,
     pub clip: Rect,
 }
@@ -325,6 +326,9 @@ pub struct Frame<'a> {
     pub selections: &'a [Selection],
     pub caret: CaretStyle,
     pub highlights: Highlights<'a>,
+    /// No document: the body shows only this hint, centered (no line
+    /// numbers, rows, selections or caret).
+    pub empty: Option<&'a str>,
 }
 
 /// Search decorations and syntax colors of a frame.
@@ -363,6 +367,7 @@ impl ViewBuilder {
             selections: _,
             caret,
             highlights: _,
+            empty,
         } = *frame;
         let fill = |out: &mut DisplayList, rect: Rect, color| out.fills.push(Fill { rect, color });
         let status_background = if chrome.prompt {
@@ -419,7 +424,7 @@ impl ViewBuilder {
                 theme.line_number,
                 layout.title,
             );
-            text_run(
+            text_run_bold(
                 &mut out.glyphs,
                 chrome.app_name,
                 name_x as i32,
@@ -450,6 +455,15 @@ impl ViewBuilder {
             status_text,
             layout.status,
         );
+
+        if let Some(hint) = empty {
+            let text = layout.text;
+            let cols = hint.width() as u32;
+            let x = text.x + (text.w.saturating_sub(cols * cell.width) / 2) as i32;
+            let y = text.y + (text.h.saturating_sub(cell.height) / 2) as i32;
+            text_run(&mut out.glyphs, hint, x, y, cell, theme.popup_dim, text);
+            return;
+        }
 
         for row in 0..layout.rows {
             let line = scroll.top_line + u64::from(row);
@@ -550,6 +564,7 @@ impl ViewBuilder {
                         x: text_x + (col * cell.width) as i32,
                         y,
                         ch,
+                        bold: false,
                         color,
                         clip,
                     });
@@ -837,6 +852,31 @@ fn text_run(
     color: Color,
     clip: Rect,
 ) -> u32 {
+    text_run_weight(out, text, x, y, cell, color, clip, false)
+}
+
+fn text_run_bold(
+    out: &mut Vec<Glyph>,
+    text: &str,
+    x: i32,
+    y: i32,
+    cell: Cell,
+    color: Color,
+    clip: Rect,
+) -> u32 {
+    text_run_weight(out, text, x, y, cell, color, clip, true)
+}
+
+fn text_run_weight(
+    out: &mut Vec<Glyph>,
+    text: &str,
+    x: i32,
+    y: i32,
+    cell: Cell,
+    color: Color,
+    clip: Rect,
+    bold: bool,
+) -> u32 {
     let mut col = 0;
     for ch in text.chars() {
         let width = ch.width().unwrap_or(1) as u32;
@@ -849,6 +889,7 @@ fn text_run(
                 x: gx,
                 y,
                 ch,
+                bold,
                 color,
                 clip,
             });
@@ -1091,6 +1132,7 @@ mod tests {
                 selections,
                 caret,
                 highlights,
+                empty: None,
             },
             &mut list,
         );
@@ -1104,6 +1146,49 @@ mod tests {
             .filter(|g| g.clip == clip)
             .map(|g| g.ch)
             .collect()
+    }
+
+    #[test]
+    fn empty_frames_show_only_the_hint_inside_the_text_area() {
+        let cell = Cell {
+            width: 10,
+            height: 20,
+        };
+        let options = Options::default();
+        for (width, height) in [(400, 200), (120, 70), (30, 50), (0, 0)] {
+            let snapshot = Snapshot::empty();
+            let layout = Layout::new(width, height, cell, 1, &options);
+            let mut list = DisplayList::default();
+            let sels = [Selection::caret(0)];
+            ViewBuilder::default().build(
+                &Frame {
+                    snapshot: &snapshot,
+                    layout: &layout,
+                    scroll: Scroll::default(),
+                    cell,
+                    theme: &Theme::DARK,
+                    chrome: Chrome::default(),
+                    options: &options,
+                    selections: &sels,
+                    caret: CaretStyle::Bar,
+                    highlights: Highlights::default(),
+                    empty: Some("Drop a file"),
+                },
+                &mut list,
+            );
+            assert!(list.overlays.is_empty(), "no caret at {width}x{height}");
+            let body: Vec<&Glyph> = list
+                .glyphs
+                .iter()
+                .filter(|g| g.clip != layout.title && g.clip != layout.status)
+                .collect();
+            assert!(body.iter().all(|g| g.clip == layout.text));
+            if width == 400 {
+                let text: String = body.iter().map(|g| g.ch).collect();
+                assert_eq!(text, "Dropafile", "no line number, only the hint");
+                assert!(body.iter().all(|g| layout.text.contains(g.x, g.y)));
+            }
+        }
     }
 
     #[test]
@@ -1375,7 +1460,11 @@ mod tests {
             (
                 glyphs.iter().map(|g| g.ch).collect::<String>(),
                 glyphs.first().map(|g| g.x),
-                glyphs.iter().find(|g| g.ch == 'A').map(|g| g.color),
+                glyphs
+                    .iter()
+                    .find(|g| g.ch == 'A')
+                    .map(|g| (g.color, g.bold)),
+                glyphs.iter().find(|g| g.ch == '\u{2502}').map(|g| g.bold),
             )
         };
         // 400 px: "│ App" ends one cell before the right edge.
@@ -1384,7 +1473,8 @@ mod tests {
             (
                 "\u{2502}App".to_owned(),
                 Some(400 - 60),
-                Some(Theme::DARK.unsaved)
+                Some((Theme::DARK.unsaved, true)),
+                Some(false),
             )
         );
         // "title" and its marker end at 80 px; the divider needs a 1-cell gap.
@@ -1393,10 +1483,11 @@ mod tests {
             (
                 "\u{2502}App".to_owned(),
                 Some(90),
-                Some(Theme::DARK.unsaved)
+                Some((Theme::DARK.unsaved, true)),
+                Some(false),
             )
         );
-        assert_eq!(name(149), (String::new(), None, None));
+        assert_eq!(name(149), (String::new(), None, None, None));
     }
 
     #[test]

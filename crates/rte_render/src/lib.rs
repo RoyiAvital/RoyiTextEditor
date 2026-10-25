@@ -39,53 +39,29 @@ struct Bitmap {
     coverage: Box<[u8]>,
 }
 
-/// Font face at one pixel size, with its glyph cache.
-pub struct Renderer {
+struct Face {
     data: Cow<'static, [u8]>,
     offset: u32,
     key: CacheKey,
     context: ScaleContext,
-    px: f32,
-    cell: Cell,
-    baseline: i32,
     ascii: Vec<Option<Bitmap>>,
-    /// Glyph of each non-ASCII character seen; characters sharing a glyph
-    /// (e.g. the missing-glyph box) share one bitmap.
     glyph_ids: HashMap<char, u16>,
     glyphs: HashMap<u16, Option<Bitmap>>,
-    /// Star coverage by side and fill.
-    stars: HashMap<(u32, bool), Bitmap>,
-    contrast: [u8; 256],
 }
 
-impl Renderer {
-    pub fn new(data: Cow<'static, [u8]>, px: f32) -> Result<Renderer, FontError> {
+impl Face {
+    fn new(data: Cow<'static, [u8]>) -> Result<Face, FontError> {
         let font = FontRef::from_index(&data, 0).ok_or(FontError)?;
         let (offset, key) = (font.offset, font.key);
-        let mut contrast = [0u8; 256];
-        for (i, c) in contrast.iter_mut().enumerate() {
-            // Slightly thicker strokes compensate for blending in gamma space.
-            *c = (255.0 * (i as f32 / 255.0).powf(0.8)).round() as u8;
-        }
-        let mut renderer = Renderer {
+        Ok(Face {
             data,
             offset,
             key,
             context: ScaleContext::new(),
-            px,
-            cell: Cell {
-                width: 1,
-                height: 1,
-            },
-            baseline: 0,
-            ascii: Vec::new(),
+            ascii: (0..128).map(|_| None).collect(),
             glyph_ids: HashMap::new(),
             glyphs: HashMap::new(),
-            stars: HashMap::new(),
-            contrast,
-        };
-        renderer.apply_size(px);
-        Ok(renderer)
+        })
     }
 
     fn font(&self) -> FontRef<'_> {
@@ -94,6 +70,116 @@ impl Renderer {
             offset: self.offset,
             key: self.key,
         }
+    }
+
+    fn clear(&mut self) {
+        self.ascii = (0..128).map(|_| None).collect();
+        self.glyph_ids.clear();
+        self.glyphs.clear();
+    }
+
+    fn bitmap(&mut self, ch: char, px: f32) -> Option<&Bitmap> {
+        let code = ch as usize;
+        if code < 128 {
+            if self.ascii[code].is_none() {
+                let glyph = self.font().charmap().map(ch);
+                self.ascii[code] = Some(self.rasterize(glyph, px).unwrap_or_else(empty_bitmap));
+            }
+            return self.ascii[code].as_ref().filter(|b| b.width > 0);
+        }
+        let glyph = match self.glyph_ids.get(&ch) {
+            Some(&glyph) => glyph,
+            None => {
+                let glyph = self.font().charmap().map(ch);
+                self.glyph_ids.insert(ch, glyph);
+                glyph
+            }
+        };
+        if !self.glyphs.contains_key(&glyph) {
+            let bitmap = self.rasterize(glyph, px);
+            self.glyphs.insert(glyph, bitmap);
+        }
+        self.glyphs.get(&glyph).and_then(Option::as_ref)
+    }
+
+    fn rasterize(&mut self, glyph: u16, px: f32) -> Option<Bitmap> {
+        let font = FontRef {
+            data: &self.data,
+            offset: self.offset,
+            key: self.key,
+        };
+        let mut scaler = self.context.builder(font).size(px).hint(true).build();
+        let image = Render::new(&[Source::Outline])
+            .format(Format::Alpha)
+            .render(&mut scaler, glyph)?;
+        let p = image.placement;
+        if p.width == 0 || p.height == 0 {
+            return None;
+        }
+        Some(Bitmap {
+            left: p.left,
+            top: p.top,
+            width: p.width,
+            height: p.height,
+            coverage: image.data.into_boxed_slice(),
+        })
+    }
+}
+
+/// CPU renderer with cached regular and optional bold faces.
+pub struct Renderer {
+    regular: Face,
+    bold: Option<Face>,
+    px: f32,
+    cell: Cell,
+    baseline: i32,
+    /// Star coverage by side and fill.
+    stars: HashMap<(u32, bool), Bitmap>,
+    contrast: [u8; 256],
+}
+
+impl Renderer {
+    pub fn new(data: Cow<'static, [u8]>, px: f32) -> Result<Renderer, FontError> {
+        Ok(Self::from_faces(Face::new(data)?, None, px))
+    }
+
+    /// Creates a renderer with a separate font face for bold display-list glyphs.
+    pub fn new_with_bold(
+        data: Cow<'static, [u8]>,
+        bold_data: Cow<'static, [u8]>,
+        px: f32,
+    ) -> Result<Renderer, FontError> {
+        Ok(Self::from_faces(
+            Face::new(data)?,
+            Some(Face::new(bold_data)?),
+            px,
+        ))
+    }
+
+    fn from_faces(regular: Face, bold: Option<Face>, px: f32) -> Renderer {
+        let mut contrast = [0u8; 256];
+        for (i, c) in contrast.iter_mut().enumerate() {
+            // Slightly thicker strokes compensate for blending in gamma space.
+            *c = (255.0 * (i as f32 / 255.0).powf(0.8)).round() as u8;
+        }
+        let mut renderer = Renderer {
+            regular,
+            bold,
+            px,
+            cell: Cell {
+                width: 1,
+                height: 1,
+            },
+            baseline: 0,
+            stars: HashMap::new(),
+            contrast,
+        };
+        renderer.apply_size(px);
+        renderer
+    }
+
+    fn font(&self) -> FontRef<'_> {
+        self.regular.font()
     }
 
     pub fn cell(&self) -> Cell {
@@ -125,9 +211,10 @@ impl Renderer {
         };
         self.baseline =
             (metrics.ascent + (height - metrics.ascent - metrics.descent) / 2.0).round() as i32;
-        self.ascii = (0..128).map(|_| None).collect();
-        self.glyph_ids.clear();
-        self.glyphs.clear();
+        self.regular.clear();
+        if let Some(bold) = &mut self.bold {
+            bold.clear();
+        }
     }
 
     /// Rasterizes printable ASCII ahead of the first frame.
@@ -135,53 +222,15 @@ impl Renderer {
         for ch in ' '..='~' {
             self.bitmap(ch);
         }
+        if let Some(bold) = &mut self.bold {
+            for ch in ' '..='~' {
+                bold.bitmap(ch, self.px);
+            }
+        }
     }
 
     fn bitmap(&mut self, ch: char) -> Option<&Bitmap> {
-        let code = ch as usize;
-        if code < 128 {
-            if self.ascii[code].is_none() {
-                let glyph = self.font().charmap().map(ch);
-                self.ascii[code] = Some(self.rasterize(glyph).unwrap_or_else(empty_bitmap));
-            }
-            return self.ascii[code].as_ref().filter(|b| b.width > 0);
-        }
-        let glyph = match self.glyph_ids.get(&ch) {
-            Some(&glyph) => glyph,
-            None => {
-                let glyph = self.font().charmap().map(ch);
-                self.glyph_ids.insert(ch, glyph);
-                glyph
-            }
-        };
-        if !self.glyphs.contains_key(&glyph) {
-            let bitmap = self.rasterize(glyph);
-            self.glyphs.insert(glyph, bitmap);
-        }
-        self.glyphs.get(&glyph).and_then(Option::as_ref)
-    }
-
-    fn rasterize(&mut self, glyph: u16) -> Option<Bitmap> {
-        let font = FontRef {
-            data: &self.data,
-            offset: self.offset,
-            key: self.key,
-        };
-        let mut scaler = self.context.builder(font).size(self.px).hint(true).build();
-        let image = Render::new(&[Source::Outline])
-            .format(Format::Alpha)
-            .render(&mut scaler, glyph)?;
-        let p = image.placement;
-        if p.width == 0 || p.height == 0 {
-            return None;
-        }
-        Some(Bitmap {
-            left: p.left,
-            top: p.top,
-            width: p.width,
-            height: p.height,
-            coverage: image.data.into_boxed_slice(),
-        })
+        self.regular.bitmap(ch, self.px)
     }
 
     /// Draws `list` into `target`, except its popup layer.
@@ -224,9 +273,20 @@ impl Renderer {
 
     fn draw_glyphs(&mut self, glyphs: &[Glyph], target: &mut Target<'_>) {
         let baseline = self.baseline;
-        let contrast = self.contrast;
+        let contrast = &self.contrast;
+        let px = self.px;
+        let (regular, bold) = (&mut self.regular, &mut self.bold);
         for glyph in glyphs {
-            if let Some(bitmap) = self.bitmap(glyph.ch) {
+            let face = if glyph.bold {
+                if let Some(face) = bold.as_mut() {
+                    face
+                } else {
+                    &mut *regular
+                }
+            } else {
+                &mut *regular
+            };
+            if let Some(bitmap) = face.bitmap(glyph.ch, px) {
                 blit(
                     target,
                     bitmap,
@@ -234,7 +294,7 @@ impl Renderer {
                     glyph.y + baseline,
                     glyph.color,
                     glyph.clip,
-                    &contrast,
+                    contrast,
                 );
             }
         }
@@ -457,12 +517,16 @@ mod tests {
             let ch = char::from_u32(code).unwrap();
             assert!(r.bitmap(ch).is_some(), "the missing-glyph box is drawn");
         }
-        assert_eq!(r.glyph_ids.len(), 1000);
-        assert_eq!(r.glyphs.len(), 1);
+        assert_eq!(r.regular.glyph_ids.len(), 1000);
+        assert_eq!(r.regular.glyphs.len(), 1);
         r.set_size(r.px());
-        assert_eq!(r.glyphs.len(), 1, "an unchanged size keeps the cache");
+        assert_eq!(
+            r.regular.glyphs.len(),
+            1,
+            "an unchanged size keeps the cache"
+        );
         r.set_size(r.px() + 1.0);
-        assert!(r.glyphs.is_empty());
+        assert!(r.regular.glyphs.is_empty());
     }
 
     #[test]
@@ -496,6 +560,7 @@ mod tests {
             x: cell.width as i32,
             y: 0,
             ch: 'M',
+            bold: false,
             color: 0xFFFFFF,
             clip: Rect { x: 0, y: 0, w, h },
         });
@@ -518,6 +583,46 @@ mod tests {
     }
 
     #[test]
+    fn bold_glyphs_use_the_bold_face() {
+        let mut regular = renderer();
+        let mut bold = Renderer::new_with_bold(
+            Cow::Borrowed(rte_assets::DEFAULT_FONT),
+            Cow::Borrowed(rte_assets::BOLD_FONT),
+            16.0,
+        )
+        .unwrap();
+        let render = |renderer: &mut Renderer, is_bold| {
+            let cell = renderer.cell();
+            let clip = Rect {
+                x: 0,
+                y: 0,
+                w: cell.width,
+                h: cell.height,
+            };
+            let mut pixels = vec![0; (cell.width * cell.height) as usize];
+            let mut list = DisplayList::default();
+            list.glyphs.push(Glyph {
+                x: 0,
+                y: 0,
+                ch: 'M',
+                bold: is_bold,
+                color: 0xFFFFFF,
+                clip,
+            });
+            renderer.draw(
+                &list,
+                &mut Target {
+                    pixels: &mut pixels,
+                    width: cell.width,
+                    height: cell.height,
+                },
+            );
+            pixels
+        };
+        assert_ne!(render(&mut regular, false), render(&mut bold, true));
+    }
+
+    #[test]
     fn popup_layer_covers_the_text_and_draws_stars_and_images() {
         let mut r = renderer();
         let (w, h) = (40u32, 40u32);
@@ -528,6 +633,7 @@ mod tests {
             x: 0,
             y: 0,
             ch: 'M',
+            bold: false,
             color: 0xFFFFFF,
             clip: all,
         });
@@ -591,6 +697,7 @@ mod tests {
                 x,
                 y,
                 ch: 'W',
+                bold: false,
                 color: 0xFFFFFF,
                 clip: Rect {
                     x: -50,
@@ -635,6 +742,7 @@ mod tests {
                     selections: &[],
                     caret: CaretStyle::Hidden,
                     highlights: Default::default(),
+                    empty: None,
                 },
                 &mut list,
             );

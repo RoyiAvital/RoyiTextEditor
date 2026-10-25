@@ -131,6 +131,7 @@ pub struct SearchThread {
     counts: Sender<Job>,
     rx: Receiver<Reply>,
     gens: Arc<[AtomicU64; 2]>,
+    checkpoints: SharedCheckpoints,
 }
 
 impl SearchThread {
@@ -158,7 +159,7 @@ impl SearchThread {
             replies,
             wake,
             compiled: None,
-            checkpoints,
+            checkpoints: checkpoints.clone(),
         };
         thread::Builder::new()
             .name("search-count".to_owned())
@@ -169,7 +170,21 @@ impl SearchThread {
             counts,
             rx,
             gens,
+            checkpoints,
         }
+    }
+
+    /// Frees the count checkpoints (and the text they hold). Call after
+    /// cancelling the find lane: a count of an older generation then never
+    /// records new ones.
+    pub fn release(&self) {
+        *self.checkpoints.lock().expect("checkpoints") = None;
+    }
+
+    /// The count checkpoints hold a text.
+    #[cfg(test)]
+    pub fn holds_checkpoints(&self) -> bool {
+        self.checkpoints.lock().expect("checkpoints").is_some()
     }
 
     /// Queues `job`; it cancels older generations of its lane.
@@ -510,6 +525,14 @@ impl Worker {
         };
         *self.checkpoints.lock().expect("checkpoints") =
             Some(Checkpoints::new(generation, &snapshot, &query, scope.start));
+        // Cancelled meanwhile: `release` may have run before the line above.
+        if !self.current(lane, generation) {
+            let mut cp = self.checkpoints.lock().expect("checkpoints");
+            if cp.as_ref().is_some_and(|c| c.generation == generation) {
+                *cp = None;
+            }
+            return;
+        }
         let gens = self.gens.clone();
         let stop = move || gens[lane as usize].load(Ordering::Relaxed) != generation;
         let mut s = Searcher::new(&matcher, &snapshot, &stop);

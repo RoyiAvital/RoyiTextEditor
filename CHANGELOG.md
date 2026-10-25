@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-10-25
+
+This version shapes the application around its main use: one file per
+window, opened from a file manager.  
+Started without a file, the window opens in an empty state.  
+A file can be dragged onto the window (_Drag and Drop_). It opens when 
+the current file has no unsaved changes or int an empty state.
+
+### Added
+
+- Empty state: started without a file, the window shows `Drop a file here to
+  open it`; nothing can be edited and closing never asks. The Command
+  Palette, About, Keyboard Shortcuts, zoom and Quit work.
+- Drag and drop: a file dropped on the window opens in the empty state or
+  in place of a file without unsaved changes. With unsaved changes or a save
+  running nothing opens and the status line says why; of several files only
+  the first opens; folders are refused. Startup is unchanged (`shell32`
+  loads on the first drop).
+- `Application: Quit` also on `Ctrl+Shift+W`.
+- Performance Benchmark v1: L26, Start empty session.
+
+### Changed
+
+- `File: Close` (`Ctrl+W`, `Ctrl+F4`) closes the file and keeps the window
+  in the empty state; `Alt+F4` and `Ctrl+Shift+W` quit. Both ask first about
+  unsaved changes.
+- `--read-only` applies to every file opened in the session; `--syntax`
+  applies to the file named on the command line.
+- A folder named on the command line starts the empty state with a notice.
+- Closing or replacing a file while it loads stops its loader.
+- The unsaved-changes prompt labels `D` as `Discard`; the application name in
+  the title strip uses bold type.
+
+### Removed
+
+- The untitled scratch document, its amber marker and the "Discard the
+  untitled document?" prompt.
+
+### Documentation
+
+- README and the online guide describe the single-session design, the empty
+  state, drag and drop and the close and quit keys; the Developer Guide
+  shows the file lifecycle.
+
 ## [0.4.1] - 2026-10-24
 
 ### Added
@@ -325,4 +369,3 @@ full results in `Performance.md`.
 ### Documentation
 
 - Added online documentation.
-
