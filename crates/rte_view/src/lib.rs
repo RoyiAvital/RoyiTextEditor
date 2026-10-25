@@ -852,31 +852,6 @@ fn text_run(
     color: Color,
     clip: Rect,
 ) -> u32 {
-    text_run_weight(out, text, x, y, cell, color, clip, false)
-}
-
-fn text_run_bold(
-    out: &mut Vec<Glyph>,
-    text: &str,
-    x: i32,
-    y: i32,
-    cell: Cell,
-    color: Color,
-    clip: Rect,
-) -> u32 {
-    text_run_weight(out, text, x, y, cell, color, clip, true)
-}
-
-fn text_run_weight(
-    out: &mut Vec<Glyph>,
-    text: &str,
-    x: i32,
-    y: i32,
-    cell: Cell,
-    color: Color,
-    clip: Rect,
-    bold: bool,
-) -> u32 {
     let mut col = 0;
     for ch in text.chars() {
         let width = ch.width().unwrap_or(1) as u32;
@@ -889,7 +864,7 @@ fn text_run_weight(
                 x: gx,
                 y,
                 ch,
-                bold,
+                bold: false,
                 color,
                 clip,
             });
@@ -897,6 +872,24 @@ fn text_run_weight(
         col += width;
     }
     col
+}
+
+/// [`text_run`] in bold type.
+fn text_run_bold(
+    out: &mut Vec<Glyph>,
+    text: &str,
+    x: i32,
+    y: i32,
+    cell: Cell,
+    color: Color,
+    clip: Rect,
+) -> u32 {
+    let first = out.len();
+    let cols = text_run(out, text, x, y, cell, color, clip);
+    for glyph in &mut out[first..] {
+        glyph.bold = true;
+    }
+    cols
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -45,7 +45,11 @@ fn main() {
     [IO.File]::WriteAllText($SyntaxFixture, $SyntaxSample, (New-Object Text.UTF8Encoding $false))
     $SyntaxFixture
 } else {
-    Join-Path $Root 'docs\src\Untitled'
+    # The editor screenshot shows these two lines (generated, like the syntax sample).
+    $TextFixture = Join-Path $OutputDir 'Untitled'
+    $TextSample = "Text is the optimal universal IO interface`nText is the final frontier of interfaces`n"
+    [IO.File]::WriteAllText($TextFixture, $TextSample, (New-Object Text.UTF8Encoding $false))
+    $TextFixture
 }
 $OutputName = if ($SearchPanel) {
     'search-panel.png'
@@ -57,14 +61,6 @@ $OutputName = if ($SearchPanel) {
     'editor-screenshot.png'
 }
 $Output = Join-Path $OutputDir $OutputName
-
-if (-not $IsSyntaxCapture) {
-    $ActualText = [IO.File]::ReadAllText($Fixture, [Text.Encoding]::UTF8).Replace("`r`n", "`n")
-    $ExpectedText = "Text is the optimal universal IO interface`nText is the final frontier of interfaces`n"
-    if ($ActualText -cne $ExpectedText) {
-        throw 'docs/src/Untitled must contain the two screenshot lines.'
-    }
-}
 
 & cargo build --release --locked -p rte_app --target-dir $EditorTarget
 if ($LASTEXITCODE -ne 0) {
@@ -102,7 +98,7 @@ if (Test-Path $Output) {
 $EditorProcess = Start-Process -FilePath $EditorExe -ArgumentList ('"{0}"' -f $Fixture) -PassThru
 try {
     if (-not $EditorProcess.WaitForInputIdle(10000)) {
-        throw 'The editor did not become idle while opening docs/src/Untitled.'
+        throw "The editor did not become idle while opening $Fixture."
     }
     $EditorProcess.Refresh()
     $Window = $EditorProcess.MainWindowHandle
