@@ -21,6 +21,46 @@ const VIEWPORT_MAX: u64 = 1024 * 1024;
 const SEED_MAX: u64 = 1024;
 /// Highlight ranges kept allocated between searches.
 const KEEP_MATCHES: usize = 4096;
+/// Rest of the pointer on a part of the box before its tooltip shows.
+pub(super) const TOOLTIP_MS: u32 = 500;
+
+/// The tooltip of the search box: the part under the pointer and whether
+/// its tooltip shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub(super) struct Tip {
+    pub hit: Option<FindHit>,
+    pub shown: bool,
+}
+
+/// Tooltip of a part of the box, as in VS Code: its label and key. The
+/// keys of navigation and Replace are those of the fields (`Enter`).
+pub(super) fn tooltip_text(hit: FindHit) -> Option<String> {
+    let (label, id) = match hit {
+        FindHit::Fold => ("Toggle Replace", None),
+        FindHit::FindText => ("Find", None),
+        FindHit::ReplaceText => ("Replace", None),
+        FindHit::Toggle(0) => ("Match Case", Some("toggleFindCaseSensitive")),
+        FindHit::Toggle(1) => ("Match Whole Word", Some("toggleFindWholeWord")),
+        FindHit::Toggle(2) => ("Use Glob", Some("royi.toggleFindGlob")),
+        FindHit::Toggle(3) => ("Use Regular Expression", Some("toggleFindRegex")),
+        FindHit::Preserve => ("Preserve Case", Some("togglePreserveCase")),
+        FindHit::Prev => ("Previous Match (Shift+Enter)", None),
+        FindHit::Next => ("Next Match (Enter)", None),
+        FindHit::InSelection => ("Find in Selection", Some("toggleFindInSelection")),
+        FindHit::Close => ("Close (Escape)", None),
+        FindHit::ReplaceOne => ("Replace (Enter)", None),
+        FindHit::ReplaceAll => ("Replace All", Some("editor.action.replaceAll")),
+        FindHit::Toggle(_) | FindHit::Panel => return None,
+    };
+    let key = id
+        .and_then(commands::index_of)
+        .map(commands::key_hint)
+        .filter(|k| !k.is_empty());
+    Some(match key {
+        Some(key) => format!("{label} ({key})"),
+        None => label.to_owned(),
+    })
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum Field {
@@ -979,6 +1019,39 @@ impl Editor {
         ))
     }
 
+    /// The pointer moved without a button: the tooltip follows the part
+    /// of the box under it, after [`TOOLTIP_MS`] for the first one.
+    pub(super) fn hover(&mut self, x: i32, y: i32, ctx: &mut Ctx) {
+        let hit = match self.popup {
+            None => self.find_geometry().and_then(|g| g.hit(x, y)),
+            Some(_) => None,
+        }
+        .filter(|&hit| tooltip_text(hit).is_some());
+        if hit == self.tip.hit {
+            return;
+        }
+        let shown = self.tip.shown;
+        // Moving between parts keeps showing tooltips, as in VS Code.
+        self.tip = Tip {
+            hit,
+            shown: shown && hit.is_some(),
+        };
+        if hit.is_some() && !shown {
+            ctx.set_timer(TOOLTIP_MS);
+        }
+        if shown {
+            ctx.redraw();
+        }
+    }
+
+    /// The tooltip delay passed: show it if the pointer is still on a part.
+    pub(super) fn show_tooltip(&mut self, ctx: &mut Ctx) {
+        if self.tip.hit.is_some() && !self.tip.shown && self.find_open() {
+            self.tip.shown = true;
+            ctx.redraw();
+        }
+    }
+
     /// A click on the box; returns false when it is outside.
     pub(super) fn find_click(&mut self, x: i32, y: i32) -> bool {
         let Some(hit) = self.find_geometry().and_then(|g| g.hit(x, y)) else {
@@ -1034,6 +1107,7 @@ impl Editor {
         )
             .hash(h);
         f.matches.len().hash(h);
+        self.tip.hash(h);
     }
 
     pub(super) fn draw_find(&mut self) {
@@ -1050,6 +1124,10 @@ impl Editor {
             (None, Some(w)) => Some((w.as_str(), Severity::Warning)),
             _ => None,
         };
+        let tip = self.tip.hit.filter(|_| self.tip.shown).and_then(|hit| {
+            let text = tooltip_text(hit)?;
+            Some((g.rect(hit)?, text))
+        });
         let frame = FindFrame {
             cell,
             theme: &self.theme,
@@ -1068,6 +1146,10 @@ impl Editor {
             message,
         };
         rte_view::draw_find(&g, &frame, &mut self.list.popup);
+        if let Some((anchor, text)) = tip {
+            let out = &mut self.list.tooltip;
+            rte_view::draw_find_tooltip(&g, anchor, &text, cell, &self.theme, out);
+        }
     }
 }
 

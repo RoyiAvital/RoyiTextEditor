@@ -11,9 +11,9 @@ Palette with `Ctrl+Shift+P` and run **View: Toggle Syntax Highlighting**.
 
 ![Language picker with supported modes](assets/syntax-language-picker.png)
 
-Supported modes: Bash, C, C#, C++, CSS, Go, HTML, Java, JavaScript, JSON,
-Julia, Lua, Markdown, MATLAB, Octave, PowerShell, Python, Rust, SQL, TOML,
-TypeScript, TSX, XML, and YAML.
+Supported modes: Bash, Batch, C, C#, C++, CSS, Go, HTML, INI, Java,
+JavaScript, JSON, Julia, Lua, Markdown, MATLAB, Octave, PowerShell, Python,
+Rust, SQL, TOML, TSX, TypeScript, XML, and YAML.
 
 Files larger than 32 MiB are plain text by default. Set `syntax.maxFileMiB`
 from 1 to 1024 in `RoyiTextEditor.yaml` to change the limit. Markdown and HTML

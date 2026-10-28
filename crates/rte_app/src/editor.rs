@@ -261,6 +261,8 @@ pub struct Editor {
     line_preview: Option<Scroll>,
     /// The window covers its monitor (`F11`), as the platform reported.
     full_screen: bool,
+    /// Tooltip of the search box under the pointer.
+    tip: find::Tip,
     /// Trace marks done: first highlighted frame, fully highlighted.
     marked: (bool, bool),
 }
@@ -419,6 +421,7 @@ impl Editor {
             symbol_offsets: Vec::new(),
             line_preview: None,
             full_screen: false,
+            tip: find::Tip::default(),
             marked: (false, false),
         };
         // `--syntax` belongs to the command-line file; without one it is unused.
@@ -2117,7 +2120,33 @@ impl Editor {
 impl App for Editor {
     fn event(&mut self, event: Event, ctx: &mut Ctx) -> bool {
         self.size = ctx.size();
+        // Pointer moves without a button only matter for search-box tooltips.
+        match event {
+            Event::Hover { x, y } => {
+                if self.find_open() || self.tip.hit.is_some() {
+                    self.hover(x, y, ctx);
+                }
+                return false;
+            }
+            Event::MouseLeave => {
+                if std::mem::take(&mut self.tip).shown {
+                    ctx.redraw();
+                }
+                return false;
+            }
+            Event::Timer => {
+                self.show_tooltip(ctx);
+                return true;
+            }
+            _ => {}
+        }
         let before = self.visible();
+        if matches!(
+            event,
+            Event::Key(_) | Event::Char(_) | Event::MouseDown { .. } | Event::Wheel { .. }
+        ) {
+            self.tip = find::Tip::default();
+        }
         let layout_changed = matches!(event, Event::Shown | Event::Resized { .. });
         let mut handled = true;
         match event {
@@ -2199,6 +2228,7 @@ impl App for Editor {
             Event::MouseUp => self.drag = None,
             Event::CloseRequested => self.request_close(ctx),
             Event::FilesDropped(dropped) => self.files_dropped(dropped),
+            Event::Hover { .. } | Event::MouseLeave | Event::Timer => {}
             Event::FullScreen(Ok(on)) => self.full_screen = on,
             Event::FullScreen(Err(reason)) => {
                 self.notice = Some(format!("Full screen failed: {reason}"));
@@ -2324,6 +2354,7 @@ impl App for Editor {
         self.renderer.draw(&self.list, &mut target);
         let ui = self.ui_renderer.as_mut().unwrap_or(&mut self.renderer);
         ui.draw_layer(&self.list.popup, &mut target);
+        ui.draw_layer(&self.list.tooltip, &mut target);
         if !self.painted {
             self.painted = true;
             self.trace.mark("first_paint");
@@ -5136,5 +5167,131 @@ mod tests {
                 "line {line}"
             );
         }
+    }
+
+    /// Text of the popup layer's glyphs (search box and tooltip).
+    fn popup_text(editor: &mut Editor) -> String {
+        let mut pixels = vec![0u32; 1100 * 700];
+        editor.paint(&mut pixels, 1100, 700);
+        let layers = [&editor.list.popup, &editor.list.tooltip];
+        layers
+            .iter()
+            .flat_map(|l| l.glyphs.iter().map(|g| g.ch))
+            .collect()
+    }
+
+    #[test]
+    fn search_box_tooltips_follow_the_pointer() {
+        use rte_view::FindHit;
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, b"text", false);
+        let mut ctx = Ctx::headless(1100, 700, 96);
+        editor.event(Event::Wake, &mut ctx);
+        // No box: pointer moves are ignored at once.
+        let mut ctx = Ctx::headless(1100, 700, 96);
+        assert!(!editor.event(Event::Hover { x: 900, y: 40 }, &mut ctx));
+        assert_eq!(
+            (ctx.requested_timer(), ctx.redraw_requested()),
+            (None, false)
+        );
+
+        editor.event(key(VK_H, true, false), &mut ctx);
+        let g = editor.find_geometry().unwrap();
+        let at = |hit| {
+            let r = g.rect(hit).unwrap();
+            Event::Hover {
+                x: r.x + r.w as i32 / 2,
+                y: r.y + r.h as i32 / 2,
+            }
+        };
+        let mut ctx = Ctx::headless(1100, 700, 96);
+        editor.event(at(FindHit::Toggle(0)), &mut ctx);
+        assert_eq!(ctx.requested_timer(), Some(find::TOOLTIP_MS));
+        assert!(!popup_text(&mut editor).contains("MatchCase"));
+        let mut ctx = Ctx::headless(1100, 700, 96);
+        editor.event(Event::Timer, &mut ctx);
+        assert!(ctx.redraw_requested());
+        assert!(popup_text(&mut editor).contains("MatchCase(Alt+C)"));
+        // Another part shows its tooltip at once; staying still changes nothing.
+        let mut ctx = Ctx::headless(1100, 700, 96);
+        editor.event(at(FindHit::Fold), &mut ctx);
+        assert!(ctx.redraw_requested() && ctx.requested_timer().is_none());
+        assert!(popup_text(&mut editor).contains("ToggleReplace"));
+        let mut ctx = Ctx::headless(1100, 700, 96);
+        editor.event(at(FindHit::Fold), &mut ctx);
+        assert!(!ctx.redraw_requested());
+        for (hit, text) in [
+            (FindHit::Toggle(1), "MatchWholeWord(Alt+W)"),
+            (FindHit::Toggle(2), "UseGlob(Alt+G)"),
+            (FindHit::Toggle(3), "UseRegularExpression(Alt+R)"),
+            (FindHit::Prev, "PreviousMatch(Shift+Enter)"),
+            (FindHit::Next, "NextMatch(Enter)"),
+            (FindHit::InSelection, "FindinSelection(Alt+L)"),
+            (FindHit::Close, "Close(Escape)"),
+            (FindHit::Preserve, "PreserveCase(Alt+P)"),
+            (FindHit::ReplaceOne, "Replace(Enter)"),
+            (FindHit::ReplaceAll, "ReplaceAll(Ctrl+Alt+Enter)"),
+        ] {
+            editor.event(at(hit), &mut ctx);
+            assert!(popup_text(&mut editor).contains(text), "{hit:?}");
+        }
+        // The fields are named; the count is not a part.
+        for (hit, text) in [
+            (FindHit::FindText, "Find"),
+            (FindHit::ReplaceText, "Replace"),
+        ] {
+            editor.event(at(hit), &mut ctx);
+            popup_text(&mut editor);
+            let tip: String = editor.list.tooltip.glyphs.iter().map(|g| g.ch).collect();
+            assert!(editor.tip.shown && tip == text, "{hit:?}: {tip}");
+        }
+        // Off the parts, out of the window, or a key: no tooltip.
+        let count = g.count;
+        let mut ctx = Ctx::headless(1100, 700, 96);
+        editor.event(
+            Event::Hover {
+                x: count.x + 5,
+                y: count.y + 5,
+            },
+            &mut ctx,
+        );
+        assert!(ctx.redraw_requested() && !editor.tip.shown);
+        editor.event(at(FindHit::Next), &mut ctx);
+        editor.event(Event::Timer, &mut ctx);
+        assert!(editor.tip.shown);
+        let mut ctx = Ctx::headless(1100, 700, 96);
+        editor.event(Event::MouseLeave, &mut ctx);
+        assert!(ctx.redraw_requested() && editor.tip == find::Tip::default());
+        editor.event(at(FindHit::Next), &mut ctx);
+        editor.event(Event::Timer, &mut ctx);
+        editor.event(key(VK_F3, false, false), &mut ctx);
+        assert!(!popup_text(&mut editor).contains("NextMatch"));
+        // A late timer after the pointer left shows nothing.
+        editor.event(at(FindHit::Prev), &mut ctx);
+        editor.event(Event::MouseLeave, &mut ctx);
+        let mut ctx = Ctx::headless(1100, 700, 96);
+        editor.event(Event::Timer, &mut ctx);
+        assert!(!ctx.redraw_requested() && !editor.tip.shown);
+    }
+
+    #[test]
+    fn ini_files_highlight_comment_and_list_their_sections() {
+        let mut ctx = Ctx::headless(800, 600, 96);
+        let mut editor = editor_named(r"C:\app\settings.ini", b"[core]\nname = x\n");
+        editor.event(
+            Event::Resized {
+                width: 800,
+                height: 600,
+            },
+            &mut ctx,
+        );
+        assert_eq!(editor.language.map(|l| l.id), Some("ini"));
+        assert!(editor.status_text().1.contains("INI"));
+        wait_for_syntax(&mut editor, &mut ctx);
+        let property = editor.theme.syntax[rte_syntax::Style::Property as usize];
+        assert_eq!(glyph_color(&mut editor, 'n'), property);
+        editor.select_single(Selection::caret(8));
+        editor.event(key(VK_OEM_2, true, false), &mut ctx);
+        assert_eq!(text(&editor), "[core]\n; name = x\n");
     }
 }

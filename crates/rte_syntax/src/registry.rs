@@ -31,10 +31,11 @@ pub enum Grammar {
     Java,
     Matlab,
     Julia,
+    Ini,
 }
 
 impl Grammar {
-    pub const ALL: [Grammar; 25] = [
+    pub const ALL: [Grammar; 26] = [
         Grammar::Rust,
         Grammar::C,
         Grammar::Cpp,
@@ -60,6 +61,7 @@ impl Grammar {
         Grammar::Java,
         Grammar::Matlab,
         Grammar::Julia,
+        Grammar::Ini,
     ];
 
     /// Directory of the trimmed queries under `queries/`.
@@ -90,6 +92,7 @@ impl Grammar {
             Grammar::Java => "java",
             Grammar::Matlab => "matlab",
             Grammar::Julia => "julia",
+            Grammar::Ini => "ini",
         }
     }
 
@@ -120,6 +123,7 @@ impl Grammar {
             Grammar::Java => tree_sitter_java::LANGUAGE.into(),
             Grammar::Matlab => tree_sitter_matlab::LANGUAGE.into(),
             Grammar::Julia => tree_sitter_julia::LANGUAGE.into(),
+            Grammar::Ini => tree_sitter_ini::LANGUAGE.into(),
         }
     }
 }
@@ -178,7 +182,7 @@ const fn lang(id: &'static str, name: &'static str, grammar: Grammar) -> Lang {
 }
 
 /// All languages, sorted by name.
-pub static LANGUAGES: [Lang; 25] = [
+pub static LANGUAGES: [Lang; 26] = [
     Lang {
         extensions: &["sh", "bash", "zsh", "ksh"],
         file_names: &[
@@ -247,6 +251,15 @@ pub static LANGUAGES: [Lang; 25] = [
         brackets: &[('<', '>'), ('(', ')'), ('[', ']'), ('{', '}')],
         auto_close: CLOSE_TAGS,
         ..lang("html", "HTML", Grammar::Html)
+    },
+    Lang {
+        extensions: &["ini", "cfg", "inf"],
+        file_names: &[".editorconfig", ".gitconfig", ".gitmodules"],
+        aliases: &["dosini"],
+        line_comment: Some(";"),
+        brackets: &[('[', ']')],
+        auto_close: &[('[', ']'), ('"', '"')],
+        ..lang("ini", "INI", Grammar::Ini)
     },
     Lang {
         extensions: &["java"],

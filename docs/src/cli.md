@@ -45,6 +45,7 @@ JSON (`.ipynb` is not detected as JSON), the third measures startup.
 | `css`        | CSS            |                                     |
 | `go`         | Go             | `golang`                            |
 | `html`       | HTML           | `htm`, `xhtml`                      |
+| `ini`        | INI            | `dosini`                            |
 | `java`       | Java           |                                     |
 | `javascript` | JavaScript     | `js`, `jsx`, `node`                 |
 | `json`       | JSON           | `jsonc`, `json5`                    |
@@ -66,4 +67,6 @@ JSON (`.ipynb` is not detected as JSON), the third measures startup.
 The same names (and file extensions) select the language of Markdown code
 fences.
 
-Windows Batch files are detected by their `.bat` or `.cmd` extension.
+Windows Batch files are detected by their `.bat` or `.cmd` extension; INI
+files by `.ini`, `.cfg` or `.inf`, and the names `.editorconfig`, `.gitconfig`
+and `.gitmodules`.

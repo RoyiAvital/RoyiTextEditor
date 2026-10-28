@@ -32,8 +32,8 @@ use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
 use windows_sys::Win32::UI::Controls::MARGINS;
 use windows_sys::Win32::UI::HiDpi::{GetDpiForSystem, GetDpiForWindow, GetSystemMetricsForDpi};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetCapture, GetDoubleClickTime, GetKeyState, ReleaseCapture, SetCapture, VK_CONTROL, VK_MENU,
-    VK_SHIFT,
+    GetCapture, GetDoubleClickTime, GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE,
+    TRACKMOUSEEVENT, TrackMouseEvent, VK_CONTROL, VK_MENU, VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWL_STYLE,
@@ -52,6 +52,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_NCHITTEST, WM_PAINT, WM_SETCURSOR, WM_SIZE, WM_SYSCOMMAND, WM_SYSKEYDOWN,
     WM_WINDOWPOSCHANGED, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
+use windows_sys::Win32::UI::WindowsAndMessaging::{KillTimer, SetTimer, WM_TIMER};
 
 const WM_WAKE: u32 = WM_APP + 1;
 /// A scripted key (`Ctx::post_key`): `wParam` holds the key, see `encode_key`.
@@ -69,6 +70,10 @@ const MK_MBUTTON: usize = 0x0010;
 const WM_DROPFILES: u32 = 0x0233;
 /// Extended window style accepting `WM_DROPFILES` (what `DragAcceptFiles` sets).
 const WS_EX_ACCEPTFILES: u32 = 0x0000_0010;
+/// The one-shot timer of [`Ctx::set_timer`].
+const APP_TIMER: usize = 1;
+/// The pointer left the client area (after `TrackMouseEvent`).
+const WM_MOUSELEAVE: u32 = 0x02A3;
 /// The display resolution or arrangement changed.
 const WM_DISPLAYCHANGE: u32 = 0x007E;
 /// `WM_SYSCOMMAND` codes that move or size the window.
@@ -186,6 +191,15 @@ pub enum Event {
         x: i32,
         y: i32,
     },
+    /// Pointer movement over the client area without a pressed button.
+    Hover {
+        x: i32,
+        y: i32,
+    },
+    /// The pointer left the client area.
+    MouseLeave,
+    /// The time of [`Ctx::set_timer`] passed.
+    Timer,
     /// The left button was released or the capture was lost.
     MouseUp,
     CloseRequested,
@@ -218,6 +232,7 @@ pub struct Ctx {
     posted_key: Option<Key>,
     posted_char: Option<char>,
     full_screen: Option<bool>,
+    timer: Option<u32>,
     hwnd: HWND,
     /// Clipboard of a headless context: text and private data.
     memory_clipboard: Option<(String, Vec<u8>)>,
@@ -238,6 +253,7 @@ impl Ctx {
             posted_key: None,
             posted_char: None,
             full_screen: None,
+            timer: None,
             hwnd: null_mut(),
             memory_clipboard: None,
         }
@@ -337,6 +353,17 @@ impl Ctx {
     /// Full screen state requested during this call, if any.
     pub fn requested_full_screen(&self) -> Option<bool> {
         self.full_screen
+    }
+
+    /// Sends [`Event::Timer`] once, after `ms` milliseconds (replacing a
+    /// pending timer).
+    pub fn set_timer(&mut self, ms: u32) {
+        self.timer = Some(ms);
+    }
+
+    /// Timer requested during this call, if any.
+    pub fn requested_timer(&self) -> Option<u32> {
+        self.timer
     }
 }
 
@@ -483,6 +510,8 @@ struct State {
     full_screen: Option<Saved>,
     /// The platform itself is moving the window (full screen changes).
     placing: bool,
+    /// `WM_MOUSELEAVE` was requested for the pointer inside the window.
+    tracking_leave: bool,
 }
 
 pub struct WindowOptions<'a> {
@@ -516,6 +545,7 @@ impl Window {
             last_click: (0, 0, 0, 0),
             full_screen: None,
             placing: false,
+            tracking_leave: false,
         }));
         // SAFETY: strings are NUL-terminated and outlive the calls; the state
         // pointer stays valid until `run` frees it after the loop.
@@ -700,6 +730,9 @@ unsafe fn apply(hwnd: HWND, ctx: Ctx) {
         }
         if let Some(ch) = ctx.posted_char {
             PostMessageW(hwnd, WM_SCRIPTED_CHAR, ch as usize, 0);
+        }
+        if let Some(ms) = ctx.timer {
+            SetTimer(hwnd, APP_TIMER, ms, None);
         }
         if let Some(on) = ctx.full_screen {
             if on {
@@ -1294,10 +1327,35 @@ unsafe extern "system" fn window_proc(
                 0
             }
             WM_MOUSEMOVE => {
+                let (x, y) = point_of(lparam);
                 if wparam & (MK_LBUTTON | MK_MBUTTON) != 0 && GetCapture() == hwnd {
-                    let (x, y) = point_of(lparam);
                     dispatch(hwnd, Event::MouseMove { x, y });
+                } else if GetCapture().is_null() {
+                    if let Some(state) = state(hwnd)
+                        && !state.tracking_leave
+                    {
+                        let mut track = TRACKMOUSEEVENT {
+                            cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+                            dwFlags: TME_LEAVE,
+                            hwndTrack: hwnd,
+                            dwHoverTime: 0,
+                        };
+                        state.tracking_leave = TrackMouseEvent(&mut track) != 0;
+                    }
+                    dispatch(hwnd, Event::Hover { x, y });
                 }
+                0
+            }
+            WM_MOUSELEAVE => {
+                if let Some(state) = state(hwnd) {
+                    state.tracking_leave = false;
+                }
+                dispatch(hwnd, Event::MouseLeave);
+                0
+            }
+            WM_TIMER if wparam == APP_TIMER => {
+                KillTimer(hwnd, APP_TIMER);
+                dispatch(hwnd, Event::Timer);
                 0
             }
             WM_LBUTTONUP | WM_MBUTTONUP => {
@@ -1630,6 +1688,9 @@ mod tests {
     #[test]
     fn a_headless_context_records_full_screen_requests() {
         let mut ctx = Ctx::headless(800, 600, 96);
+        assert_eq!(ctx.requested_timer(), None);
+        ctx.set_timer(500);
+        assert_eq!(ctx.requested_timer(), Some(500));
         assert_eq!(ctx.requested_full_screen(), None);
         ctx.set_full_screen(true);
         assert_eq!(ctx.requested_full_screen(), Some(true));

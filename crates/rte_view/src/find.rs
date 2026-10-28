@@ -8,9 +8,7 @@ use crate::popup::Layer;
 use crate::{Cell, Color, Rect, Theme, text_run};
 
 /// Symbols drawn by the search box (all must exist in the default face).
-pub const FIND_SYMBOLS: &str = "\u{25B8}\u{25BE}\u{2191}\u{2193}\u{2261}\u{00D7}\u{00B6}";
-const FOLDED: &str = "\u{25B8}";
-const UNFOLDED: &str = "\u{25BE}";
+pub const FIND_SYMBOLS: &str = "\u{2191}\u{2193}\u{2261}\u{00D7}\u{00B6}";
 const PREV: &str = "\u{2191}";
 const NEXT: &str = "\u{2193}";
 const IN_SELECTION: &str = "\u{2261}";
@@ -29,7 +27,7 @@ const REPLACE_LABEL: &str = "Replace";
 const REPLACE_ALL_LABEL: &str = "Replace All";
 
 /// A clickable part of the search box.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FindHit {
     Fold,
     FindText,
@@ -185,6 +183,25 @@ impl FindGeometry {
         }
     }
 
+    /// Area of a clickable part, if the box shows it (not the text fields).
+    pub fn rect(&self, hit: FindHit) -> Option<Rect> {
+        let replace = self.replace.as_ref();
+        match hit {
+            FindHit::Fold => Some(self.fold),
+            FindHit::Toggle(i) => self.toggles.get(i).copied(),
+            FindHit::Prev => Some(self.prev),
+            FindHit::Next => Some(self.next),
+            FindHit::InSelection => Some(self.in_selection),
+            FindHit::Close => Some(self.close),
+            FindHit::Preserve => replace.map(|r| r.preserve),
+            FindHit::ReplaceOne => replace.map(|r| r.one),
+            FindHit::ReplaceAll => replace.map(|r| r.all),
+            FindHit::FindText => Some(self.field),
+            FindHit::ReplaceText => replace.map(|r| r.field),
+            FindHit::Panel => None,
+        }
+    }
+
     pub fn hit(&self, x: i32, y: i32) -> Option<FindHit> {
         if !self.panel.contains(x, y) {
             return None;
@@ -256,12 +273,7 @@ pub fn draw_find(g: &FindGeometry, f: &FindFrame<'_>, out: &mut Layer) {
         let y = r.y + (r.h.saturating_sub(cell.height) / 2) as i32;
         text_run(&mut out.glyphs, text, x, y, cell, color, r);
     };
-    let fold = if g.replace.is_some() {
-        UNFOLDED
-    } else {
-        FOLDED
-    };
-    center(out, g.fold, fold, theme.popup_dim);
+    arrow(out, g.fold, g.replace.is_some(), cell, theme.popup_dim);
 
     let border = match f.message {
         Some((_, Severity::Error)) => theme.error_border,
@@ -327,6 +339,65 @@ pub fn draw_find(g: &FindGeometry, f: &FindFrame<'_>, out: &mut Layer) {
         let x = g.message.x + (cell.width / 2) as i32;
         text_run(&mut out.glyphs, text, x, y, cell, color, inset(g.message));
     }
+}
+
+/// The replace toggle: a filled triangle pointing right (folded) or down,
+/// about two thirds of a line high, centered in `r`.
+fn arrow(out: &mut Layer, r: Rect, down: bool, cell: Cell, color: Color) {
+    let half = (cell.height / 3).max(2) as i32;
+    let (w, h) = if down {
+        (2 * half + 1, half + 1)
+    } else {
+        (half + 1, 2 * half + 1)
+    };
+    let x0 = r.x + (r.w as i32 - w) / 2;
+    let y0 = r.y + (r.h as i32 - h) / 2;
+    // Line `i` from the base spans `i..=2 * half - i` across it.
+    for i in 0..=half {
+        let span = (2 * (half - i) + 1) as u32;
+        let line = if down {
+            Rect {
+                x: x0 + i,
+                y: y0 + i,
+                w: span,
+                h: 1,
+            }
+        } else {
+            Rect {
+                x: x0 + i,
+                y: y0 + i,
+                w: 1,
+                h: span,
+            }
+        };
+        out.fill(line, color);
+    }
+}
+
+/// A tooltip: a one-line label below `anchor` (a part of the box), inside
+/// the box's right edge. Drawn in its own layer, above the box.
+pub fn draw_find_tooltip(
+    g: &FindGeometry,
+    anchor: Rect,
+    text: &str,
+    cell: Cell,
+    theme: &Theme,
+    out: &mut Layer,
+) {
+    let w = (text.width() as u32 + 2) * cell.width;
+    let h = cell.height + cell.height / 2;
+    let right = g.panel.x + g.panel.w as i32;
+    let x = (anchor.x + (anchor.w as i32 - w as i32) / 2).min(right - w as i32);
+    let rect = Rect {
+        x,
+        y: anchor.y + anchor.h as i32 + 2,
+        w,
+        h,
+    };
+    out.frame(rect, theme);
+    let y = rect.y + (h.saturating_sub(cell.height) / 2) as i32;
+    let x = rect.x + cell.width as i32;
+    text_run(&mut out.glyphs, text, x, y, cell, theme.text, inset(rect));
 }
 
 fn inset(r: Rect) -> Rect {
@@ -538,5 +609,94 @@ mod tests {
         assert!(text.contains("Unclosedgroupat1"));
         assert!(out.fills.iter().any(|f| f.color == theme.error_background));
         assert!(out.fills.iter().any(|f| f.color == theme.popup_selected));
+    }
+
+    fn frame(theme: &Theme) -> FindFrame<'_> {
+        let empty = FindField {
+            text: "",
+            caret: 0,
+            selection: (0, 0),
+            focused: false,
+        };
+        FindFrame {
+            cell: CELL,
+            theme,
+            find: empty,
+            replace: empty,
+            toggles: [false; 4],
+            preserve: false,
+            in_selection: false,
+            count: "",
+            no_results: false,
+            message: None,
+        }
+    }
+
+    /// Fills inside `r` in the given color.
+    fn fills_in(out: &Layer, r: Rect, color: Color) -> Vec<Rect> {
+        out.fills
+            .iter()
+            .filter(|f| f.color == color && r.intersect(&f.rect) == Some(f.rect))
+            .map(|f| f.rect)
+            .collect()
+    }
+
+    #[test]
+    fn the_replace_toggle_is_a_large_triangle() {
+        let theme = Theme::DARK;
+        for (replace, down) in [(false, false), (true, true)] {
+            let g = FindGeometry::new(1200, 30, CELL, replace);
+            let mut out = Layer::default();
+            draw_find(&g, &frame(&theme), &mut out);
+            let lines = fills_in(&out, g.fold, theme.popup_dim);
+            let top = lines.iter().map(|r| r.y).min().unwrap();
+            let bottom = lines.iter().map(|r| r.y + r.h as i32).max().unwrap();
+            let left = lines.iter().map(|r| r.x).min().unwrap();
+            let right = lines.iter().map(|r| r.x + r.w as i32).max().unwrap();
+            // 13 x 7 pixels for a 20 px line (the old glyph was about 6 px).
+            let (w, h) = if down { (13, 7) } else { (7, 13) };
+            assert_eq!((right - left, bottom - top), (w, h), "down {down}");
+            let center = |a: i32, b: i32, lo: i32, len: u32| (a + b) / 2 - (lo + len as i32 / 2);
+            assert!(center(left, right, g.fold.x, g.fold.w).abs() <= 1);
+            assert!(center(top, bottom, g.fold.y, g.fold.h).abs() <= 1);
+            assert!(!out.glyphs.iter().any(|g| "\u{25B8}\u{25BE}".contains(g.ch)));
+        }
+    }
+
+    #[test]
+    fn tooltips_sit_below_their_part_inside_the_box() {
+        let theme = Theme::DARK;
+        let g = FindGeometry::new(1200, 30, CELL, true);
+        for hit in [
+            FindHit::Fold,
+            FindHit::Toggle(2),
+            FindHit::Next,
+            FindHit::Close,
+            FindHit::Preserve,
+            FindHit::ReplaceAll,
+        ] {
+            let anchor = g.rect(hit).unwrap();
+            let (x, y) = (
+                anchor.x + anchor.w as i32 / 2,
+                anchor.y + anchor.h as i32 / 2,
+            );
+            assert_eq!(g.hit(x, y), Some(hit), "{hit:?}");
+            let mut out = Layer::default();
+            draw_find_tooltip(&g, anchor, "Close (Escape)", CELL, &theme, &mut out);
+            let text: String = out.glyphs.iter().map(|g| g.ch).collect();
+            assert_eq!(text, "Close(Escape)");
+            let label = out.glyphs.iter().find(|gl| gl.ch == 'C').unwrap();
+            assert!(label.y > anchor.y + anchor.h as i32, "{hit:?} below");
+            let last = out.glyphs.last().unwrap();
+            assert!(
+                last.x + CELL.width as i32 <= g.panel.x + g.panel.w as i32,
+                "{hit:?} inside"
+            );
+        }
+        assert_eq!(g.rect(FindHit::FindText), Some(g.field));
+        assert_eq!(g.rect(FindHit::Panel), None);
+        let folded = FindGeometry::new(1200, 30, CELL, false);
+        assert_eq!(folded.rect(FindHit::Preserve), None);
+        assert_eq!(folded.rect(FindHit::ReplaceText), None);
     }
 }

@@ -9,7 +9,7 @@ mod popup;
 
 pub use find::{
     FIND_SYMBOLS, FindField, FindFrame, FindGeometry, FindHit, LINE_BREAK, ReplaceGeometry,
-    Severity, TOGGLES, draw_find,
+    Severity, TOGGLES, draw_find, draw_find_tooltip,
 };
 pub use popup::{
     Image, Layer, PaletteFrame, PaletteGeometry, PaletteRow, PanelFrame, PanelGeometry, PanelLine,
@@ -353,8 +353,10 @@ pub struct DisplayList {
     pub glyphs: Vec<Glyph>,
     /// Filled after the glyphs (carets).
     pub overlays: Vec<Fill>,
-    /// Drawn last, above everything else (palette, panels).
+    /// Drawn above everything else (palette, panels).
     pub popup: Layer,
+    /// Drawn last: tooltips.
+    pub tooltip: Layer,
 }
 
 impl DisplayList {
@@ -363,6 +365,7 @@ impl DisplayList {
         self.glyphs.clear();
         self.overlays.clear();
         self.popup.clear();
+        self.tooltip.clear();
     }
 }
 

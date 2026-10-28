@@ -102,7 +102,7 @@ undo step.
 ## Syntax Highlighting
 
 Code is highlighted with built-in tree-sitter grammars for Bash, Batch, C, C#, C++,
-CSS, Go, HTML, Java, JavaScript, JSON, Julia, Lua, Markdown, MATLAB, Octave,
+CSS, Go, HTML, INI, Java, JavaScript, JSON, Julia, Lua, Markdown, MATLAB, Octave,
 PowerShell, Python, Rust, SQL, TOML, TypeScript (and TSX), XML and YAML. The
 language follows the file name or a `#!` line and is shown on the status line;
 <kbd>Ctrl</kbd>+<kbd>K</kbd> <kbd>M</kbd> changes it. The window opens with
@@ -112,6 +112,8 @@ matter and HTML blocks, and HTML its scripts and styles.
 
 Windows Batch files (`.bat` and `.cmd`) use Batch highlighting automatically.
 Use `--syntax batch` or select Batch in Change Language Mode to override it.
+INI files (`.ini`, `.cfg`, `.inf`, `.editorconfig`, `.gitconfig`,
+`.gitmodules`) highlight sections, keys and comments.
 
 Code-aware editing: comments (<kbd>Ctrl</kbd>+<kbd>/</kbd>,
 <kbd>Shift</kbd>+<kbd>Alt</kbd>+<kbd>A</kbd>), auto-closing brackets and quotes,

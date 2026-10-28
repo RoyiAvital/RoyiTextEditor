@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-28
+
+This version aligns the Search Box with VS Code's behavior.
+The version adds tooltips and shortcuts which match VS Code.
+
+### Added
+
+- INI syntax highlighting (`tree-sitter-ini`, Apache License 2.0) for `.ini`,
+  `.cfg` and `.inf` files and `.editorconfig`, `.gitconfig` and `.gitmodules`:
+  sections, keys, `=` and `;` / `#` comments. Sections are the symbols of Go to
+  Symbol; Toggle Line Comment uses `;`. `--syntax ini` (alias `dosini`) and
+  Change Language Mode select it.
+- Tooltips on the search box, with VS Code's texts: resting the pointer on a
+  field, button or option for half a second shows its name and key (for
+  example `Match Case (Alt+C)`, `Next Match (Enter)`). Pointer moves cost
+  nothing while the box is closed.
+
+### Changed
+
+- The arrow that shows or hides the replace field of the search box is about
+  twice as large.
+
+### Documentation
+
+- The supported languages in the syntax highlighting page list Batch and INI.
+
 ## [0.5.0] - 2026-10-28
 
 This release focuses on feature parity with VS Code on text operations 

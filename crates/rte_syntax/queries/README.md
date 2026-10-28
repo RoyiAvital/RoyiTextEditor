@@ -6,8 +6,9 @@ keeps them up to date). `upstream/` holds query files the Julia and MATLAB
 crates do not export. Files starting with "written for RoyiTextEditor" are
 this project's own.
 
-All sources are MIT licensed (copyright from the crate's license file, or its
-authors where the crate ships none):
+All sources are MIT licensed, except `tree-sitter-ini` (Apache License 2.0;
+the generated file header names it). Copyright from the crate's license file,
+or its authors where the crate ships none:
 
 | Grammar crate            | Copyright or authors                                         |
 | ------------------------ | ------------------------------------------------------------ |
@@ -19,6 +20,7 @@ authors where the crate ships none):
 | `tree-sitter-css`        | Max Brunsfeld                                                |
 | `tree-sitter-go`         | Max Brunsfeld                                                |
 | `tree-sitter-html`       | Max Brunsfeld, Amaan Qureshi                                 |
+| `tree-sitter-ini`        | Justin M. Keyes                                              |
 | `tree-sitter-java`       | Ayman Nadeem, Max Brunsfeld, Amaan Qureshi                   |
 | `tree-sitter-javascript` | Max Brunsfeld                                                |
 | `tree-sitter-json`       | Max Brunsfeld, Amaan Qureshi                                 |

@@ -63,6 +63,7 @@ pub fn highlights_source(grammar: Grammar) -> &'static str {
         Grammar::Java => q!("java"),
         Grammar::Matlab => q!("matlab"),
         Grammar::Julia => q!("julia"),
+        Grammar::Ini => q!("ini"),
     }
 }
 
@@ -96,6 +97,7 @@ pub fn tags_source(grammar: Grammar) -> Option<&'static str> {
         Grammar::Java => q!("java"),
         Grammar::Matlab => q!("matlab"),
         Grammar::Julia => q!("julia"),
+        Grammar::Ini => q!("ini"),
         Grammar::MarkdownInline | Grammar::Html | Grammar::Xml | Grammar::Batch => None,
     }
 }

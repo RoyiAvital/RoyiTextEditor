@@ -63,6 +63,56 @@ fn windows_batch_detection() {
 }
 
 #[test]
+fn ini_detection() {
+    for name in [
+        "setup.ini",
+        "DESKTOP.INI",
+        "tox.cfg",
+        "driver.inf",
+        ".editorconfig",
+        ".gitconfig",
+    ] {
+        assert_eq!(
+            detect(Path::new(name), b"").map(|l| l.id),
+            Some("ini"),
+            "{name}"
+        );
+    }
+    for id in ["ini", "INI", "dosini"] {
+        assert_eq!(by_id(id).map(|l| l.id), Some("ini"));
+        assert_eq!(by_fence(id).map(|l| l.id), Some("ini"));
+    }
+    let ini = by_id("ini").unwrap();
+    assert_eq!((ini.name, ini.line_comment), ("INI", Some(";")));
+}
+
+#[test]
+fn ini_highlights() {
+    let text = "; settings\nglobal = 1\n[server]\nhost = example.com\n# note\nport=8080\n[paths]\nroot = C:\\data";
+    for ending in ["\n", "\r\n"] {
+        let text = text.replace('\n', ending);
+        let s = spans("ini", &text);
+        // The grammar's comments include their line break.
+        let (settings, note) = (format!("; settings{ending}"), format!("# note{ending}"));
+        for (piece, style) in [
+            (settings.as_str(), Style::Comment),
+            (note.as_str(), Style::Comment),
+            ("global", Style::Property),
+            ("host", Style::Property),
+            ("port", Style::Property),
+            ("server", Style::Type),
+            ("paths", Style::Type),
+            ("[", Style::Punctuation),
+            ("=", Style::Operator),
+        ] {
+            assert!(has(&s, piece, style), "{piece:?} {style:?}: {s:?}");
+        }
+        // Values stay plain text.
+        assert!(!s.iter().any(|(t, _)| t.contains("example")), "{s:?}");
+    }
+}
+
+#[test]
 fn detection() {
     let d = |name: &str, head: &str| detect(Path::new(name), head.as_bytes()).map(|l| l.id);
     assert_eq!(d("main.rs", ""), Some("rust"));
@@ -84,7 +134,7 @@ fn detection() {
     assert_eq!(by_fence("py").map(|l| l.id), Some("python"));
     assert_eq!(by_fence("c++").map(|l| l.id), Some("cpp"));
     assert_eq!(by_fence("{.rust}").map(|l| l.id), Some("rust"));
-    assert_eq!(LANGUAGES.len(), 25);
+    assert_eq!(LANGUAGES.len(), 26);
     for pair in LANGUAGES.windows(2) {
         assert!(pair[0].name.to_lowercase() < pair[1].name.to_lowercase());
     }
@@ -248,6 +298,11 @@ fn every_language_highlights() {
             "html",
             "<p class=\"a\">x</p>\n",
             &[("p", Tag), ("class", Attribute)],
+        ),
+        (
+            "ini",
+            "[a]\nb = c ; d\n; e\n",
+            &[("a", Type), ("b", Property), ("; e\n", Comment)],
         ),
         (
             "java",
@@ -918,6 +973,14 @@ fn symbols_from_tags() {
     assert_eq!(
         toml.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
         ["package", "bin"]
+    );
+    let ini = names("ini", "top = 1\n[core]\nx = 1\n[remote \"origin\"]\n");
+    assert_eq!(
+        ini,
+        [
+            ("core".into(), "section".into()),
+            ("remote \"origin\"".into(), "section".into())
+        ]
     );
     let json = names("json", "{\"a\": {\"b\": 1}, \"c\": 2}");
     assert_eq!(

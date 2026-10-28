@@ -19,9 +19,11 @@ search wraps at the document ends. Press `Esc` to close the panel.
 | `.*`           | Regular expressions                                          | `Alt+R`  |
 | Selection icon | Search only inside the current selection. Select text first. | `Alt+L`  |
 
+Rest the pointer on a control of the panel to see its name and shortcut.
+
 ## Replace and Select
 
-Press `Ctrl+H` to show Replace. `Enter` in the Replace field replaces the
+Press `Ctrl+H`, or click the arrow at the left of the panel, to show Replace. `Enter` in the Replace field replaces the
 current match and moves to the next. `Ctrl+Alt+Enter` replaces all matches in
 one undo step; `Alt+P` toggles case-preserving replacement.
 

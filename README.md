@@ -111,7 +111,8 @@ window:
 `Ctrl+F` opens the search box at the top right, seeded with the selection or
 the word at the caret. The count of matches streams in while a large file is
 searched (`2 of 1,204+`); invalid patterns and skipped lines are reported
-below the field.
+below the field. Resting the pointer on a field or button of the box shows
+its name and key; the arrow on the left shows or hides the replace field.
 
 | Keys                                       | Action                              |
 | ------------------------------------------ | ----------------------------------- |
@@ -154,12 +155,15 @@ line at each.
 ### Syntax Highlighting and Code
 
 Code is highlighted with built-in [tree-sitter](https://tree-sitter.github.io)
-grammars: Bash, Batch, C, C#, C++, CSS, Go, HTML, Java, JavaScript, JSON, Julia, Lua,
+grammars: Bash, Batch, C, C#, C++, CSS, Go, HTML, INI, Java, JavaScript, JSON, Julia, Lua,
 Markdown, MATLAB, Octave, PowerShell, Python, Rust, SQL, TOML, TypeScript
 (and TSX), XML and YAML. The language follows the file name (or a `#!` line);
 `.m` files are MATLAB unless they look like Octave. The status line shows it.
 Windows Batch files (`.bat` and `.cmd`) are detected automatically; use
 `--syntax batch` (aliases `bat`, `cmd`, `dosbatch`) to select Batch explicitly.
+INI files (`.ini`, `.cfg`, `.inf`, `.editorconfig`, `.gitconfig`,
+`.gitmodules`) highlight sections, keys and comments; their sections are the
+symbols of Go to Symbol.
 
 - The window opens at once with plain text; the highlights follow within
   milliseconds. Large files are highlighted around the view first, then
