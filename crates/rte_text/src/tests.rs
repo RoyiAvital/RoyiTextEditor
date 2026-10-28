@@ -339,6 +339,13 @@ enum Op {
         points: Vec<prop::sample::Index>,
         text: Vec<u8>,
     },
+    /// Shares `source` at `at` (Copy Line).
+    Copy {
+        at: prop::sample::Index,
+        source: (prop::sample::Index, usize),
+    },
+    /// Moves the bytes between the first two points to the third (Move Line).
+    Move { points: [prop::sample::Index; 3] },
 }
 
 fn op() -> impl Strategy<Value = Op> {
@@ -346,6 +353,8 @@ fn op() -> impl Strategy<Value = Op> {
         3 => (any::<prop::sample::Index>(), 0..40usize, bytes(40)).prop_map(|(at, len, text)| Op::Replace { at, len, text }),
         1 => (any::<prop::sample::Index>(), 0..20usize, bytes(400)).prop_map(|(at, len, text)| Op::Replace { at, len, text }),
         1 => (prop::collection::vec(any::<prop::sample::Index>(), 1..8), bytes(5)).prop_map(|(points, text)| Op::Multi { points, text }),
+        1 => (any::<prop::sample::Index>(), (any::<prop::sample::Index>(), 0..300usize)).prop_map(|(at, source)| Op::Copy { at, source }),
+        1 => any::<[prop::sample::Index; 3]>().prop_map(|points| Op::Move { points }),
     ]
 }
 
@@ -373,16 +382,45 @@ fn to_transaction(op: &Op, len: usize) -> Transaction {
             }
             Transaction::new(edits)
         }
+        Op::Copy { at, source } => {
+            let start = source.0.index(len + 1);
+            let end = (start + source.1).min(len);
+            let at = at.index(len + 1) as u64;
+            // A line break around the copy, as Copy Line of a last line.
+            Transaction::single(Edit::shared(
+                at..at,
+                vec![
+                    Piece::Bytes(Box::from(&b"\n"[..])),
+                    Piece::Copy(start as u64..end as u64),
+                ],
+            ))
+        }
+        Op::Move { points } => {
+            let mut p: Vec<u64> = points.iter().map(|i| i.index(len + 1) as u64).collect();
+            p.sort_unstable();
+            let (a, b, c) = (p[0], p[1], p[2]);
+            if a == b {
+                return Transaction::default();
+            }
+            Transaction::new(vec![Edit::delete(a..b), Edit::copy(c..c, a..b)])
+        }
     }
 }
 
 fn apply_model(model: &[u8], tx: &Transaction) -> Vec<u8> {
     let mut out = model.to_vec();
     for e in tx.edits().iter().rev() {
-        out.splice(
-            e.range.start as usize..e.range.end as usize,
-            e.text.iter().copied(),
-        );
+        let inserted: Vec<u8> = match &e.text {
+            Inserted::Bytes(b) => b.to_vec(),
+            Inserted::Shared(pieces) => pieces
+                .iter()
+                .flat_map(|p| match p {
+                    Piece::Bytes(b) => b.to_vec(),
+                    Piece::Copy(r) => model[r.start as usize..r.end as usize].to_vec(),
+                })
+                .collect(),
+        };
+        out.splice(e.range.start as usize..e.range.end as usize, inserted);
     }
     out
 }
@@ -447,6 +485,82 @@ fn batch_apply_covers_local_edits() {
     check(
         &Snapshot::from_root(root, Rev(1)),
         &apply_model(&model, &tx),
+    );
+}
+
+#[test]
+fn copy_edits_share_the_base_buffers() {
+    let block: Arc<[u8]> = (0..5000u32).map(|i| b"abc\n"[(i % 4) as usize]).collect();
+    let mut builder = TreeBuilder::new();
+    builder.push_block(block.clone());
+    let s = builder.finish();
+    let refs = Arc::strong_count(&block);
+    // Copy Line Down of the whole text, then Move: delete a range and re-insert it later.
+    let copied = s
+        .apply(&Transaction::single(Edit::copy(0..0, 0..4000)))
+        .unwrap()
+        .0;
+    let model = apply_model(&text(&s), &Transaction::single(Edit::copy(0..0, 0..4000)));
+    check(&copied, &model);
+    assert!(
+        Arc::strong_count(&block) > refs,
+        "the copy shares the block"
+    );
+    let tx = Transaction::new(vec![
+        Edit::delete(10..2000),
+        Edit::copy(4000..4000, 10..2000),
+    ]);
+    let moved = s.apply(&tx).unwrap();
+    check(&moved.0, &apply_model(&text(&s), &tx));
+    assert_eq!(moved.1.changes()[1].new_len, 1990);
+    // A copy source outside the document is rejected.
+    assert!(
+        s.apply(&Transaction::single(Edit::copy(0..0, 0..6000)))
+            .is_err()
+    );
+}
+
+/// Shared copies grow the text without allocating; past [`MAX_LEN`] they
+/// are refused before any tree or position mapping is built.
+#[test]
+fn shared_copies_stop_at_the_largest_length() {
+    let mut s = Snapshot::from_bytes(b"x");
+    let mut doublings = 0;
+    loop {
+        let len = s.len();
+        match s.apply(&Transaction::single(Edit::copy(len..len, 0..len))) {
+            Ok((next, map)) => {
+                assert_eq!(next.len(), 2 * len);
+                assert_eq!(map.map(len, Bias::Right), 2 * len);
+                s = next;
+                doublings += 1;
+            }
+            Err(e) => {
+                assert_eq!(e, EditError::TooLarge { index: 0 });
+                assert_eq!(s.len(), len, "unchanged");
+                break;
+            }
+        }
+    }
+    assert_eq!(doublings, 62);
+    assert!(s.len() <= MAX_LEN);
+    // Pieces whose sum overflows, and several edits that only together pass
+    // the limit, are refused too.
+    let len = s.len();
+    let pieces = vec![
+        Piece::Copy(0..len),
+        Piece::Copy(0..len),
+        Piece::Copy(0..len),
+    ];
+    let many = Transaction::single(Edit::shared(0..0, pieces));
+    assert_eq!(
+        s.apply(&many).unwrap_err(),
+        EditError::TooLarge { index: 0 }
+    );
+    let split = Transaction::new(vec![Edit::delete(0..len / 2), Edit::copy(len..len, 0..len)]);
+    assert_eq!(
+        s.apply(&split).unwrap_err(),
+        EditError::TooLarge { index: 1 }
     );
 }
 

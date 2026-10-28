@@ -439,6 +439,22 @@ const INPUT_TESTS: &[InputTest] = &[
             1,
         )
     },
+    input(
+        "E04",
+        "Move line down, Python 8 MiB",
+        "medium.py",
+        "Alt+Down",
+        50,
+        2,
+    ),
+    input(
+        "E05",
+        "Copy line down, Python 8 MiB",
+        "medium.py",
+        "Shift+Alt+Down",
+        50,
+        2,
+    ),
     input("M01", "Add next occurrence", "medium.c", "Ctrl+D", 100, 1),
     InputTest {
         setup: "Ctrl+D",

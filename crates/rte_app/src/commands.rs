@@ -51,12 +51,17 @@ pub mod vk {
     pub const VK_F2: u16 = 0x71;
     pub const VK_F3: u16 = 0x72;
     pub const VK_F4: u16 = 0x73;
+    pub const VK_F11: u16 = 0x7A;
     pub const VK_OEM_PLUS: u16 = 0xBB;
     pub const VK_OEM_MINUS: u16 = 0xBD;
     /// `/` and `?` on US keyboards.
     pub const VK_OEM_2: u16 = 0xBF;
+    /// `[` and `{` on US keyboards.
+    pub const VK_OEM_4: u16 = 0xDB;
     /// `\` and `|` on US keyboards.
     pub const VK_OEM_5: u16 = 0xDC;
+    /// `]` and `}` on US keyboards.
+    pub const VK_OEM_6: u16 = 0xDD;
 }
 
 use vk::*;
@@ -127,6 +132,20 @@ pub enum Action {
     ExpandSelection,
     ShrinkSelection,
     GoToSymbol,
+    MoveLineUp,
+    MoveLineDown,
+    CopyLineUp,
+    CopyLineDown,
+    DeleteLine,
+    InsertLineAbove,
+    InsertLineBelow,
+    IndentLine,
+    AddLineComment,
+    RemoveLineComment,
+    ScrollPageUp,
+    ScrollPageDown,
+    GoToLine,
+    ToggleFullScreen,
 }
 
 /// A key with exactly these modifiers.
@@ -247,6 +266,19 @@ const fn chord(
     }
 }
 
+/// A chord that edits the text.
+const fn chord_edit(
+    id: &'static str,
+    label: &'static str,
+    chords: &'static [(Binding, Binding)],
+    action: Action,
+) -> CommandDef {
+    CommandDef {
+        mutates: true,
+        ..chord(id, label, chords, action)
+    }
+}
+
 /// All commands, sorted by label.
 pub static COMMANDS: &[CommandDef] = &[
     command(
@@ -263,11 +295,10 @@ pub static COMMANDS: &[CommandDef] = &[
         false,
         Action::Documentation,
     ),
-    command(
+    chord(
         "workbench.action.keybindingsReference",
         "Application: Keyboard Shortcuts",
-        &[],
-        false,
+        &[(ctrl(VK_K), ctrl(VK_S))],
         Action::KeyboardShortcuts,
     ),
     command(
@@ -277,6 +308,12 @@ pub static COMMANDS: &[CommandDef] = &[
         false,
         Action::Quit,
     ),
+    chord_edit(
+        "editor.action.addCommentLine",
+        "Edit: Add Line Comment",
+        &[(ctrl(VK_K), ctrl(VK_C))],
+        Action::AddLineComment,
+    ),
     command(
         "editor.action.clipboardCopyAction",
         "Edit: Copy",
@@ -285,11 +322,32 @@ pub static COMMANDS: &[CommandDef] = &[
         Action::Copy,
     ),
     command(
+        "editor.action.copyLinesDownAction",
+        "Edit: Copy Line Down",
+        &[shift_alt(VK_DOWN)],
+        true,
+        Action::CopyLineDown,
+    ),
+    command(
+        "editor.action.copyLinesUpAction",
+        "Edit: Copy Line Up",
+        &[shift_alt(VK_UP)],
+        true,
+        Action::CopyLineUp,
+    ),
+    command(
         "editor.action.clipboardCutAction",
         "Edit: Cut",
         &[ctrl(VK_X)],
         true,
         Action::Cut,
+    ),
+    command(
+        "editor.action.deleteLines",
+        "Edit: Delete Line",
+        &[ctrl_shift(VK_K)],
+        true,
+        Action::DeleteLine,
     ),
     command(
         "deleteWordLeft",
@@ -306,9 +364,44 @@ pub static COMMANDS: &[CommandDef] = &[
         Action::DeleteWordRight,
     ),
     command(
+        "editor.action.indentLines",
+        "Edit: Indent Line",
+        &[ctrl(VK_OEM_6)],
+        true,
+        Action::IndentLine,
+    ),
+    command(
+        "editor.action.insertLineBefore",
+        "Edit: Insert Line Above",
+        &[ctrl_shift(VK_RETURN)],
+        true,
+        Action::InsertLineAbove,
+    ),
+    command(
+        "editor.action.insertLineAfter",
+        "Edit: Insert Line Below",
+        &[ctrl(VK_RETURN)],
+        true,
+        Action::InsertLineBelow,
+    ),
+    command(
+        "editor.action.moveLinesDownAction",
+        "Edit: Move Line Down",
+        &[alt(VK_DOWN)],
+        true,
+        Action::MoveLineDown,
+    ),
+    command(
+        "editor.action.moveLinesUpAction",
+        "Edit: Move Line Up",
+        &[alt(VK_UP)],
+        true,
+        Action::MoveLineUp,
+    ),
+    command(
         "editor.action.outdentLines",
         "Edit: Outdent Line",
-        &[shift(VK_TAB)],
+        &[shift(VK_TAB), ctrl(VK_OEM_4)],
         true,
         Action::Outdent,
     ),
@@ -325,6 +418,12 @@ pub static COMMANDS: &[CommandDef] = &[
         &[ctrl(VK_Y), ctrl_shift(VK_Z)],
         true,
         Action::Redo,
+    ),
+    chord_edit(
+        "editor.action.removeCommentLine",
+        "Edit: Remove Line Comment",
+        &[(ctrl(VK_K), ctrl(VK_U))],
+        Action::RemoveLineComment,
     ),
     command(
         "editor.action.blockComment",
@@ -389,6 +488,13 @@ pub static COMMANDS: &[CommandDef] = &[
         &[ctrl_shift(VK_OEM_5)],
         false,
         Action::GoToBracket,
+    ),
+    command(
+        "workbench.action.gotoLine",
+        "Go: Go to Line/Column",
+        &[ctrl(VK_G)],
+        false,
+        Action::GoToLine,
     ),
     command(
         "workbench.action.gotoSymbol",
@@ -655,6 +761,20 @@ pub static COMMANDS: &[CommandDef] = &[
         Action::ScrollLineUp,
     ),
     command(
+        "scrollPageDown",
+        "View: Scroll Page Down",
+        &[alt(VK_NEXT)],
+        false,
+        Action::ScrollPageDown,
+    ),
+    command(
+        "scrollPageUp",
+        "View: Scroll Page Up",
+        &[alt(VK_PRIOR)],
+        false,
+        Action::ScrollPageUp,
+    ),
+    command(
         "workbench.action.showCommands",
         "View: Show All Commands",
         &[ctrl_shift(VK_P), plain(VK_F1)],
@@ -667,6 +787,13 @@ pub static COMMANDS: &[CommandDef] = &[
         &[ctrl(VK_P)],
         false,
         Action::ShowFavorites,
+    ),
+    command(
+        "workbench.action.toggleFullScreen",
+        "View: Toggle Full Screen",
+        &[plain(VK_F11)],
+        false,
+        Action::ToggleFullScreen,
     ),
     command(
         "royi.toggleSyntaxHighlighting",
@@ -726,12 +853,27 @@ pub fn works_without_file(action: Action) -> bool {
             | Action::ZoomReset
             | Action::ToggleReadOnly
             | Action::ToggleSyntax
+            | Action::ToggleFullScreen
     )
 }
 
 /// Registry index of the command `id`.
 pub fn index_of(id: &str) -> Option<usize> {
     COMMANDS.iter().position(|c| c.id == id)
+}
+
+/// Alt commands that act only while the text has the focus (VS Code
+/// `editorTextFocus`), not while the find box does.
+pub fn needs_text_focus(action: Action) -> bool {
+    matches!(
+        action,
+        Action::MoveLineUp
+            | Action::MoveLineDown
+            | Action::CopyLineUp
+            | Action::CopyLineDown
+            | Action::ScrollPageUp
+            | Action::ScrollPageDown
+    )
 }
 
 /// Text of the first key of each command (palette hints), built once.
@@ -821,7 +963,9 @@ pub fn key_text(b: Binding) -> String {
         VK_OEM_PLUS => "=",
         VK_OEM_MINUS => "-",
         VK_OEM_2 => "/",
+        VK_OEM_4 => "[",
         VK_OEM_5 => "\\",
+        VK_OEM_6 => "]",
         0x30..=0x39 | 0x41..=0x5A => {
             text.push(char::from(b.vk as u8));
             return text;

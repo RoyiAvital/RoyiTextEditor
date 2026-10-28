@@ -21,6 +21,8 @@ pub enum Mode {
     Language,
     /// Go to Symbol in Editor.
     Symbol,
+    /// Go to Line/Column: one row describing the parsed query.
+    Line,
 }
 
 /// Rows of a choice mode: label and right-aligned hint.
@@ -276,6 +278,16 @@ impl Palette {
                 self.push_matches(Some("favorites"), favorites);
             }
             Mode::Language | Mode::Symbol => self.push_choices(),
+            // The editor sets the one row from the query.
+            Mode::Line => {
+                if !self.choices.labels.is_empty() {
+                    let at = self.matched.len();
+                    self.items.push(Item::Choice {
+                        index: 0,
+                        matched: at..at,
+                    });
+                }
+            }
         }
         self.first = 0;
         let first = self.commands().next();

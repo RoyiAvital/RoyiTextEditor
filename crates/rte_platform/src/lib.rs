@@ -16,13 +16,14 @@ use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{FILETIME, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{
-    DWM_TIMING_INFO, DWMWA_CLOAK, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+    DWM_TIMING_INFO, DWMWA_CLOAK, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWCP_ROUND,
     DwmExtendFrameIntoClientArea, DwmFlush, DwmGetCompositionTimingInfo, DwmSetWindowAttribute,
 };
 use windows_sys::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, BitBlt, CreateCompatibleDC, CreateDIBSection,
-    DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, HBITMAP, HDC, HGDIOBJ, InvalidateRect,
-    PAINTSTRUCT, SRCCOPY, ScreenToClient, SelectObject, UpdateWindow,
+    DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, GetMonitorInfoW, HBITMAP, HDC, HGDIOBJ,
+    InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, PAINTSTRUCT, SRCCOPY,
+    ScreenToClient, SelectObject, UpdateWindow,
 };
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
 use windows_sys::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
@@ -35,19 +36,21 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA,
-    GetClientRect, GetCursorPos, GetMessageTime, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
-    HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT,
-    HTTOPRIGHT, IDC_ARROW, IDC_IBEAM, IMAGE_ICON, IsZoomed, LR_DEFAULTCOLOR, LoadCursorW,
-    LoadImageW, MINMAXINFO, MSG, NCCALCSIZE_PARAMS, PostMessageW, PostQuitMessage,
-    RegisterClassExW, SM_CXDOUBLECLK, SM_CXICON, SM_CXPADDEDBORDER, SM_CXSIZEFRAME, SM_CXSMICON,
-    SM_CYDOUBLECLK, SM_CYICON, SM_CYSIZEFRAME, SM_CYSMICON, SW_SHOW, SW_SHOWNORMAL,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetCursor,
-    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
-    TranslateMessage, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
+    CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWL_STYLE,
+    GWLP_USERDATA, GetClientRect, GetCursorPos, GetMessageTime, GetMessageW, GetSystemMetrics,
+    GetWindowLongPtrW, GetWindowPlacement, GetWindowRect, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT,
+    HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, IDC_ARROW, IDC_IBEAM,
+    IMAGE_ICON, IsIconic, IsZoomed, LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MINMAXINFO, MSG,
+    NCCALCSIZE_PARAMS, PostMessageW, PostQuitMessage, RegisterClassExW, SM_CXDOUBLECLK, SM_CXICON,
+    SM_CXPADDEDBORDER, SM_CXSIZEFRAME, SM_CXSMICON, SM_CYDOUBLECLK, SM_CYICON, SM_CYSIZEFRAME,
+    SM_CYSMICON, SW_SHOW, SW_SHOWNORMAL, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SetCursor, SetForegroundWindow, SetWindowLongPtrW,
+    SetWindowPlacement, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage,
+    WINDOWPLACEMENT, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
     WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
     WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCACTIVATE, WM_NCCALCSIZE,
-    WM_NCHITTEST, WM_PAINT, WM_SETCURSOR, WM_SIZE, WM_SYSKEYDOWN, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    WM_NCHITTEST, WM_PAINT, WM_SETCURSOR, WM_SIZE, WM_SYSCOMMAND, WM_SYSKEYDOWN,
+    WM_WINDOWPOSCHANGED, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 
 const WM_WAKE: u32 = WM_APP + 1;
@@ -66,6 +69,13 @@ const MK_MBUTTON: usize = 0x0010;
 const WM_DROPFILES: u32 = 0x0233;
 /// Extended window style accepting `WM_DROPFILES` (what `DragAcceptFiles` sets).
 const WS_EX_ACCEPTFILES: u32 = 0x0000_0010;
+/// The display resolution or arrangement changed.
+const WM_DISPLAYCHANGE: u32 = 0x007E;
+/// `WM_SYSCOMMAND` codes that move or size the window.
+const SC_SIZE: usize = 0xF000;
+const SC_MOVE: usize = 0xF010;
+const SC_MAXIMIZE: usize = 0xF030;
+const SC_RESTORE: usize = 0xF120;
 
 /// DPI of the primary monitor. Per-monitor v2 awareness comes from the
 /// application manifest.
@@ -184,6 +194,9 @@ pub enum Event {
     FilesDropped(Result<Dropped, String>),
     /// Posted by a [`Waker`] from another thread.
     Wake,
+    /// Full screen turned on or off (also by the system, e.g. when the
+    /// window is moved), or why a request failed (the state is unchanged).
+    FullScreen(Result<bool, &'static str>),
 }
 
 /// The files of a drop: the first one and how many more came with it.
@@ -204,6 +217,7 @@ pub struct Ctx {
     open_url: Option<String>,
     posted_key: Option<Key>,
     posted_char: Option<char>,
+    full_screen: Option<bool>,
     hwnd: HWND,
     /// Clipboard of a headless context: text and private data.
     memory_clipboard: Option<(String, Vec<u8>)>,
@@ -223,6 +237,7 @@ impl Ctx {
             open_url: None,
             posted_key: None,
             posted_char: None,
+            full_screen: None,
             hwnd: null_mut(),
             memory_clipboard: None,
         }
@@ -311,6 +326,17 @@ impl Ctx {
     /// Queues `ch` as if typed (benchmarks).
     pub fn post_char(&mut self, ch: char) {
         self.posted_char = Some(ch);
+    }
+
+    /// Turns full screen on or off after the call returns; the result
+    /// arrives as [`Event::FullScreen`].
+    pub fn set_full_screen(&mut self, on: bool) {
+        self.full_screen = Some(on);
+    }
+
+    /// Full screen state requested during this call, if any.
+    pub fn requested_full_screen(&self) -> Option<bool> {
+        self.full_screen
     }
 }
 
@@ -453,6 +479,10 @@ struct State {
     high_surrogate: Option<u16>,
     /// Time, position and count of the last left click.
     last_click: (u32, i32, i32, u32),
+    /// Placement and style before full screen, while it is on.
+    full_screen: Option<Saved>,
+    /// The platform itself is moving the window (full screen changes).
+    placing: bool,
 }
 
 pub struct WindowOptions<'a> {
@@ -484,6 +514,8 @@ impl Window {
             dpi: system_dpi(),
             high_surrogate: None,
             last_click: (0, 0, 0, 0),
+            full_screen: None,
+            placing: false,
         }));
         // SAFETY: strings are NUL-terminated and outlive the calls; the state
         // pointer stays valid until `run` frees it after the loop.
@@ -669,6 +701,13 @@ unsafe fn apply(hwnd: HWND, ctx: Ctx) {
         if let Some(ch) = ctx.posted_char {
             PostMessageW(hwnd, WM_SCRIPTED_CHAR, ch as usize, 0);
         }
+        if let Some(on) = ctx.full_screen {
+            if on {
+                enter_full_screen(&mut Native(hwnd));
+            } else {
+                leave_full_screen(&mut Native(hwnd), true);
+            }
+        }
         if ctx.redraw {
             InvalidateRect(hwnd, null(), 0);
         }
@@ -678,6 +717,220 @@ unsafe fn apply(hwnd: HWND, ctx: Ctx) {
     }
 }
 
+fn is_full_screen(hwnd: HWND) -> bool {
+    // SAFETY: called on the window thread with this window's handle.
+    unsafe { state(hwnd) }.is_some_and(|s| s.full_screen.is_some())
+}
+
+/// Marks window moves made by the platform itself (full screen changes).
+fn set_placing(hwnd: HWND, placing: bool) {
+    // SAFETY: as above.
+    if let Some(state) = unsafe { state(hwnd) } {
+        state.placing = placing;
+    }
+}
+
+/// Rectangle of the monitor nearest to the window.
+fn monitor_rect(hwnd: HWND) -> Option<RECT> {
+    // SAFETY: `info` is a live, correctly sized buffer.
+    unsafe {
+        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut info: MONITORINFO = std::mem::zeroed();
+        info.cbSize = size_of::<MONITORINFO>() as u32;
+        (GetMonitorInfoW(monitor, &mut info) != 0).then_some(info.rcMonitor)
+    }
+}
+
+fn set_corners(hwnd: HWND, preference: i32) {
+    // SAFETY: the attribute value is a live i32.
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+            (&preference as *const i32).cast(),
+            size_of::<i32>() as u32,
+        );
+    }
+}
+
+/// Saved placement and style of a full-screen window.
+type Saved = (WINDOWPLACEMENT, isize);
+
+const NO_MONITOR: &str = "Windows did not report the window's monitor";
+const NO_FRAME: &str = "Windows did not change the window frame";
+const NOT_COVERED: &str = "Windows did not size the window to its monitor";
+const NOT_RESTORED: &str = "Windows did not restore the window's place";
+
+/// The window calls of full screen; tests replace them to fail each one.
+trait Screen {
+    /// Placement and style to restore later, when the monitor is known.
+    fn save(&mut self) -> Option<Saved>;
+    fn saved(&self) -> Option<Saved>;
+    fn set_saved(&mut self, saved: Option<Saved>);
+    /// Sets the window style; false when its frame bits did not take.
+    fn set_style(&mut self, style: isize) -> bool;
+    fn set_corners(&mut self, round: bool);
+    /// Sizes the window to its current monitor.
+    fn cover(&mut self) -> bool;
+    /// Puts back `placement` (when given) and recomputes the frame.
+    fn restore(&mut self, placement: Option<&WINDOWPLACEMENT>) -> bool;
+    fn notify(&mut self, result: Result<bool, &'static str>);
+}
+
+/// Enters full screen. The application learns the state before the window
+/// is resized; a failed step undoes the earlier ones and says why.
+fn enter_full_screen(s: &mut impl Screen) {
+    if s.saved().is_some() {
+        s.notify(Ok(true));
+        return;
+    }
+    let Some((placement, style)) = s.save() else {
+        s.notify(Err(NO_MONITOR));
+        return;
+    };
+    // Set first: the frame calculation then skips the maximized insets.
+    s.set_saved(Some((placement, style)));
+    if !s.set_style(style & !(WS_OVERLAPPEDWINDOW as isize)) {
+        s.set_saved(None);
+        s.set_style(style);
+        s.notify(Err(NO_FRAME));
+        return;
+    }
+    s.notify(Ok(true));
+    s.set_corners(false);
+    if !s.cover() {
+        leave_full_screen(s, true);
+        s.notify(Err(NOT_COVERED));
+    }
+}
+
+/// Leaves full screen; `restore` puts back the saved placement (a move by
+/// the system keeps its new place). Full screen stays when the frame cannot
+/// be restored.
+fn leave_full_screen(s: &mut impl Screen, restore: bool) {
+    let Some((placement, style)) = s.saved() else {
+        s.notify(Ok(false));
+        return;
+    };
+    if !s.set_style(style) {
+        s.notify(Err(NO_FRAME));
+        return;
+    }
+    s.set_saved(None);
+    s.notify(Ok(false));
+    s.set_corners(true);
+    if !s.restore(restore.then_some(&placement)) {
+        s.notify(Err(NOT_RESTORED));
+    }
+}
+
+/// Covers the window's monitor again (DPI or display change); leaves full
+/// screen when that fails.
+fn recover_full_screen(s: &mut impl Screen) {
+    if !s.cover() {
+        leave_full_screen(s, true);
+        s.notify(Err(NOT_COVERED));
+    }
+}
+
+/// [`Screen`] of a real window.
+struct Native(HWND);
+
+impl Screen for Native {
+    fn save(&mut self) -> Option<Saved> {
+        // SAFETY: window calls on a live handle with a live, sized buffer.
+        unsafe {
+            let mut placement: WINDOWPLACEMENT = std::mem::zeroed();
+            placement.length = size_of::<WINDOWPLACEMENT>() as u32;
+            let placed = GetWindowPlacement(self.0, &mut placement) != 0;
+            (placed && monitor_rect(self.0).is_some())
+                .then(|| (placement, GetWindowLongPtrW(self.0, GWL_STYLE)))
+        }
+    }
+
+    fn saved(&self) -> Option<Saved> {
+        // SAFETY: called on the window thread with this window's handle.
+        unsafe { state(self.0) }.and_then(|s| s.full_screen)
+    }
+
+    fn set_saved(&mut self, saved: Option<Saved>) {
+        // SAFETY: as above.
+        if let Some(state) = unsafe { state(self.0) } {
+            state.full_screen = saved;
+        }
+    }
+
+    fn set_style(&mut self, style: isize) -> bool {
+        let frame = WS_OVERLAPPEDWINDOW as isize;
+        // SAFETY: window calls on a live handle.
+        unsafe {
+            SetWindowLongPtrW(self.0, GWL_STYLE, style);
+            GetWindowLongPtrW(self.0, GWL_STYLE) & frame == style & frame
+        }
+    }
+
+    fn set_corners(&mut self, round: bool) {
+        set_corners(
+            self.0,
+            if round {
+                DWMWCP_ROUND
+            } else {
+                DWMWCP_DONOTROUND
+            },
+        );
+    }
+
+    fn cover(&mut self) -> bool {
+        let Some(r) = monitor_rect(self.0) else {
+            return false;
+        };
+        set_placing(self.0, true);
+        // SAFETY: plain window call on a live handle.
+        let placed = unsafe {
+            SetWindowPos(
+                self.0,
+                null_mut(),
+                r.left,
+                r.top,
+                r.right - r.left,
+                r.bottom - r.top,
+                SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
+            )
+        } != 0;
+        set_placing(self.0, false);
+        placed
+    }
+
+    fn restore(&mut self, placement: Option<&WINDOWPLACEMENT>) -> bool {
+        set_placing(self.0, true);
+        // SAFETY: window calls on a live handle; the placement is a live value.
+        let restored = unsafe {
+            let placed = placement.is_none_or(|p| SetWindowPlacement(self.0, p) != 0);
+            let framed = SetWindowPos(
+                self.0,
+                null_mut(),
+                0,
+                0,
+                0,
+                0,
+                SWP_FRAMECHANGED
+                    | SWP_NOMOVE
+                    | SWP_NOSIZE
+                    | SWP_NOZORDER
+                    | SWP_NOOWNERZORDER
+                    | SWP_NOACTIVATE,
+            ) != 0;
+            placed && framed
+        };
+        set_placing(self.0, false);
+        restored
+    }
+
+    fn notify(&mut self, result: Result<bool, &'static str>) {
+        // SAFETY: called on the window thread; the application is not running.
+        unsafe { dispatch(self.0, Event::FullScreen(result)) };
+    }
+}
 fn modifier(vk: u16) -> bool {
     // SAFETY: plain Win32 call.
     unsafe { GetKeyState(i32::from(vk)) < 0 }
@@ -851,8 +1104,9 @@ unsafe extern "system" fn window_proc(
     unsafe {
         match msg {
             WM_NCCALCSIZE if wparam != 0 => {
-                // The whole window is client area; when maximized, keep content on screen.
-                if IsZoomed(hwnd) != 0 {
+                // The whole window is client area; when maximized, keep content on
+                // screen (full screen covers the whole monitor instead).
+                if IsZoomed(hwnd) != 0 && !is_full_screen(hwnd) {
                     let params = &mut *(lparam as *mut NCCALCSIZE_PARAMS);
                     let (bx, by) = resize_border(GetDpiForWindow(hwnd));
                     let r = &mut params.rgrc[0];
@@ -886,17 +1140,60 @@ unsafe extern "system" fn window_proc(
                     state.dpi = dpi;
                 }
                 dispatch(hwnd, Event::DpiChanged(dpi));
-                let r = &*(lparam as *const RECT);
-                SetWindowPos(
-                    hwnd,
-                    null_mut(),
-                    r.left,
-                    r.top,
-                    r.right - r.left,
-                    r.bottom - r.top,
-                    SWP_NOZORDER | SWP_NOACTIVATE,
-                );
+                if is_full_screen(hwnd) {
+                    recover_full_screen(&mut Native(hwnd));
+                } else {
+                    let r = &*(lparam as *const RECT);
+                    SetWindowPos(
+                        hwnd,
+                        null_mut(),
+                        r.left,
+                        r.top,
+                        r.right - r.left,
+                        r.bottom - r.top,
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                }
                 0
+            }
+            WM_DISPLAYCHANGE => {
+                if is_full_screen(hwnd) {
+                    recover_full_screen(&mut Native(hwnd));
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            WM_SYSCOMMAND => {
+                // Moving, sizing or maximizing by the system ends full screen first.
+                if is_full_screen(hwnd)
+                    && matches!(
+                        wparam & 0xFFF0,
+                        SC_SIZE | SC_MOVE | SC_MAXIMIZE | SC_RESTORE
+                    )
+                {
+                    leave_full_screen(&mut Native(hwnd), true);
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            WM_WINDOWPOSCHANGED => {
+                // Snapping or other system moves leave the monitor: no longer full screen.
+                let own = state(hwnd).is_none_or(|s| s.placing);
+                if !own && is_full_screen(hwnd) && IsIconic(hwnd) == 0 {
+                    let mut r = RECT {
+                        left: 0,
+                        top: 0,
+                        right: 0,
+                        bottom: 0,
+                    };
+                    GetWindowRect(hwnd, &mut r);
+                    let m = monitor_rect(hwnd);
+                    let covers = m.is_some_and(|m| {
+                        (m.left, m.top, m.right, m.bottom) == (r.left, r.top, r.right, r.bottom)
+                    });
+                    if !covers {
+                        leave_full_screen(&mut Native(hwnd), false);
+                    }
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
             }
             WM_GETMINMAXINFO => {
                 let info = &mut *(lparam as *mut MINMAXINFO);
@@ -1057,7 +1354,7 @@ unsafe fn hit_test(hwnd: HWND, lparam: LPARAM) -> LRESULT {
             return HTCLIENT as LRESULT;
         };
         let (w, h) = (state.width as i32, state.height as i32);
-        if IsZoomed(hwnd) == 0 {
+        if IsZoomed(hwnd) == 0 && state.full_screen.is_none() {
             let (bx, by) = resize_border(state.dpi);
             let left = point.x < bx;
             let right = point.x >= w - bx;
@@ -1201,6 +1498,143 @@ mod tests {
         }
 
         pub const PATH: &str = NAME;
+    }
+
+    /// A window whose full-screen calls fail on request.
+    #[derive(Default)]
+    struct FakeScreen {
+        style: isize,
+        saved: Option<Saved>,
+        round: bool,
+        covered: bool,
+        events: Vec<Result<bool, &'static str>>,
+        fail_save: bool,
+        /// Fails setting a style without (true) or with (false) the frame.
+        fail_style: Option<bool>,
+        fail_cover: bool,
+        fail_restore: bool,
+    }
+
+    const FRAMED: isize = WS_OVERLAPPEDWINDOW as isize | 0x1000_0000;
+
+    impl FakeScreen {
+        fn new() -> FakeScreen {
+            FakeScreen {
+                style: FRAMED,
+                round: true,
+                ..FakeScreen::default()
+            }
+        }
+    }
+
+    impl Screen for FakeScreen {
+        fn save(&mut self) -> Option<Saved> {
+            // SAFETY: plain data; zero is a valid placement value.
+            (!self.fail_save).then(|| (unsafe { std::mem::zeroed() }, self.style))
+        }
+        fn saved(&self) -> Option<Saved> {
+            self.saved
+        }
+        fn set_saved(&mut self, saved: Option<Saved>) {
+            self.saved = saved;
+        }
+        fn set_style(&mut self, style: isize) -> bool {
+            let framed = style & WS_OVERLAPPEDWINDOW as isize != 0;
+            if self.fail_style == Some(!framed) {
+                return false;
+            }
+            self.style = style;
+            true
+        }
+        fn set_corners(&mut self, round: bool) {
+            self.round = round;
+        }
+        fn cover(&mut self) -> bool {
+            self.covered = !self.fail_cover;
+            self.covered
+        }
+        fn restore(&mut self, _: Option<&WINDOWPLACEMENT>) -> bool {
+            self.covered = false;
+            !self.fail_restore
+        }
+        fn notify(&mut self, result: Result<bool, &'static str>) {
+            self.events.push(result);
+        }
+    }
+
+    #[test]
+    fn full_screen_reports_only_what_took_effect() {
+        let mut s = FakeScreen::new();
+        enter_full_screen(&mut s);
+        assert_eq!(s.events, [Ok(true)]);
+        assert!(s.saved.is_some() && s.covered && !s.round);
+        assert_eq!(s.style, FRAMED & !(WS_OVERLAPPEDWINDOW as isize));
+        leave_full_screen(&mut s, true);
+        assert_eq!(s.events, [Ok(true), Ok(false)]);
+        assert!(s.saved.is_none() && !s.covered && s.round);
+        assert_eq!(s.style, FRAMED);
+
+        // Entry failures leave the window as it was.
+        let mut s = FakeScreen {
+            fail_save: true,
+            ..FakeScreen::new()
+        };
+        enter_full_screen(&mut s);
+        assert_eq!(
+            (s.events.as_slice(), s.saved.is_none()),
+            (&[Err(NO_MONITOR)][..], true)
+        );
+        let mut s = FakeScreen {
+            fail_style: Some(true),
+            ..FakeScreen::new()
+        };
+        enter_full_screen(&mut s);
+        assert_eq!(s.events, [Err(NO_FRAME)]);
+        assert!(s.saved.is_none() && s.round && s.style == FRAMED);
+        let mut s = FakeScreen {
+            fail_cover: true,
+            ..FakeScreen::new()
+        };
+        enter_full_screen(&mut s);
+        assert_eq!(s.events, [Ok(true), Ok(false), Err(NOT_COVERED)]);
+        assert!(s.saved.is_none() && s.round && s.style == FRAMED);
+
+        // Exit: a frame that cannot be restored keeps full screen; a place
+        // that cannot be restored is reported after the state changed.
+        let mut s = FakeScreen {
+            fail_style: Some(false),
+            ..FakeScreen::new()
+        };
+        enter_full_screen(&mut s);
+        leave_full_screen(&mut s, true);
+        assert_eq!(s.events, [Ok(true), Err(NO_FRAME)]);
+        assert!(s.saved.is_some() && !s.round);
+        let mut s = FakeScreen {
+            fail_restore: true,
+            ..FakeScreen::new()
+        };
+        enter_full_screen(&mut s);
+        leave_full_screen(&mut s, true);
+        assert_eq!(s.events, [Ok(true), Ok(false), Err(NOT_RESTORED)]);
+        assert!(s.saved.is_none() && s.style == FRAMED);
+
+        // A monitor change that cannot be covered ends full screen.
+        let mut s = FakeScreen::new();
+        enter_full_screen(&mut s);
+        s.fail_cover = true;
+        recover_full_screen(&mut s);
+        assert_eq!(s.events, [Ok(true), Ok(false), Err(NOT_COVERED)]);
+        assert!(s.saved.is_none());
+    }
+
+    #[test]
+    fn a_headless_context_records_full_screen_requests() {
+        let mut ctx = Ctx::headless(800, 600, 96);
+        assert_eq!(ctx.requested_full_screen(), None);
+        ctx.set_full_screen(true);
+        assert_eq!(ctx.requested_full_screen(), Some(true));
+        ctx.set_full_screen(false);
+        assert_eq!(ctx.requested_full_screen(), Some(false));
     }
 
     #[test]

@@ -81,6 +81,7 @@ fn frames(bencher: Bencher, snapshot: &Snapshot, width: u32, height: u32, px: f3
             caret: CaretStyle::Bar,
             highlights: Default::default(),
             empty: None,
+            slider_active: false,
         };
         view.build(&frame, &mut list);
         renderer.draw(

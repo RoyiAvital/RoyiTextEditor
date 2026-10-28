@@ -3,7 +3,7 @@
 //! Symbol. Text-only edits come from `rte_edit`; tree queries from
 //! `rte_syntax` (with text fallbacks when no tree is parsed).
 
-use rte_edit::{Coded, CommentTokens};
+use rte_edit::{Coded, CommentMode, CommentTokens};
 use rte_syntax::{Grammar, LANGUAGES};
 
 use super::*;
@@ -81,7 +81,7 @@ impl Editor {
 
     /// Applies a code-aware edit; a command without edits only moves the
     /// selections.
-    fn run_coded(&mut self, coded: Coded, typed: Option<char>) {
+    pub(super) fn run_coded(&mut self, coded: Coded, typed: Option<char>) {
         if coded.cmd.tx.edits().is_empty() {
             self.doc.select(coded.selections);
             self.reveal();
@@ -115,7 +115,9 @@ impl Editor {
 
     /// `Ctrl+/` and `Shift+Alt+A`, with the tokens of the language at each
     /// line or selection.
-    pub(super) fn toggle_comment(&mut self, block: bool) {
+    /// Line comments of `mode`, or Toggle Block Comment when `None`.
+    pub(super) fn comment(&mut self, mode: Option<CommentMode>) {
+        let block = mode.is_none();
         let Some(lang) = self.language else {
             self.notice = Some("Plain text has no comments".to_owned());
             return;
@@ -130,7 +132,8 @@ impl Editor {
                 self.lang_at(pos).and_then(|l| l.block_comment)
             })
         } else {
-            edit::toggle_line_comment(s, sels, &|pos| {
+            let mode = mode.unwrap_or(CommentMode::Toggle);
+            edit::line_comment(s, sels, mode, &|pos| {
                 let l = self.lang_at(pos).unwrap_or(lang);
                 CommentTokens {
                     line: l.line_comment,

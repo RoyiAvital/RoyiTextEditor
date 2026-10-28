@@ -53,14 +53,22 @@ An unknown id keeps the language of the file name and shows a notice.
 | `Backspace` / `Delete`, with `Ctrl`                 | Delete a character, a word                             |
 | `Enter`                                             | New line keeping the indentation                       |
 | `Tab` / `Shift+Tab`                                 | Insert a tab or indent lines / outdent lines           |
+| `Ctrl+]` / `Ctrl+[`                                 | Indent / outdent the lines (also for a caret)          |
+| `Alt+Up` / `Alt+Down`                               | Move the lines up / down                               |
+| `Shift+Alt+Up` / `Shift+Alt+Down`                   | Copy the lines up / down                               |
+| `Ctrl+Shift+K`                                      | Delete the lines                                       |
+| `Ctrl+Enter` / `Ctrl+Shift+Enter`                   | Insert a line below / above                            |
+| `Ctrl+G`                                            | Go to line: `N`, `N:C` (column), `-N` (from the end)   |
 | `Insert`                                            | Toggle overtype                                        |
 | `Ctrl+Z`, `Ctrl+Y` / `Ctrl+Shift+Z`                 | Undo, redo                                             |
 | `Ctrl+C` / `Ctrl+X` / `Ctrl+V`                      | Copy / cut / paste (whole line without a selection)    |
 | `Ctrl+S`                                            | Save                                                   |
 | Click, double-click, triple-click, `Shift`+click    | Place the caret, select a word, a line, extend         |
 | Wheel, `Ctrl+Up` / `Ctrl+Down`                      | Scroll lines                                           |
+| `Alt+PgUp` / `Alt+PgDn`                             | Scroll a page (the caret stays)                        |
 | `Shift`+wheel                                       | Horizontal scrolling                                   |
 | `Ctrl+=` / `Ctrl+-` / `Ctrl+0`, `Ctrl`+wheel        | Zoom in / out / reset                                  |
+| `F11`                                               | Full screen (the status line stays)                    |
 | `Ctrl+W`, `Ctrl+F4`                                 | Close the file (back to the empty state)               |
 | `Alt+F4`, `Ctrl+Shift+W`                            | Quit; unsaved changes ask first                        |
 | `Ctrl+Shift+P`, `F1`                                | Command Palette: all commands, fuzzy search            |
@@ -70,6 +78,11 @@ Unsaved changes show `●` in the title strip. Saving replaces the file
 atomically; when another program changed the file, the editor asks before
 overwriting it.
 
+The slider at the right edge shows where the view is in the file: drag it,
+or press the strip to jump there (the caret stays). Lines longer than 64 KiB
+are drawn to their end; past 64 KiB every byte takes one column (exact for
+ASCII), and the status line shows `Col ~N`.
+
 ### Files and Sessions
 
 Each session (window) edits one file and never starts, closes or talks to
@@ -78,7 +91,7 @@ window:
 
 - **No file:** started without a path, or after `Ctrl+W`, the window shows
   the empty state, `Drop a file here to open it`. Nothing can be edited; the
-  palette, About, Keyboard Shortcuts, zoom and `Alt+F4` work.
+  palette, About, Keyboard Shortcuts, zoom, full screen and `Alt+F4` work.
 - **Drag and drop:** a file dropped on the empty state, or on a file without
   unsaved changes, opens in its place. With unsaved changes (or a save
   running) nothing opens and the status line says why. Of several files only
@@ -161,6 +174,7 @@ Windows Batch files (`.bat` and `.cmd`) are detected automatically; use
 | ------------------------------------- | ----------------------------------------------- |
 | `Ctrl+K M`                            | Change Language Mode (or Plain Text)            |
 | `Ctrl+/`                              | Toggle Line Comment                             |
+| `Ctrl+K Ctrl+C` / `Ctrl+K Ctrl+U`     | Add / Remove Line Comment                       |
 | `Shift+Alt+A`                         | Toggle Block Comment                            |
 | `Ctrl+Shift+\`                        | Go to the matching bracket                      |
 | `Shift+Alt+Right` / `Shift+Alt+Left`  | Expand / shrink the selection by syntax nodes   |
@@ -183,7 +197,8 @@ keys, `Ctrl+A` and `Ctrl+V`.
 - Click the star of a command, or press `Ctrl+Space`, to add or remove it from
   the favorites.
 - `Ctrl+P` lists the last commands run from the palette, then the favorites.
-- `Application: Keyboard Shortcuts` shows all keys; `Application: About` shows
+- `Application: Keyboard Shortcuts` (`Ctrl+K Ctrl+S`) shows all keys;
+  `Application: About` shows
   the version and links; `Application: Documentation` opens the online
   documentation; `Application: Quit` (`Alt+F4`, `Ctrl+Shift+W`) closes the editor.
 

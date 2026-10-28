@@ -761,6 +761,8 @@ Each code fixture repeats a block containing every highlighted element:
 | E01     | Type 200 characters                         | `medium.py`                     | 200               | 2       |
 | E02     | Type 50 characters at the line start        | `line.txt`                      | 50                | 1       |
 | E03     | `End`, then `Home`                          | `line.txt`                      | 20                | 1       |
+| E04     | Move Line Down (`Alt+Down`)                 | `medium.py`                     | 50                | 2       |
+| E05     | Copy Line Down (`Shift+Alt+Down`)           | `medium.py`                     | 50                | 2       |
 | M01     | Add next occurrence (`Ctrl+D`)              | `medium.c`                      | 100               | 1       |
 | M02     | Select all occurrences of `#` (10,000 cap)  | `medium.c`                      | 5                 | 1       |
 | M03     | Column selection over 1,000 lines           | `medium.c`                      | 5                 | 1       |
@@ -800,6 +802,8 @@ Setup and keys of the scripted interaction tests:
 | C06     | Select bytes 0 to 64 MiB; `Ctrl+C`, `Right`       | `Ctrl+V`                        |
 | E01-E02 | None                                              | `'x'`                           |
 | E03     | None                                              | `End`, `Home` (both timed)      |
+| E04     | None                                              | `Alt+Down`                      |
+| E05     | None                                              | `Shift+Alt+Down`                |
 | M01     | None                                              | `Ctrl+D`                        |
 | M02     | `Ctrl+D` (selects `#`)                            | `Ctrl+Shift+L` (refused)        |
 | M03     | `Ctrl+Shift+Alt+PgDn` × 30                        | `Ctrl+Shift+Alt+Right`, `Left`  |

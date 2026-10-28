@@ -239,8 +239,6 @@ struct Summary { bytes: u64, newlines: u64 }
 - **Clipboard.** Empty selection copies/cuts the whole line. With N carets and N
   clipboard lines, paste distributes one line per caret (VS Code behavior).
   A private clipboard format stores per-selection metadata.
-- **Navigation history** (`Alt+Left`/`Alt+Right`): caret positions recorded on
-  jumps (go to line, symbol, search, bracket, large moves), mapped through edits.
 
 ### Search (`rte_search`)
 
@@ -437,19 +435,17 @@ measurably hurts cold start, move each grammar to a lazily loaded DLL.
 - **No layout cache.** Visible rows are laid out every frame (~100 rows × ~200
   cells). Caches exist only for glyphs, syntax spans and long-line checkpoints.
 - **Long lines** (above 64 KiB):
-  - **Checkpoints** (byte → display column every 4 KiB, relative to the line
-    start) are built on the worker, never synchronously on the UI.
-  - **Invalidation.** An edit inside the line drops checkpoints after the edit
-    offset; edits elsewhere only shift the line start through the `ChangeSet`.
-  - **UI work bound.** Each visible row scans at most 64 KiB of bytes per frame,
-    whatever their cell widths (long zero-width runs included). The rest of
-    the row draws a continuation marker.
-  - **Pending view.** Without a checkpoint near the target column (e.g. `End`
-    on an unindexed line), the horizontal anchor becomes a byte offset: the row
-    renders from the nearest known checkpoint or the anchor byte, with columns
-    counted from there and marked approximate in the status line. Exact
-    columns replace them when the index arrives. Caret positions are byte
-    offsets and stay exact.
+  - **UI work bound.** Each visible row scans at most 64 KiB from its line
+    start, whatever their cell widths (long zero-width runs included).
+  - **Beyond the scan** the columns follow one rule everywhere (view, caret,
+    hit test, selections, status line): the column at 64 KiB plus one
+    column per byte. The view draws the visible part of the rest of the
+    line by that rule, reading only the bytes that fit on screen; search
+    and syntax ranges include it. Exact for ASCII without tabs; tabs, wide
+    and multi-byte characters there get extra spacing (positions stay
+    consistent) and the status line marks the column `~`.
+  - **Later, if needed:** an exact long-line index (byte → display column
+    every 4 KiB, built off the UI thread, invalidated after an edit offset).
 - **Anchor scrolling.** Viewport = `(anchor_line, sub_row, pixel_offset, first_col)`.
   No global visual-row count; the scrollbar is proportional to logical lines.
 - **Horizontal scrolling.** `Shift`+wheel, horizontal touchpad, caret follow,
@@ -605,8 +601,11 @@ measurably hurts cold start, move each grammar to a lazily loaded DLL.
   `-command` removals). Read once at startup; changes apply to sessions
   started later. **The application never writes it.**
   Errors are reported on the status line and never block startup.
-- **Window placement** comes from the configuration (`window:` size, position,
-  maximized or centered). No automatic placement memory.
+- **Window placement:** every session opens at the default size (1100 × 750
+  at 96 DPI, scaled by the system DPI) where Windows places it. Nothing is
+  remembered: the application keeps no state file (Response A8), and the
+  configuration that was to set placement is dropped (no customization).
+  This also keeps I/O out of the path before the window.
 - **YAML parser.** `saphyr-parser` (pure Rust, YAML 1.2, event API; small
   dependency set). `serde_yaml` is archived; `yaml-rust2` pulls more crates.
   YAML 1.2 keeps `no`/`off` as strings. Only plain maps, lists and scalars are
@@ -647,9 +646,9 @@ measurably hurts cold start, move each grammar to a lazily loaded DLL.
 - **Large files.** Shown read-only from the first published prefix; editable
   when fully loaded; progress on the status line. Syntax off above
   `syntax.maxFileMiB` (see [Syntax](#syntax-and-code-awareness-rte_syntax)).
-  Large-file mode
-  above `largeFileThresholdMiB` (default 256): no wrap, search counts only
-  asynchronously; the default is set by measurement when wrap ships.
+  No separate large-file mode: loading, search counts and every interactive
+  operation are already bounded or asynchronous (owner's decision,
+  2026_10_25).
 
 ### Saving
 
@@ -820,8 +819,8 @@ Navigation:
 | `Ctrl+Shift+M`           | Show Problems panel       | Dropped: LSP                 |
 | `F8` / `Shift+F8`        | Go to next/previous error | Dropped: LSP                 |
 | `Ctrl+Shift+Tab`         | Editor group history      | Dropped: single file         |
-| `Alt+Left` / `Alt+Right` | Go back/forward           | Kept: caret history          |
-| `Ctrl+M`                 | Toggle Tab moves focus    | Kept                         |
+| `Alt+Left` / `Alt+Right` | Go back/forward           | Dropped: owner's decision    |
+| `Ctrl+M`                 | Toggle Tab moves focus    | Dropped: no focusable controls |
 
 Search and Replace:
 
@@ -963,8 +962,7 @@ also build with GNU. Linking uses Rust's bundled MinGW runtime
   above 128 KiB.
 - **Cancellation:** every job has a `CancelToken`; parsing and search check it
   per chunk; superseded revisions are rejected on arrival.
-- **Disabled paths:** syntax off → no parser, no queries. Large-file mode → no
-  wrap, async-only search counts. Idle → no timers.
+- **Disabled paths:** syntax off → no parser, no queries. Idle → no timers.
 
 ## Tests
 
@@ -1061,8 +1059,12 @@ Each milestone gets its own task document.
 7. **M6 Syntax:** tree-sitter, trimmed queries, highlighting, HTML and
    Markdown injections, comments, brackets, indent, expand selection, symbols.
    **Gate:** grammar packaging versus startup.
-8. **M7 Polish:** navigation history, large-file mode, external change
-   detection, crash recovery, themes.
+8. **M7 Polish** ([M7Polish](../Done/M7Polish.md)): the Basic Editing commands,
+   Go to Line, long-line display, full screen (`F11`), a scroll indicator.
+   Navigation history is dropped.
+   External change detection and crash recovery belong to
+   [DataSafety001](DataSafety001.md); large-file mode is dropped; themes
+   are deferred.
 
 After v1: word wrap, folding, smooth scrolling mode, caret blinking, shaping
 mode, IME, CSV/TSV Table Mode.
@@ -2027,3 +2029,57 @@ cargo test -p rte_app -p rte_view -p rte_render -p rte_platform
   and the Process decision. Open: the palette state re-read that keeps
   other instances' changes, and DataSafety001's new-instance recovery and
   live-journal detection, must be reconciled with the principle.
+
+### 2026_10_25 - Claude Opus 5.5
+
+- Role: Reviewer
+- Activity: Review
+- Agent: GitHub Copilot
+- Model: Claude Opus 5.5
+- Effort: High
+- Context Window: 872K
+- Outcome: Recorded the owner's M7 decisions: M7 Polish
+  ([M7Polish](../Done/M7Polish.md)) covers navigation history, the Basic Editing
+  commands, Go to Line, long-line display and `F11`; no configuration or
+  key bindings (VS Code defaults); no separate large-file mode; themes
+  deferred; external change detection and crash recovery belong to
+  DataSafety001; `Ctrl+M` dropped. Long lines: the planned worker index is
+  replaced by drawing beyond 64 KiB with the existing one-column-per-byte
+  rule; the exact index stays a later option.
+
+### 2026_10_25 - Claude Opus 5.5
+
+- Role: Reviewer
+- Activity: Review
+- Agent: GitHub Copilot
+- Model: Claude Opus 5.5
+- Effort: High
+- Context Window: 872K
+- Outcome: Owner dropped navigation history (`Alt+Left` / `Alt+Right`):
+  removed from the editing section, marked dropped in the command coverage,
+  and removed from M7.
+
+### 2026_10_25 - Claude Opus 5.5
+
+- Role: Reviewer
+- Activity: Review
+- Agent: GitHub Copilot
+- Model: Claude Opus 5.5
+- Effort: High
+- Context Window: 872K
+- Outcome: M7 gains a scroll indicator (reserved 6 px slider strip, no
+  marks) at the owner's request; the minimap is its own task
+  ([Minimap](Minimap.md)).
+
+### 2026_10_25 - Claude Opus 5.5
+
+- Role: Reviewer
+- Activity: Review
+- Agent: GitHub Copilot
+- Model: Claude Opus 5.5
+- Effort: High
+- Context Window: 872K
+- Outcome: Placement rule aligned with the current behavior: every session
+  opens at the default size where Windows places it, nothing remembered
+  (no state file per Response A8; placement configuration dropped with
+  customization). Replaced the configuration-based placement rule.

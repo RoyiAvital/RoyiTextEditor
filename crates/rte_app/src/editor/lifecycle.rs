@@ -41,6 +41,10 @@ impl Editor {
         self.closing = None;
         self.drag = None;
         *self.caret_column.get_mut() = None;
+        // The seam cache holds a snapshot: it must not keep the old text alive.
+        *self.seams.get_mut() = (None, 0, Vec::new());
+        // A Go to Line preview belongs to the old file; nothing is restored.
+        self.line_preview = None;
         self.language = None;
         self.language_chosen = false;
         // Dropping the syntax thread retires its trees on that thread.

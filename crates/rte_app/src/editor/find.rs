@@ -568,7 +568,7 @@ impl Editor {
 
     /// Text of the visible rows inside `scope` for highlights: per row at
     /// most what the view lays out, at most [`VIEWPORT_MAX`] bytes in all.
-    fn viewport_rows(&self, scope: &Range<u64>) -> Vec<Range<u64>> {
+    pub(super) fn viewport_rows(&self, scope: &Range<u64>) -> Vec<Range<u64>> {
         let s = &self.doc.snapshot;
         let top = self.scroll.top_line;
         let mut budget = VIEWPORT_MAX;
@@ -577,16 +577,20 @@ impl Editor {
             let Some(start) = s.line_start(line) else {
                 break;
             };
-            let end = s.line_start(line + 1).unwrap_or(s.len());
-            let end = end
-                .min(start + rte_view::ROW_SCAN_LIMIT as u64)
-                .min(start + budget);
-            budget -= end - start;
-            let (start, end) = (start.max(scope.start), end.min(scope.end));
-            if start <= end {
-                match rows.last_mut() {
-                    Some(last) if last.end == start => last.end = end,
-                    _ => rows.push(start..end),
+            let next = s.line_start(line + 1).unwrap_or(s.len());
+            let tail = s
+                .line_range(line)
+                .and_then(|range| self.long_row_tail(range));
+            let head = start..next.min(start + rte_view::ROW_SCAN_LIMIT as u64);
+            for part in std::iter::once(head).chain(tail) {
+                let end = part.end.min(part.start + budget);
+                budget -= end - part.start;
+                let (start, end) = (part.start.max(scope.start), end.min(scope.end));
+                if start <= end {
+                    match rows.last_mut() {
+                        Some(last) if last.end == start => last.end = end,
+                        _ => rows.push(start..end),
+                    }
                 }
             }
             if budget == 0 {

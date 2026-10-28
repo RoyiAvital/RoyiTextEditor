@@ -6,6 +6,8 @@
 
 ### Guidelines
 
+ - Main Use Case  
+   Launched for editing or viewing from a _File Manager_.
  - Speed
    Most important feature. Time to load empty file, time to load short file, time to show command palette, keystroke rendering delay.  
    Aim for less than 50 [Mili Sec] load time for a short file.  

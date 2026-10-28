@@ -10,20 +10,25 @@ mod columns;
 mod commands;
 mod cursor;
 mod history;
+mod lines;
 mod motion;
 mod multi;
 mod selection;
 
 pub use code::{
-    Coded, CommentTokens, auto_close, delete_pair, newline_indent, toggle_block_comment,
-    toggle_line_comment,
+    Coded, CommentMode, CommentTokens, auto_close, delete_pair, line_comment, newline_indent,
+    toggle_block_comment, toggle_line_comment,
 };
-pub use columns::{COLUMN_SCAN_LIMIT, cell_width, column_after, column_of, offset_at_column};
+pub use columns::{
+    COLUMN_SCAN_LIMIT, cell_width, column_after, column_of, column_until, offset_at_column,
+    scan_end,
+};
 pub use commands::{
     Clip, Command, EditKind, EditOptions, apply, backspace, copy, cut, delete_forward,
     delete_word_left, delete_word_right, insert, newline, outdent, paste, tab,
 };
 pub use history::{History, MAX_HISTORY_BYTES, MAX_HISTORY_STEPS, Step};
+pub use lines::{copy_lines, delete_lines, indent_lines, insert_line, line_blocks, move_lines};
 pub use motion::{
     MOTION_SCAN_LIMIT, column_at, content_range, line_end, line_home, next_boundary,
     offset_in_line, prev_boundary, snap_to_boundary, vertical, word_at, word_left, word_right,

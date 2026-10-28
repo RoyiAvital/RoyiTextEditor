@@ -2,7 +2,7 @@
 //! edit-permission locks. [`Document::apply`] is the only mutation entry.
 
 use rte_edit::{Command, EditOptions, History, Selection, Selections, Step, apply};
-use rte_text::{ChangeSet, Snapshot};
+use rte_text::{ChangeSet, EditError, Snapshot};
 
 /// Changes kept for one observer between its reads; older ones are
 /// dropped (the observer then diffs snapshots).
@@ -112,8 +112,12 @@ impl Document {
         if let Some(reason) = self.locks.edit_refusal() {
             return Err(reason);
         }
-        let (next, sels, changes) = apply(&self.snapshot, &self.selections, cmd)
-            .expect("commands build valid transactions");
+        let (next, sels, changes) = match apply(&self.snapshot, &self.selections, cmd) {
+            Ok(applied) => applied,
+            // Shared copies can describe more text than positions can hold.
+            Err(EditError::TooLarge { .. }) => return Err("the text would exceed 8 EiB"),
+            Err(e) => panic!("commands build valid transactions: {e}"),
+        };
         let sels = selections.unwrap_or(sels);
         if let Some(journal) = &mut self.journal {
             if journal.len() >= JOURNAL_MAX {
@@ -125,7 +129,12 @@ impl Document {
                 changes,
             });
         }
-        let inserted = cmd.tx.edits().iter().map(|e| e.text.len() as u64).sum();
+        let inserted = cmd
+            .tx
+            .edits()
+            .iter()
+            .map(|e| e.text.owned_len() as u64)
+            .sum();
         self.history.record(
             Step {
                 before: self.snapshot.clone(),

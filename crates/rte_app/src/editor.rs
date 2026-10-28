@@ -4,6 +4,7 @@
 mod code;
 mod cursors;
 mod find;
+mod goto;
 mod lifecycle;
 
 use std::borrow::Cow;
@@ -162,10 +163,16 @@ enum DragMode {
     Add,
     /// `Shift+Alt` or middle-button drag from the anchor cell.
     Column((u64, u64)),
+    /// The scroll slider, held `grab` pixels below its top.
+    Slider { grab: i32 },
 }
 
 /// Snapshot, caret, syntax generation and the bracket pair found there.
 type BracketPair = (Snapshot, u64, u64, Option<(u64, u64)>);
+
+/// Snapshot, tab width and (line start, scan end offset, its column) of
+/// long visible lines.
+type Seams = (Option<Snapshot>, u32, Vec<(u64, u64, u64)>);
 
 pub struct Editor {
     doc: Document,
@@ -202,6 +209,8 @@ pub struct Editor {
     shown_title: String,
     /// Column of the last queried caret: snapshot, offset, tab width, column.
     caret_column: RefCell<Option<(Snapshot, u64, u32, u64)>>,
+    /// Scan ends of long visible lines for the snapshot and tab width.
+    seams: RefCell<Seams>,
     /// A frame was drawn (traced as `first_paint`).
     painted: bool,
     /// Syntax highlighting is on (`View: Toggle Syntax Highlighting`).
@@ -248,6 +257,10 @@ pub struct Editor {
     expanded: Option<Selections>,
     /// Offsets of the symbols listed by Go to Symbol.
     symbol_offsets: Vec<u64>,
+    /// Go to Line: the scroll before its preview, restored by `Escape`.
+    line_preview: Option<Scroll>,
+    /// The window covers its monitor (`F11`), as the platform reported.
+    full_screen: bool,
     /// Trace marks done: first highlighted frame, fully highlighted.
     marked: (bool, bool),
 }
@@ -272,6 +285,8 @@ struct Visible {
     new_file: bool,
     /// Fingerprint of what the popup shows.
     popup: u64,
+    full_screen: bool,
+    slider_active: bool,
 }
 
 impl Visible {
@@ -291,6 +306,8 @@ impl Visible {
             && self.status == other.status
             && self.new_file == other.new_file
             && self.popup == other.popup
+            && self.full_screen == other.full_screen
+            && self.slider_active == other.slider_active
     }
 }
 
@@ -373,6 +390,7 @@ impl Editor {
             wake,
             shown_title: window_title(path, false),
             caret_column: RefCell::new(None),
+            seams: RefCell::new((None, 0, Vec::new())),
             painted: false,
             highlighting,
             language: None,
@@ -399,6 +417,8 @@ impl Editor {
             expansions: Vec::new(),
             expanded: None,
             symbol_offsets: Vec::new(),
+            line_preview: None,
+            full_screen: false,
             marked: (false, false),
         };
         // `--syntax` belongs to the command-line file; without one it is unused.
@@ -527,27 +547,80 @@ impl Editor {
         }
     }
 
-    /// Drawn bytes of the visible rows (at most [`ROW_SCAN_LIMIT`] per row),
-    /// adjacent rows merged.
+    /// Drawn bytes of the visible rows (at most [`ROW_SCAN_LIMIT`] per row,
+    /// plus the visible part of a long line past it), adjacent rows merged.
     fn visible_ranges(&self) -> Vec<std::ops::Range<u64>> {
         let s = &self.doc.snapshot;
         let rows = u64::from(self.layout().rows.max(1));
         let top = self.scroll.top_line;
         let mut ranges: Vec<std::ops::Range<u64>> = Vec::new();
+        let mut push = |r: std::ops::Range<u64>| match ranges.last_mut() {
+            Some(last) if last.end >= r.start => last.end = last.end.max(r.end),
+            _ => ranges.push(r),
+        };
         for line in top..top + rows {
             let Some(range) = s.line_range(line) else {
                 break;
             };
             // The line break belongs to the row (CRLF, comment ends).
-            let end = (range.end + 1)
-                .min(s.len())
-                .min(range.start + ROW_SCAN_LIMIT as u64);
-            match ranges.last_mut() {
-                Some(last) if last.end == range.start => last.end = end,
-                _ => ranges.push(range.start..end),
+            let with_break = (range.end + 1).min(s.len());
+            push(range.start..with_break.min(range.start + ROW_SCAN_LIMIT as u64));
+            if let Some(tail) = self.long_row_tail(range.clone()) {
+                push(
+                    tail.start..if tail.end == range.end {
+                        with_break
+                    } else {
+                        tail.end
+                    },
+                );
             }
         }
         ranges
+    }
+
+    /// Bytes of a long line past its scan end that the view draws, with up
+    /// to 3 more at each edge (whole characters); `None` when not visible.
+    pub(super) fn long_row_tail(&self, line: std::ops::Range<u64>) -> Option<std::ops::Range<u64>> {
+        if line.end - line.start <= ROW_SCAN_LIMIT as u64 {
+            return None;
+        }
+        let first = self.scroll.first_col;
+        let end_col = first + u64::from(self.layout().cols + 1);
+        let (seam, seam_col) = self.seam(line.start, end_col)?;
+        let base = line.start + seam;
+        let from = base + first.saturating_sub(seam_col).saturating_sub(3);
+        let to = (base + (end_col - seam_col) + 3).min(line.end);
+        (from < to).then_some(from..to)
+    }
+
+    /// Scan end of the long line at `start` and its column, when that column
+    /// is before `until` (reads only up to `until` columns otherwise, so a
+    /// view at the line start never scans 64 KiB).
+    fn seam(&self, start: u64, until: u64) -> Option<(u64, u64)> {
+        let s = &self.doc.snapshot;
+        let tab = self.options.tab_width;
+        let mut cache = self.seams.borrow_mut();
+        if !cache.0.as_ref().is_some_and(|c| c.same_tree(s)) || cache.1 != tab {
+            *cache = (Some(s.clone()), tab, Vec::new());
+        }
+        if let Some(&(_, seam, col)) = cache.2.iter().find(|e| e.0 == start) {
+            return (col < until).then_some((seam, col));
+        }
+        let limit = ROW_SCAN_LIMIT as u64;
+        let mut window = until.saturating_mul(4).saturating_add(256).min(limit);
+        loop {
+            let bytes = s.to_vec(start..start + window);
+            let end = edit::scan_end(&bytes);
+            let col = edit::column_until(&bytes[..end], until, tab)?;
+            if window == limit {
+                if cache.2.len() >= 256 {
+                    cache.2.clear();
+                }
+                cache.2.push((start, end as u64, col));
+                return (col < until).then_some((end as u64, col));
+            }
+            window = window.saturating_mul(4).min(limit);
+        }
     }
 
     /// The span of the drawn bytes, and a page of rows above and below it
@@ -688,13 +761,63 @@ impl Editor {
     }
 
     fn layout(&self) -> Layout {
+        let options = Options {
+            title_strip: !self.full_screen,
+            // 6 px at 96 DPI; none without a file.
+            scroll_strip: if self.no_file() {
+                0
+            } else {
+                (6 * self.dpi + 48) / 96
+            },
+            ..self.options
+        };
         Layout::new(
             self.size.0,
             self.size.1,
             self.renderer.cell(),
             self.doc.snapshot.line_count(),
-            &self.options,
+            &options,
         )
+    }
+
+    /// The scroll slider of the current view, if shown.
+    fn slider(&self) -> Option<rte_view::Rect> {
+        let layout = self.layout();
+        let cell = self.renderer.cell();
+        let page = rte_view::page_rows(&layout, cell);
+        let lines = self.doc.snapshot.line_count();
+        rte_view::slider(&layout, lines, self.scroll.top_line, page, cell.height)
+    }
+
+    fn slider_active(&self) -> bool {
+        matches!(
+            self.drag,
+            Some(Drag {
+                mode: DragMode::Slider { .. },
+                ..
+            })
+        )
+    }
+
+    /// Scrolls so the slider's top is at `y` (window pixels), as far as
+    /// its track allows.
+    fn drag_slider(&mut self, y: i32) {
+        let Some(slider) = self.slider() else {
+            return;
+        };
+        let track = self.layout().scrollbar;
+        let travel = i64::from(track.h - slider.h);
+        if travel <= 0 {
+            return;
+        }
+        let top = i64::from(y - track.y).clamp(0, travel);
+        let last = self.doc.snapshot.line_count() as i64 - 1;
+        self.scroll.top_line = ((top * last + travel / 2) / travel) as u64;
+        self.clamp_scroll();
+    }
+
+    fn toggle_full_screen(&mut self, ctx: &mut Ctx) {
+        ctx.set_full_screen(!self.full_screen);
     }
 
     /// Fully visible text rows (at least one).
@@ -789,6 +912,8 @@ impl Editor {
             status,
             new_file: self.info.is_some_and(|i| i.new_file),
             popup: self.popup_view(),
+            full_screen: self.full_screen,
+            slider_active: self.slider_active(),
         }
     }
 
@@ -1021,7 +1146,12 @@ impl Editor {
             let Some(def) = commands::for_key(key) else {
                 return false;
             };
-            self.perform(def.action, ctx);
+            // Line and page commands act on the text: not from the find box
+            // or a popup (the palette can still run them by name).
+            let text_focus = !self.find_focused() && self.popup.is_none();
+            if text_focus || !commands::needs_text_focus(def.action) {
+                self.perform(def.action, ctx);
+            }
             return true;
         }
         self.skip_space = false;
@@ -1139,12 +1269,42 @@ impl Editor {
             Action::ColumnSelectPageUp => self.column_select(-(self.page() as i64), 0),
             Action::ColumnSelectPageDown => self.column_select(self.page() as i64, 0),
             Action::ChangeLanguage => self.open_language_mode(),
-            Action::ToggleLineComment => self.toggle_comment(false),
-            Action::ToggleBlockComment => self.toggle_comment(true),
+            Action::ToggleLineComment => self.comment(Some(edit::CommentMode::Toggle)),
+            Action::AddLineComment => self.comment(Some(edit::CommentMode::Add)),
+            Action::RemoveLineComment => self.comment(Some(edit::CommentMode::Remove)),
+            Action::ToggleBlockComment => self.comment(None),
             Action::GoToBracket => self.go_to_bracket(),
             Action::ExpandSelection => self.expand_selection(),
             Action::ShrinkSelection => self.shrink_selection(),
             Action::GoToSymbol => self.open_symbols(),
+            Action::MoveLineUp | Action::MoveLineDown => {
+                if let Some(coded) = edit::move_lines(s, sels, action == Action::MoveLineUp) {
+                    self.run_coded(coded, None);
+                }
+            }
+            Action::CopyLineUp | Action::CopyLineDown => {
+                let up = action == Action::CopyLineUp;
+                let coded = edit::copy_lines(s, sels, up, &self.edit_options());
+                self.run_coded(coded, None);
+            }
+            Action::DeleteLine => {
+                let coded = edit::delete_lines(s, sels, &self.edit_options());
+                self.run_coded(coded, None);
+            }
+            Action::InsertLineAbove | Action::InsertLineBelow => {
+                let below = action == Action::InsertLineBelow;
+                let coded = edit::insert_line(s, sels, below, &self.edit_options());
+                self.run_coded(coded, None);
+            }
+            Action::IndentLine => {
+                if let Some(coded) = edit::indent_lines(s, sels, &self.edit_options()) {
+                    self.run_coded(coded, None);
+                }
+            }
+            Action::ScrollPageUp => self.scroll_lines(-(self.page() as i64)),
+            Action::ScrollPageDown => self.scroll_lines(self.page() as i64),
+            Action::GoToLine => self.open_go_to_line(),
+            Action::ToggleFullScreen => self.toggle_full_screen(ctx),
         }
     }
 
@@ -1344,7 +1504,12 @@ impl Editor {
         }
     }
 
+    /// Rebuilds the palette rows after the query changed.
     fn refresh_palette(&mut self) {
+        if matches!(&self.popup, Some(Popup::Palette(p)) if p.mode == Mode::Line) {
+            self.update_go_to_line();
+            return;
+        }
         if let (Some(Popup::Palette(p)), Some(store)) = (&mut self.popup, &self.store) {
             p.refresh(store, self.settings.recent_count);
         }
@@ -1535,11 +1700,12 @@ impl Editor {
             return;
         };
         if let Some(choice) = p.choice_at(item) {
-            let mode = p.mode;
+            let (mode, query) = (p.mode, p.query.as_str().to_owned());
             self.popup = None;
             match mode {
                 Mode::Language => self.set_language(choice),
                 Mode::Symbol => self.go_to_symbol(choice),
+                Mode::Line => self.go_to_line(&query),
                 Mode::All | Mode::Favorites => {}
             }
             return;
@@ -1671,6 +1837,7 @@ impl Editor {
                     Mode::Favorites => "Search recent and favorite commands",
                     Mode::Language => "Select a language",
                     Mode::Symbol => "Go to a symbol",
+                    Mode::Line => "Line, line:column or -line from the end",
                 };
                 let empty = match p.mode {
                     Mode::Favorites if p.query.as_str().is_empty() => {
@@ -1751,6 +1918,23 @@ impl Editor {
             return;
         }
         let layout = self.layout();
+        if layout.scrollbar.contains(x, y) {
+            if let Some(slider) = self.slider() {
+                // A press off the slider centers it there.
+                let grab = if slider.contains(x, y) {
+                    y - slider.y
+                } else {
+                    slider.h as i32 / 2
+                };
+                self.drag = Some(Drag {
+                    unit: Unit::Char,
+                    origin: (0, 0),
+                    mode: DragMode::Slider { grab },
+                });
+                self.drag_slider(y - grab);
+            }
+            return;
+        }
         let body = layout.text.contains(x, y) || layout.gutter.contains(x, y);
         if !body {
             return;
@@ -1802,6 +1986,7 @@ impl Editor {
                 let head = self.cell_at(x, y);
                 self.place_column(anchor, head, false);
             }
+            Some(DragMode::Slider { grab }) => self.drag_slider(y - grab),
             Some(_) => {
                 let pos = self.hit(x, y);
                 self.drag_to(pos);
@@ -1873,9 +2058,13 @@ impl Editor {
 
         let s = &self.doc.snapshot;
         let primary = self.doc.selections.primary();
+        let line = s.line_of(primary.head);
+        // Past the exactly scanned bytes the column is approximate.
+        let beyond = primary.head - s.line_start(line).unwrap_or(0) > ROW_SCAN_LIMIT as u64;
         let mut right = vec![format!(
-            "Ln {}, Col {}",
-            s.line_of(primary.head) + 1,
+            "Ln {}, Col {}{}",
+            line + 1,
+            if beyond { "~" } else { "" },
             self.caret_column(primary.head) + 1
         )];
         if self.doc.selections.len() > 1 {
@@ -2010,6 +2199,10 @@ impl App for Editor {
             Event::MouseUp => self.drag = None,
             Event::CloseRequested => self.request_close(ctx),
             Event::FilesDropped(dropped) => self.files_dropped(dropped),
+            Event::FullScreen(Ok(on)) => self.full_screen = on,
+            Event::FullScreen(Err(reason)) => {
+                self.notice = Some(format!("Full screen failed: {reason}"));
+            }
             Event::Wake => {
                 self.drain_pending();
                 self.drain_loads();
@@ -2029,6 +2222,7 @@ impl App for Editor {
         if self.prompt.is_some() {
             self.popup = None;
         }
+        self.end_line_preview();
         self.sync_find();
         self.sync_ui_renderer();
         let redraw = layout_changed || !self.visible().same(&before);
@@ -2078,6 +2272,7 @@ impl App for Editor {
             CaretStyle::Bar
         };
         self.sync_syntax();
+        let slider_active = self.slider_active();
         let brackets: Vec<u64> = self
             .bracket_pair()
             .map(|(a, b)| vec![a.min(b), a.max(b)])
@@ -2117,6 +2312,7 @@ impl App for Editor {
                 }
             },
             empty: self.path.is_none().then_some(EMPTY_HINT),
+            slider_active,
         };
         self.view.build(&frame, &mut self.list);
         self.draw_popup();
@@ -3794,6 +3990,52 @@ mod tests {
     }
 
     #[test]
+    fn long_lines_are_highlighted_and_searched_past_the_scan_end() {
+        let mut text = b"[".to_vec();
+        while text.len() < 100_000 {
+            text.extend_from_slice(b"\"ab\",1,");
+        }
+        text.extend_from_slice(b"\"end\"]");
+        let len = text.len() as u64;
+        let mut ctx = Ctx::headless(800, 600, 96);
+        let mut editor = editor_named(r"C:\line.json", &text);
+        editor.event(
+            Event::Resized {
+                width: 800,
+                height: 600,
+            },
+            &mut ctx,
+        );
+        editor.event(key(VK_END, false, false), &mut ctx);
+        let ranges = editor.visible_ranges();
+        let last = ranges.last().cloned().unwrap();
+        assert!(
+            last.start > ROW_SCAN_LIMIT as u64 && last.end == len,
+            "{ranges:?}"
+        );
+        assert!(editor.viewport_rows(&(0..len)).iter().any(|r| r.end == len));
+        assert!(editor.status_text().1.contains("Col ~"));
+        let mut pixels = vec![0u32; 800 * 600];
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !editor.syntax.as_ref().is_some_and(Syntax::highlighted) {
+            assert!(std::time::Instant::now() < deadline, "never highlighted");
+            editor.event(Event::Wake, &mut ctx);
+            editor.paint(&mut pixels, 800, 600);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let snapshot = editor.doc.snapshot.clone();
+        let spans = editor.syntax.as_mut().unwrap().spans(&snapshot, &ranges);
+        assert!(
+            spans.iter().any(|s| s.start > len - 100),
+            "strings at the end are colored"
+        );
+        // Back at the line start the scan stops at the visible columns.
+        editor.event(key(VK_HOME, false, false), &mut ctx);
+        assert!(!editor.status_text().1.contains('~'));
+        assert_eq!(editor.visible_ranges(), [0..ROW_SCAN_LIMIT as u64]);
+    }
+
+    #[test]
     fn alt_f4_quits_and_syntax_highlighting_toggles() {
         let files = Arc::new(FakeFiles::default());
         let mut editor = editor_on(&files, b"", false);
@@ -4595,5 +4837,304 @@ mod tests {
             (up[0], up[1], up[2], up[8]),
             (source[0], source[0], 0, source[2])
         );
+    }
+
+    /// `Ctrl+K` then `Ctrl+second`.
+    fn chord_k_ctrl(editor: &mut Editor, ctx: &mut Ctx, second: u16) {
+        editor.event(key(VK_K, true, false), ctx);
+        editor.event(key(second, true, false), ctx);
+    }
+
+    #[test]
+    fn line_commands_run_from_their_keys() {
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, b"one\ntwo\nthree", false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(Event::Wake, &mut ctx);
+        let alt = |vk, shift| mods(vk, false, shift, true);
+        editor.event(alt(VK_DOWN, false), &mut ctx);
+        assert_eq!(text(&editor), "two\none\nthree");
+        editor.event(alt(VK_UP, false), &mut ctx);
+        assert_eq!(text(&editor), "one\ntwo\nthree");
+        editor.event(alt(VK_DOWN, true), &mut ctx);
+        assert_eq!(
+            (text(&editor).as_str(), caret(&editor)),
+            ("one\none\ntwo\nthree", 4)
+        );
+        editor.event(key(VK_K, true, true), &mut ctx);
+        assert_eq!(
+            (text(&editor).as_str(), caret(&editor)),
+            ("one\ntwo\nthree", 4)
+        );
+        editor.event(key(VK_RETURN, true, false), &mut ctx);
+        assert_eq!(
+            (text(&editor).as_str(), caret(&editor)),
+            ("one\ntwo\n\nthree", 8)
+        );
+        editor.event(key(VK_RETURN, true, true), &mut ctx);
+        assert_eq!(text(&editor), "one\ntwo\n\n\nthree");
+        editor.event(key(VK_Z, true, false), &mut ctx);
+        editor.event(key(VK_Z, true, false), &mut ctx);
+        assert_eq!(text(&editor), "one\ntwo\nthree");
+        editor.event(key(VK_OEM_6, true, false), &mut ctx);
+        assert_eq!(text(&editor), "one\n    two\nthree");
+        editor.event(key(VK_OEM_4, true, false), &mut ctx);
+        assert_eq!(text(&editor), "one\ntwo\nthree");
+        editor.event(key(VK_F, true, false), &mut ctx);
+        editor.event(alt(VK_DOWN, false), &mut ctx);
+        assert_eq!(text(&editor), "one\ntwo\nthree", "not from the find box");
+        // Read-only refuses the edits.
+        let mut locked = editor_on(&files, b"one\ntwo", true);
+        locked.event(Event::Wake, &mut ctx);
+        locked.event(alt(VK_DOWN, false), &mut ctx);
+        assert_eq!(text(&locked), "one\ntwo");
+    }
+
+    #[test]
+    fn add_and_remove_line_comments_use_the_language() {
+        let mut ctx = Ctx::headless(800, 600, 96);
+        let mut editor = editor_named(r"C:\src\main.rs", b"a();\n// b();");
+        editor.event(Event::Wake, &mut ctx);
+        editor.event(key(VK_A, true, false), &mut ctx);
+        chord_k_ctrl(&mut editor, &mut ctx, VK_C);
+        assert_eq!(text(&editor), "// a();\n// // b();");
+        editor.event(key(VK_Z, true, false), &mut ctx);
+        chord_k_ctrl(&mut editor, &mut ctx, VK_U);
+        assert_eq!(text(&editor), "a();\nb();");
+    }
+
+    #[test]
+    fn scroll_page_shortcuts_panel_and_the_empty_state() {
+        let files = Arc::new(FakeFiles::default());
+        let lines = "x\n".repeat(200);
+        let mut editor = editor_on(&files, lines.as_bytes(), false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(Event::Wake, &mut ctx);
+        editor.event(mods(VK_NEXT, false, false, true), &mut ctx);
+        assert_eq!(editor.scroll.top_line, editor.page());
+        editor.event(mods(VK_PRIOR, false, false, true), &mut ctx);
+        assert_eq!((editor.scroll.top_line, caret(&editor)), (0, 0));
+        chord_k_ctrl(&mut editor, &mut ctx, VK_S);
+        assert!(matches!(editor.popup, Some(Popup::Panel(_))));
+
+        let mut empty = empty_editor(false);
+        empty.event(mods(VK_DOWN, false, false, true), &mut ctx);
+        assert_eq!(empty.notice.as_deref(), Some("No file is open"));
+        chord_k_ctrl(&mut empty, &mut ctx, VK_S);
+        assert!(matches!(empty.popup, Some(Popup::Panel(_))));
+        empty.popup = None;
+        let mut ctx = Ctx::headless(800, 600, 96);
+        empty.event(key(VK_F11, false, false), &mut ctx);
+        assert_eq!(ctx.requested_full_screen(), Some(true));
+        assert_eq!(empty.layout().scrollbar.w, 0, "no strip without a file");
+    }
+
+    #[test]
+    fn go_to_line_previews_and_places_the_caret() {
+        let files = Arc::new(FakeFiles::default());
+        let lines: String = (1..=200).map(|i| format!("line {i}\n")).collect();
+        let mut editor = editor_on(&files, lines.as_bytes(), false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(Event::Wake, &mut ctx);
+        let s = editor.doc.snapshot.clone();
+        let label = |editor: &Editor| palette(editor).choices.labels[0].clone();
+        editor.event(key(VK_G, true, false), &mut ctx);
+        assert_eq!(palette(&editor).mode, Mode::Line);
+        assert!(label(&editor).starts_with("Current line 1, column 1"));
+        type_text(&mut editor, &mut ctx, "150");
+        assert_eq!(label(&editor), "Go to line 150");
+        let top = editor.scroll.top_line;
+        assert!(top <= 149 && 149 < top + editor.page(), "previewed");
+        editor.event(key(VK_ESCAPE, false, false), &mut ctx);
+        assert_eq!(
+            (editor.scroll.top_line, caret(&editor)),
+            (0, 0),
+            "Escape restores"
+        );
+
+        editor.event(key(VK_G, true, false), &mut ctx);
+        type_text(&mut editor, &mut ctx, "20:3");
+        assert_eq!(label(&editor), "Go to line 20, column 3");
+        editor.event(key(VK_RETURN, false, false), &mut ctx);
+        assert!(editor.popup.is_none());
+        assert_eq!(caret(&editor), s.line_start(19).unwrap() + 2);
+
+        for (query, line) in [("-1", 200), ("999", 200), ("0", 0)] {
+            editor.event(key(VK_G, true, false), &mut ctx);
+            type_text(&mut editor, &mut ctx, query);
+            editor.event(key(VK_RETURN, false, false), &mut ctx);
+            assert_eq!(caret(&editor), s.line_start(line).unwrap(), "{query}");
+        }
+        // Not a line: Enter changes nothing.
+        let before = (caret(&editor), editor.scroll);
+        editor.event(key(VK_G, true, false), &mut ctx);
+        type_text(&mut editor, &mut ctx, "abc");
+        editor.event(key(VK_RETURN, false, false), &mut ctx);
+        assert_eq!((caret(&editor), editor.scroll), before);
+    }
+
+    #[test]
+    fn full_screen_follows_the_platform() {
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, b"text", false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(Event::Wake, &mut ctx);
+        let title = editor.layout().title;
+        assert!(title.h > 0 && editor.is_caption(title.x + 5, title.y + 2));
+        editor.event(key(VK_F11, false, false), &mut ctx);
+        assert_eq!(ctx.requested_full_screen(), Some(true));
+        assert_eq!(
+            editor.layout().title.h,
+            title.h,
+            "unchanged until the platform answers"
+        );
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(Event::FullScreen(Ok(true)), &mut ctx);
+        assert!(ctx.redraw_requested());
+        assert_eq!(editor.layout().title.h, 0);
+        assert!(!editor.is_caption(5, 2));
+        editor.event(key(VK_F11, false, false), &mut ctx);
+        assert_eq!(ctx.requested_full_screen(), Some(false));
+        editor.event(Event::FullScreen(Ok(false)), &mut ctx);
+        assert_eq!(editor.layout().title, title);
+        editor.event(Event::FullScreen(Err("no monitor")), &mut ctx);
+        assert_eq!(
+            editor.notice.as_deref(),
+            Some("Full screen failed: no monitor")
+        );
+    }
+
+    #[test]
+    fn the_scroll_slider_drags_without_moving_the_caret() {
+        let files = Arc::new(FakeFiles::default());
+        let lines = "x\n".repeat(999);
+        let mut editor = editor_on(&files, lines.as_bytes(), false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(Event::Wake, &mut ctx);
+        editor.select_single(Selection::caret(4));
+        let track = editor.layout().scrollbar;
+        assert_eq!(track.w, 6);
+        assert!(!editor.is_text(track.x + 1, track.y + 5));
+        let slider = editor.slider().unwrap();
+        assert_eq!(slider.y, track.y);
+        let press = |y| Event::MouseDown {
+            x: track.x + 2,
+            y,
+            clicks: 1,
+            shift: false,
+            ctrl: false,
+            alt: false,
+            middle: false,
+        };
+        // Pressing and releasing repaint once each (the slider's color).
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(press(slider.y + 2), &mut ctx);
+        assert!(ctx.redraw_requested());
+        assert_eq!(editor.scroll.top_line, 0);
+        let bottom = track.y + track.h as i32 + 50;
+        editor.event(
+            Event::MouseMove {
+                x: track.x,
+                y: bottom,
+            },
+            &mut ctx,
+        );
+        assert_eq!(editor.scroll.top_line, 999);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(Event::MouseUp, &mut ctx);
+        assert!(ctx.redraw_requested());
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(Event::MouseUp, &mut ctx);
+        assert!(!ctx.redraw_requested(), "nothing changed");
+        // A press on the strip centers the slider there.
+        let middle = track.y + track.h as i32 / 2;
+        editor.event(press(middle), &mut ctx);
+        editor.event(Event::MouseUp, &mut ctx);
+        let s = editor.slider().unwrap();
+        assert!((s.y + s.h as i32 / 2 - middle).abs() <= 2, "{s:?}");
+        assert_eq!(caret(&editor), 4);
+    }
+
+    #[test]
+    fn closing_or_replacing_the_file_drops_long_line_and_preview_state() {
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, &vec![b'x'; 128 * 1024], false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(Event::Wake, &mut ctx);
+        editor.event(key(VK_END, false, false), &mut ctx);
+        editor.visible_ranges();
+        assert!(
+            editor.seams.borrow().0.is_some(),
+            "the long row was scanned"
+        );
+        editor.event(key(VK_W, true, false), &mut ctx);
+        assert!(editor.no_file());
+        assert!(
+            editor.seams.borrow().0.is_none(),
+            "the closed text is released"
+        );
+
+        // A file opened during a Go to Line preview starts at its top.
+        let lines: String = (1..=300).map(|i| format!("{i}\n")).collect();
+        let mut editor = editor_on(&files, lines.as_bytes(), false);
+        editor.event(Event::Wake, &mut ctx);
+        let file = TempFile::new("short.txt", b"one\ntwo");
+        editor.event(key(VK_G, true, false), &mut ctx);
+        type_text(&mut editor, &mut ctx, "200");
+        assert!(editor.scroll.top_line > 100);
+        drop_file(&mut editor, &mut ctx, &file.0, 0);
+        settle_open(&mut editor, &mut ctx);
+        assert_eq!(text(&editor), "one\ntwo");
+        assert_eq!(editor.scroll.top_line, 0);
+        assert!(editor.line_preview.is_none() && editor.popup.is_none());
+    }
+
+    #[test]
+    fn alt_line_keys_need_the_text_focus() {
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, b"one\ntwo", false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(Event::Wake, &mut ctx);
+        let alt = |vk, shift| mods(vk, false, shift, true);
+        for open in [key(VK_P, true, true), key(VK_K, true, false)] {
+            editor.event(open, &mut ctx);
+            if editor.chord.is_some() {
+                editor.event(key(VK_S, true, false), &mut ctx);
+            }
+            assert!(editor.popup.is_some());
+            for event in [alt(VK_DOWN, false), alt(VK_DOWN, true), alt(VK_NEXT, false)] {
+                editor.event(event, &mut ctx);
+            }
+            assert_eq!(
+                (text(&editor).as_str(), editor.scroll.top_line),
+                ("one\ntwo", 0)
+            );
+            editor.event(key(VK_ESCAPE, false, false), &mut ctx);
+        }
+        // The palette still runs the command by name.
+        editor.event(key(VK_P, true, true), &mut ctx);
+        type_text(&mut editor, &mut ctx, "move line down");
+        editor.event(key(VK_RETURN, false, false), &mut ctx);
+        assert_eq!(text(&editor), "two\none");
+    }
+
+    #[test]
+    fn go_to_line_clamps_huge_columns_to_the_line_end() {
+        let files = Arc::new(FakeFiles::default());
+        let text = "\u{e9}\u{e9}\n\u{4e2d}x\ne\u{301}\nab";
+        let mut editor = editor_on(&files, text.as_bytes(), false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(Event::Wake, &mut ctx);
+        let s = editor.doc.snapshot.clone();
+        for line in 0..4u64 {
+            editor.event(key(VK_G, true, false), &mut ctx);
+            type_text(&mut editor, &mut ctx, &format!("{}:{}", line + 1, u64::MAX));
+            editor.event(key(VK_RETURN, false, false), &mut ctx);
+            assert_eq!(
+                caret(&editor),
+                edit::content_range(&s, line).end,
+                "line {line}"
+            );
+        }
     }
 }

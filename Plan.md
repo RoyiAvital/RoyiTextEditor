@@ -4,6 +4,7 @@
 
 - [Architecture](Plan/Architecture.md)
 - [Data Safety 001](Plan/DataSafety001.md)
+- [Minimap](Plan/Minimap.md)
 
 ## Completed
 
@@ -14,3 +15,4 @@
 - [Syntax Highlighting and Code Awareness](Done/SyntaxHighlighting.md)
 - [Syntax Performance](Done/SyntaxPerformance.md)
 - [Empty State and Drag and Drop](Done/EmptyStateAndDragDrop.md)
+- [M7 Polish](Done/M7Polish.md)

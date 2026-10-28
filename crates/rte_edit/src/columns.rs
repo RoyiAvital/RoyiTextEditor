@@ -62,6 +62,34 @@ pub fn column_of(line: &[u8], offset: usize, tab_width: u32) -> u64 {
     column_after(line, (0, 0), offset, tab_width)
 }
 
+/// Column after `line`, or `None` as soon as a character starts at or past
+/// column `until` (reads only the bytes before it).
+pub fn column_until(line: &[u8], until: u64, tab_width: u32) -> Option<u64> {
+    let mut past = false;
+    let (_, col) = walk(line, (0, 0), line.len(), tab_width, |_, _, c, _| {
+        past = c >= until;
+        !past
+    });
+    (!past).then_some(col)
+}
+
+/// End of the exactly drawn part of a line cut after `prefix`: its length
+/// without a trailing incomplete UTF-8 sequence (at most 3 bytes), so a
+/// character straddling the cut is drawn whole, past it. Columns do not
+/// change: those bytes count one column each on either side.
+pub fn scan_end(prefix: &[u8]) -> usize {
+    let n = prefix.len();
+    for back in 1..=n.min(3) {
+        if let Err(e) = std::str::from_utf8(&prefix[n - back..])
+            && e.valid_up_to() == 0
+            && e.error_len().is_none()
+        {
+            return n - back;
+        }
+    }
+    n
+}
+
 /// [`column_of`] continued from a known character boundary `from`
 /// (offset, column) at or before `offset`: sorted ranges of one row cost
 /// one pass over it.
@@ -105,5 +133,6 @@ pub fn offset_at_column(line: &[u8], col: u64, tab_width: u32) -> usize {
             true
         },
     );
-    found.unwrap_or_else(|| reached + target.saturating_sub(end_col) as usize)
+    let past = usize::try_from(target.saturating_sub(end_col)).unwrap_or(usize::MAX);
+    found.unwrap_or_else(|| reached.saturating_add(past))
 }

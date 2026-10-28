@@ -15,6 +15,12 @@ binding exactly. For example, `Ctrl+Shift+S` is not Save.
 | `Backspace` / `Delete`; `Ctrl+Backspace` / `Ctrl+Delete`                        | Delete a character; delete a word                                        |
 | `Enter`                                                                         | Insert a line break and keep indentation                                 |
 | `Tab`; `Shift+Tab`                                                              | Insert indentation; indent or outdent selected lines                     |
+| `Ctrl+]`; `Ctrl+[`                                                              | Indent; outdent the touched lines (also for a caret)                     |
+| `Alt+Up` / `Alt+Down`                                                           | Move the touched lines up / down                                         |
+| `Shift+Alt+Up` / `Shift+Alt+Down`                                               | Copy the touched lines up / down                                         |
+| `Ctrl+Shift+K`                                                                  | Delete the touched lines                                                 |
+| `Ctrl+Enter`; `Ctrl+Shift+Enter`                                                | Insert a line below; above                                               |
+| `Ctrl+G`                                                                        | Go to line: `N`, `N:C` or `N,C`, `-N` from the end (`Esc` restores)      |
 | `Insert`                                                                        | Toggle overtype mode                                                     |
 | `Ctrl+Z`; `Ctrl+Y` / `Ctrl+Shift+Z`                                             | Undo; redo                                                               |
 | `Ctrl+C` / `Ctrl+X` / `Ctrl+V`                                                  | Copy; cut; paste. Copy or cut the current line when nothing is selected. |
@@ -27,9 +33,13 @@ binding exactly. For example, `Ctrl+Shift+S` is not Save.
 | `Up` / `Down` / `PgUp` / `PgDn` (palette)                                       | Move through palette entries                                             |
 | `Enter` or click (palette); `Esc`                                               | Run the selected command; close the palette                              |
 | Wheel; `Ctrl+Up` / `Ctrl+Down`                                                  | Scroll vertically                                                        |
+| `Alt+PgUp` / `Alt+PgDn`                                                         | Scroll a page; the caret stays                                           |
+| Drag the slider; press the strip at the right edge                              | Scroll; jump to that place                                               |
 | `Shift`+wheel                                                                   | Scroll horizontally                                                      |
 | `Ctrl+=` / `Ctrl+Shift+=` / `Ctrl+Numpad+`; `Ctrl+-` / `Ctrl+Numpad-`; `Ctrl+0` | Zoom in; zoom out; reset zoom                                            |
 | `Ctrl`+wheel                                                                    | Zoom in or out                                                           |
+| `F11`                                                                           | Toggle full screen (the status line stays)                               |
+| `Ctrl+K Ctrl+S`                                                                 | Show the keyboard shortcuts                                              |
 
 Mouse clicks place the caret. `Shift`+click extends the current selection.
 Commands without a shortcut are available by name in the Command Palette.
@@ -76,6 +86,7 @@ larger requests are refused with a message on the status line.
 | -------------------------------------------------------- | ------------------------------------------------------------------------- |
 | `Ctrl+K M`                                               | Change Language Mode (or Plain Text)                                      |
 | `Ctrl+/`                                                 | Toggle Line Comment (block comments per line in CSS, HTML, XML, Markdown) |
+| `Ctrl+K Ctrl+C`; `Ctrl+K Ctrl+U`                         | Add Line Comment (also to commented lines); Remove Line Comment           |
 | `Shift+Alt+A`                                            | Toggle Block Comment                                                      |
 | `Ctrl+Shift+\`                                           | Go to the matching bracket                                                |
 | `Shift+Alt+Right`; `Shift+Alt+Left`                      | Expand the selection to the enclosing syntax node; shrink it back         |

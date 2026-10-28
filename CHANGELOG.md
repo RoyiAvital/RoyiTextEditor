@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-28
+
+This release focuses on feature parity with VS Code on text operations 
+and related shortcuts. 
+The release brings a scroll slider as a hint for the relative location 
+withing the document.
+
+### Added
+
+- VS Code's Basic Editing commands with their keys: Move Line Up / Down
+  (`Alt+Up` / `Alt+Down`), Copy Line Up / Down (`Shift+Alt+Up` /
+  `Shift+Alt+Down`), Delete Line (`Ctrl+Shift+K`), Insert Line Below / Above
+  (`Ctrl+Enter` / `Ctrl+Shift+Enter`), Indent Line (`Ctrl+]`), Outdent Line
+  also on `Ctrl+[`, Add / Remove Line Comment (`Ctrl+K Ctrl+C` /
+  `Ctrl+K Ctrl+U`) and Scroll Page Up / Down (`Alt+PgUp` / `Alt+PgDn`).
+  Moving, copying and deleting lines copy no text: they take the same time
+  for any line or file size.
+- Go to Line/Column (`Ctrl+G`): `N`, `N:C` or `N,C`, `-N` from the end; the
+  view previews the line, `Esc` restores it.
+- Full screen (`F11`); the status line stays.
+- A scroll slider in a 6 px strip at the right edge: drag it, or press the
+  strip to jump there; the caret stays.
+- `Application: Keyboard Shortcuts` on `Ctrl+K Ctrl+S`.
+- Performance Benchmark v1: E04, Move Line Down, and E05, Copy Line Down.
+
+### Fixed
+
+- Lines longer than 64 KiB are drawn to their end (the view showed nothing
+  past 64 KiB); search and syntax colors cover that part, and the status line
+  shows `Col ~N` there. A character crossing 64 KiB draws as itself.
+
 ## [0.4.2] - 2026-10-25
 
 This version shapes the application around its main use: one file per

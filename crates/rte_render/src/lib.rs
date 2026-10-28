@@ -743,6 +743,7 @@ mod tests {
                     caret: CaretStyle::Hidden,
                     highlights: Default::default(),
                     empty: None,
+                    slider_active: false,
                 },
                 &mut list,
             );

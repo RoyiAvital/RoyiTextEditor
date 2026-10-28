@@ -4,7 +4,7 @@ use std::fmt;
 use std::ops::Range;
 use std::sync::Arc;
 
-use crate::change::{Change, ChangeSet, EditError, Transaction};
+use crate::change::{Change, ChangeSet, EditError, Inserted, Piece, Transaction};
 use crate::tree::{self, Kind, Node};
 
 /// Document revision; increments with every applied transaction.
@@ -271,15 +271,35 @@ impl Snapshot {
     pub fn apply(&self, tx: &Transaction) -> Result<(Snapshot, ChangeSet), EditError> {
         tx.validate(self.len())?;
         let edits = tx.edits();
-        let batched = if edits.len() > 1 {
+        let copies = edits.iter().any(|e| matches!(e.text, Inserted::Shared(_)));
+        let batched = if edits.len() > 1 && !copies {
             tree::apply_batch(&self.root, edits)
         } else {
             None
         };
         let root = batched.unwrap_or_else(|| {
+            // Shared texts are built from the base before any edit changes it.
+            let sources: Vec<Option<Arc<Node>>> = edits
+                .iter()
+                .map(|e| match &e.text {
+                    Inserted::Shared(pieces) => {
+                        Some(pieces.iter().fold(Node::empty(), |acc, p| {
+                            let node = match p {
+                                Piece::Copy(r) => tree::slice(&self.root, r.clone()),
+                                Piece::Bytes(b) => tree::text_node(b),
+                            };
+                            tree::concat(acc, node)
+                        }))
+                    }
+                    Inserted::Bytes(_) => None,
+                })
+                .collect();
             let mut root = self.root.clone();
-            for edit in edits.iter().rev() {
-                root = tree::replace(&root, edit.range.clone(), &edit.text);
+            for (edit, source) in edits.iter().zip(sources).rev() {
+                root = match source {
+                    Some(node) => tree::replace_node(&root, edit.range.clone(), node),
+                    None => tree::replace(&root, edit.range.clone(), edit.text.bytes()),
+                };
             }
             root
         });

@@ -306,3 +306,19 @@ listed. No automatic clean-up exists.
   documents only, recovery hint on open instead of session restore, no
   automatic journal clean-up, visible unsaved hint. Supersedes the
   Architecture's panic-only recovery and no-watcher rule; awaiting review.
+
+### 2026_10_25 - Claude Opus 5.5
+
+- Role: Reviewer
+- Activity: Review
+- Agent: GitHub Copilot
+- Model: Claude Opus 5.5
+- Effort: High
+- Context Window: 872K
+- Outcome: Owner's decision: external change detection belongs to this
+  task (it was also listed under the Architecture's M7, now removed there).
+  Before implementation this design needs revising for the single-session
+  principle (Architecture Principle 8): recovering "into a new instance",
+  opening salvage text "in a new untitled instance" and treating journals
+  held by other running processes as live are awareness of other sessions;
+  untitled documents no longer exist (empty state).

@@ -142,7 +142,7 @@ pub fn offset_in_line(s: &Snapshot, range: Range<u64>, col: u64, tab_width: u32)
         let bytes = s.to_vec(range.start..range.start + window);
         let offset = offset_at_column(&bytes, col, tab_width) as u64;
         if offset < window || window == full {
-            return snap_to_boundary(s, (range.start + offset).min(range.end));
+            return snap_to_boundary(s, range.start.saturating_add(offset).min(range.end));
         }
         window = window.saturating_mul(4).min(full);
     }

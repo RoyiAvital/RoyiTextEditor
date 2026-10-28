@@ -438,7 +438,8 @@ fn rebuild_leaf(node: &Node, chunk: &Chunk, start: u64, edits: &[Edit]) -> Optio
     let mut pos = 0;
     let mut removed_newlines = 0;
     for edit in edits {
-        if edit.text.len() > LEAF_MAX {
+        let text = edit.text.bytes();
+        if text.len() > LEAF_MAX {
             return None;
         }
         let (s, e) = (
@@ -449,8 +450,8 @@ fn rebuild_leaf(node: &Node, chunk: &Chunk, start: u64, edits: &[Edit]) -> Optio
             pieces.push(Piece::Kept(pos..s));
         }
         removed_newlines += count_newlines(&bytes[s..e]);
-        if !edit.text.is_empty() {
-            pieces.push(Piece::Text(&edit.text));
+        if !text.is_empty() {
+            pieces.push(Piece::Text(text));
         }
         pos = e;
     }
@@ -522,9 +523,20 @@ pub(crate) fn replace(root: &Arc<Node>, range: Range<u64>, text: &[u8]) -> Arc<N
     if let Some(node) = replace_local(root, range.clone(), text) {
         return node;
     }
+    replace_node(root, range, text_node(text))
+}
+
+/// Replaces `range` of `root` with the tree `node`: O(log n), sharing leaves.
+pub(crate) fn replace_node(root: &Arc<Node>, range: Range<u64>, node: Arc<Node>) -> Arc<Node> {
     let (left, rest) = split(root, range.start);
     let (_, right) = split(&rest, range.end - range.start);
-    concat(concat(left, text_node(text)), right)
+    concat(concat(left, node), right)
+}
+
+/// The bytes of `range` as a tree sharing `root`'s leaves: O(log n).
+pub(crate) fn slice(root: &Arc<Node>, range: Range<u64>) -> Arc<Node> {
+    let (_, rest) = split(root, range.start);
+    split(&rest, range.end - range.start).0
 }
 
 /// Fast path for an edit inside one leaf whose parent has room for the

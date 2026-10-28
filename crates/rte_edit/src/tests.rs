@@ -135,6 +135,39 @@ fn columns_follow_cell_rules() {
     assert_eq!(offset_at_column(line, 6, 4), 6);
     assert_eq!(offset_at_column(line, 8, 4), 9);
     assert_eq!(offset_at_column(line, 20, 4), 10 + 11);
+    // A huge column clamps to the line end instead of wrapping.
+    let s = Snapshot::from_bytes("\u{e9}\u{e9}".as_bytes());
+    assert_eq!(offset_in_line(&s, 0..4, u64::MAX, 4), 4);
+    assert_eq!(offset_at_column(b"ab", u64::MAX, 4), usize::MAX);
+}
+
+#[test]
+fn the_scan_end_keeps_a_straddling_character_whole() {
+    for ch in ['é', '中', '😀'] {
+        let mut line = vec![b'a'; COLUMN_SCAN_LIMIT - 1];
+        let mut buf = [0; 4];
+        line.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+        line.extend_from_slice(b"xyz");
+        let prefix = &line[..COLUMN_SCAN_LIMIT];
+        let seam = scan_end(prefix);
+        assert_eq!(seam, COLUMN_SCAN_LIMIT - 1, "{ch}");
+        // One column per byte from the seam, on either side of the cut.
+        for offset in seam..line.len() {
+            assert_eq!(
+                column_of(prefix, offset, 4),
+                (COLUMN_SCAN_LIMIT - 1 + offset - seam) as u64
+            );
+        }
+    }
+    // Complete text, a lone continuation byte and a real invalid byte stay.
+    assert_eq!(scan_end(b"abc"), 3);
+    assert_eq!(scan_end(b"ab\x80"), 3);
+    assert_eq!(scan_end(b"ab\xFF"), 3);
+    assert_eq!(scan_end("a中".as_bytes()), 4);
+    assert_eq!(scan_end(b"a\xE4\xB8"), 1);
+    assert_eq!(column_until(b"a\tb", 10, 4), Some(5));
+    assert_eq!(column_until(b"a\tb", 4, 4), None);
+    assert_eq!(column_until(b"a\tb", 5, 4), Some(5));
 }
 
 #[test]
@@ -641,6 +674,122 @@ fn line_comments_close_before_long_trailing_whitespace() {
 
 /// Each line uses the tokens of the language at its text (embedded code).
 #[test]
+fn add_and_remove_line_comments() {
+    let mode = |m: &str, mode| coded(m, |s, sels| line_comment(s, sels, mode, &|_| SLASH));
+    assert_eq!(mode("[// a\nb]", CommentMode::Add), "// [// a\n// b]");
+    assert_eq!(mode("[// a\nb]", CommentMode::Remove), "[a\nb]");
+    assert_eq!(mode("a|", CommentMode::Remove), "none: a|");
+    assert_eq!(mode("// a|", CommentMode::Toggle), "a|");
+}
+
+#[test]
+fn move_lines_swap_with_their_neighbor() {
+    let up = |m: &str| coded(m, |s, sels| move_lines(s, sels, true));
+    let down = |m: &str| coded(m, |s, sels| move_lines(s, sels, false));
+    assert_eq!(up("a\nb|c\nd"), "b|c\na\nd");
+    assert_eq!(down("a|b\nc\nd"), "c\na|b\nd");
+    // The last line keeps having no break, either way.
+    assert_eq!(up("a\nb|"), "b|\na");
+    assert_eq!(down("a|\nb"), "b\na|");
+    // A selection over whole lines, ending at the next line start.
+    assert_eq!(down("[a\nb\n]c\nd"), "c\n[a\nb\n]d");
+    assert_eq!(up("a\n[b\nc\n]d"), "[b\nc\n]a\nd");
+    // Two blocks; a block at the edge stays.
+    assert_eq!(down("a|\nb\nc|\nd\ne"), "b\na|\nd\nc|\ne");
+    assert_eq!(up("|a\nb\nc|"), "|a\nc|\nb");
+    assert_eq!(up("|a"), "none: |a");
+    assert_eq!(up("|a\nb\nc\nd|"), "|a\nb\nd|\nc");
+    // CRLF breaks stay in place; empty lines move too.
+    assert_eq!(down("|\r\nx\r\n"), "x\r\n|\r\n");
+    // A selection ending after an LF ends after the CRLF that follows the
+    // moved line, in both directions and for reversed selections.
+    assert_eq!(down("[a\n]b\r\nc"), "b\n[a\r\n]c");
+    let s = Snapshot::from_bytes(b"a\nb\r\nc");
+    let reversed = Selections::single(Selection::new(2, 0));
+    let moved = move_lines(&s, &reversed, false).unwrap();
+    assert_eq!(moved.selections.primary(), Selection::new(5, 2));
+    // Typing over the moved selection replaces exactly that line.
+    let (after, _, _) = apply(&s, &reversed, &moved.cmd).unwrap();
+    assert_eq!(show(&after, &moved.selections), "b\n]a\r\n[c");
+    let typed = insert(&after, &moved.selections, b"z", &lf());
+    let (after, _, _) = apply(&after, &moved.selections, &typed).unwrap();
+    assert_eq!(after.to_vec(0..after.len()), b"b\nzc");
+    assert_eq!(up("a\r\n[b\n]c"), "[b\r\n]a\nc");
+    assert_eq!(down("[a\r\n]b\nc"), "b\r\n[a\n]c");
+}
+
+#[test]
+fn copy_lines_duplicate_blocks_and_select_the_copy() {
+    let opts = lf();
+    let up = |m: &str| coded(m, |s, sels| Some(copy_lines(s, sels, true, &opts)));
+    let down = |m: &str| coded(m, |s, sels| Some(copy_lines(s, sels, false, &opts)));
+    assert_eq!(down("a|b\nc"), "ab\na|b\nc");
+    assert_eq!(up("a|b\nc"), "a|b\nab\nc");
+    // A last line without a break gets one between the copies.
+    assert_eq!(down("a\nb|"), "a\nb\nb|");
+    assert_eq!(up("a\nb|"), "a\nb|\nb");
+    assert_eq!(down("[a\nb]\nc"), "a\nb\n[a\nb]\nc");
+    assert_eq!(down("a|\nb\nc|"), "a\na|\nb\nc\nc|");
+}
+
+#[test]
+fn delete_lines_keep_the_column_on_the_next_line() {
+    let opts = lf();
+    let del = |m: &str| coded(m, |s, sels| Some(delete_lines(s, sels, &opts)));
+    assert_eq!(del("ab|c\nxyz\nq"), "xy|z\nq");
+    assert_eq!(del("[a\nb]\nc"), "c|");
+    // The last line takes the break before it.
+    assert_eq!(del("abc\nx|y"), "a|bc");
+    assert_eq!(del("only|"), "|");
+    assert_eq!(del("a|\nb\nc|\nd"), "b|\nd|");
+    assert_eq!(del("a\r\nb|\r\nc"), "a\r\nc|");
+}
+
+#[test]
+fn insert_lines_and_indent_lines() {
+    let opts = lf();
+    let below = |m: &str| coded(m, |s, sels| Some(insert_line(s, sels, true, &opts)));
+    let above = |m: &str| coded(m, |s, sels| Some(insert_line(s, sels, false, &opts)));
+    assert_eq!(below("  a|b\nc"), "  ab\n  |\nc");
+    assert_eq!(above("  a|b\nc"), "  |\n  ab\nc");
+    assert_eq!(below("a|\nb|"), "a\n|\nb\n|");
+    // Two carets on one line add one line.
+    assert_eq!(below("|a|b"), "ab\n|");
+    let indent = |m: &str| coded(m, |s, sels| indent_lines(s, sels, &opts));
+    assert_eq!(indent("a|b\n\nc"), "    a|b\n\nc");
+    assert_eq!(indent("[a\n\nb]"), "[    a\n\n    b]");
+    assert_eq!(indent("|\n"), "none: |\n");
+}
+
+/// Moving and copying share the text: no bytes are copied, and one block
+/// over millions of lines is two edits.
+#[test]
+fn line_commands_scale_with_blocks_not_lines() {
+    let big = vec![b'x'; 65 << 20];
+    let mut text = b"a\n".to_vec();
+    text.extend_from_slice(&big);
+    let s = Snapshot::from_bytes(&text);
+    let sels = Selections::single(Selection::caret(0));
+    let moved = move_lines(&s, &sels, false).unwrap();
+    assert!(moved.cmd.tx.edits().iter().all(|e| e.text.owned_len() == 0));
+    let (after, _, _) = apply(&s, &sels, &moved.cmd).unwrap();
+    assert_eq!(after.len(), s.len());
+    assert_eq!(after.to_vec(after.len() - 2..after.len()), b"\na");
+    let copied = copy_lines(&s, &Selections::single(Selection::caret(3)), false, &lf());
+    assert_eq!(copied.cmd.tx.edits()[0].text.owned_len(), 1);
+    let lines = Snapshot::from_bytes(&b"ab\n".repeat(2_000_000));
+    let all = Selections::single(Selection::new(0, lines.len() - 3));
+    for coded in [
+        move_lines(&lines, &all, false).unwrap(),
+        copy_lines(&lines, &all, false, &lf()),
+        delete_lines(&lines, &all, &lf()),
+    ] {
+        assert!(coded.cmd.tx.edits().len() <= 2);
+    }
+}
+
+/// Each line uses the tokens of the language at its text (embedded code).
+#[test]
 fn comments_follow_the_language_at_each_line() {
     let hash = CommentTokens {
         line: Some("#"),
@@ -683,7 +832,7 @@ fn block_comment_edges_of_a_large_selection() {
     let c = toggle_block_comment(&s, &sels, &|_| Some(("/*", "*/"))).unwrap();
     // The leading run exceeds the scan limit: the selection is wrapped.
     assert_eq!(c.cmd.tx.edits().len(), 2);
-    assert_eq!(&*c.cmd.tx.edits()[0].text, b"/* ");
+    assert_eq!(c.cmd.tx.edits()[0].text.bytes(), b"/* ");
     let sels = Selections::single(Selection::new(99_000, s.len()));
     let c = toggle_block_comment(&s, &sels, &|_| Some(("/*", "*/"))).unwrap();
     assert!(

@@ -9,7 +9,7 @@ mod snapshot;
 mod tree;
 
 pub use builder::TreeBuilder;
-pub use change::{Bias, Change, ChangeSet, Edit, EditError, Transaction};
+pub use change::{Bias, Change, ChangeSet, Edit, EditError, Inserted, MAX_LEN, Piece, Transaction};
 pub use encoding::{Encoding, InvalidUtf8, LineEnding, Utf16Decoder, Utf16Encoder};
 pub use snapshot::{Chunks, Rev, Snapshot};
 pub use tree::BUFFER_MAX;

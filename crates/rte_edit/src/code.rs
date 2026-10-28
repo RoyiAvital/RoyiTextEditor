@@ -32,7 +32,7 @@ const CLOSE_BEFORE: &[u8] = b";:.,=}])>` \t\r\n";
 /// Whitespace scanned at each edge of a selection by Toggle Block Comment.
 const EDGE_SCAN: u64 = 64 * 1024;
 
-fn changes_of(cmd: &Command) -> ChangeSet {
+pub(crate) fn changes_of(cmd: &Command) -> ChangeSet {
     ChangeSet::from_changes(
         cmd.tx
             .edits()
@@ -51,7 +51,7 @@ fn byte_at(s: &Snapshot, pos: u64) -> Option<u8> {
 }
 
 /// Leading spaces and tabs of a line content range.
-fn indent_len(s: &Snapshot, content: &Range<u64>) -> u64 {
+pub(crate) fn indent_len(s: &Snapshot, content: &Range<u64>) -> u64 {
     let limit = content.end.min(content.start + COLUMN_SCAN_LIMIT as u64);
     let mut p = content.start;
     while p < limit && matches!(byte_at(s, p), Some(b' ' | b'\t')) {
@@ -64,12 +64,34 @@ fn starts_with(s: &Snapshot, pos: u64, text: &[u8]) -> bool {
     s.to_vec(pos..pos + text.len() as u64) == text
 }
 
+/// What a line comment command does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommentMode {
+    /// `Ctrl+/`: uncomment when every line is commented, else comment all.
+    Toggle,
+    /// `Ctrl+K Ctrl+C`: comment every line (also commented ones).
+    Add,
+    /// `Ctrl+K Ctrl+U`: uncomment the commented lines.
+    Remove,
+}
+
 /// `Ctrl+/`: comments the touched lines, or uncomments them when every
 /// non-blank one is commented. Lines of a language without a line comment
 /// token are wrapped in its block tokens instead; lines without tokens stay.
 pub fn toggle_line_comment<'a>(
     s: &Snapshot,
     sels: &Selections,
+    tokens_at: &dyn Fn(u64) -> CommentTokens<'a>,
+) -> Option<Coded> {
+    line_comment(s, sels, CommentMode::Toggle, tokens_at)
+}
+
+/// Line comment command of `mode` over the touched non-blank lines (see
+/// [`toggle_line_comment`] for the tokens). `None` when nothing changes.
+pub fn line_comment<'a>(
+    s: &Snapshot,
+    sels: &Selections,
+    mode: CommentMode,
     tokens_at: &dyn Fn(u64) -> CommentTokens<'a>,
 ) -> Option<Coded> {
     // (content, text start, open, close) of each non-blank line.
@@ -91,17 +113,22 @@ pub fn toggle_line_comment<'a>(
     if lines.is_empty() {
         return None;
     }
-    let commented = lines.iter().all(|(c, text_start, open, close)| {
+    let is_commented = |(c, text_start, open, close): &(Range<u64>, u64, &str, Option<&str>)| {
         starts_with(s, *text_start, open.as_bytes())
             && close.is_none_or(|close| {
                 let end = trimmed_end(s, c);
                 end >= text_start + (open.len() + close.len()) as u64
                     && starts_with(s, end - close.len() as u64, close.as_bytes())
             })
-    });
+    };
+    let remove = match mode {
+        CommentMode::Toggle => lines.iter().all(is_commented),
+        CommentMode::Add => false,
+        CommentMode::Remove => true,
+    };
     let mut edits = Vec::new();
-    if commented {
-        for (c, start, open, close) in &lines {
+    if remove {
+        for (c, start, open, close) in lines.iter().filter(|l| is_commented(l)) {
             let mut end = start + open.len() as u64;
             if byte_at(s, end) == Some(b' ') {
                 end += 1;
@@ -130,6 +157,9 @@ pub fn toggle_line_comment<'a>(
                 edits.push((end..end, format!(" {close}").into_bytes()));
             }
         }
+    }
+    if edits.is_empty() {
+        return None;
     }
     let cmd = Command {
         tx: build(edits),

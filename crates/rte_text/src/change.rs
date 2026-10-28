@@ -3,18 +3,83 @@
 use std::fmt;
 use std::ops::Range;
 
+/// Part of a [`Inserted::Shared`] text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Piece {
+    Bytes(Box<[u8]>),
+    /// The bytes of this range of the snapshot the transaction applies to,
+    /// shared with it (no bytes are copied).
+    Copy(Range<u64>),
+}
+
+impl Piece {
+    pub fn len(&self) -> usize {
+        match self {
+            Piece::Bytes(b) => b.len(),
+            Piece::Copy(r) => (r.end - r.start) as usize,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// Text an [`Edit`] inserts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Inserted {
+    Bytes(Box<[u8]>),
+    /// Pieces joined in order; copied ranges share the base's buffers.
+    Shared(Vec<Piece>),
+}
+
+impl Inserted {
+    pub fn len(&self) -> usize {
+        match self {
+            Inserted::Bytes(b) => b.len(),
+            Inserted::Shared(pieces) => pieces.iter().map(Piece::len).sum(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Bytes this edit owns (copied ranges own none).
+    pub fn owned_len(&self) -> usize {
+        match self {
+            Inserted::Bytes(b) => b.len(),
+            Inserted::Shared(pieces) => pieces
+                .iter()
+                .map(|p| match p {
+                    Piece::Bytes(b) => b.len(),
+                    Piece::Copy(_) => 0,
+                })
+                .sum(),
+        }
+    }
+
+    /// The owned bytes of a [`Inserted::Bytes`]; empty for shared text.
+    pub fn bytes(&self) -> &[u8] {
+        match self {
+            Inserted::Bytes(b) => b,
+            Inserted::Shared(_) => &[],
+        }
+    }
+}
+
 /// Replacement of `range` (byte offsets in the base snapshot) by `text`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Edit {
     pub range: Range<u64>,
-    pub text: Box<[u8]>,
+    pub text: Inserted,
 }
 
 impl Edit {
     pub fn new(range: Range<u64>, text: impl Into<Box<[u8]>>) -> Edit {
         Edit {
             range,
-            text: text.into(),
+            text: Inserted::Bytes(text.into()),
         }
     }
 
@@ -24,6 +89,19 @@ impl Edit {
 
     pub fn delete(range: Range<u64>) -> Edit {
         Edit::new(range, Box::<[u8]>::default())
+    }
+
+    /// Replaces `range` with the bytes of `source` in the base snapshot.
+    pub fn copy(range: Range<u64>, source: Range<u64>) -> Edit {
+        Edit::shared(range, vec![Piece::Copy(source)])
+    }
+
+    /// Replaces `range` with `pieces` joined (copies share the base's bytes).
+    pub fn shared(range: Range<u64>, pieces: Vec<Piece>) -> Edit {
+        Edit {
+            range,
+            text: Inserted::Shared(pieces),
+        }
     }
 }
 
@@ -48,11 +126,35 @@ impl Transaction {
 
     pub(crate) fn validate(&self, len: u64) -> Result<(), EditError> {
         let mut prev: Option<&Edit> = None;
+        // The base plus all inserted bytes bounds the result and every
+        // intermediate tree (shared copies insert without allocating).
+        let mut total = len;
         for (index, edit) in self.edits.iter().enumerate() {
             let r = &edit.range;
             if r.start > r.end || r.end > len {
                 return Err(EditError::OutOfBounds { index, len });
             }
+            let inserted = match &edit.text {
+                Inserted::Bytes(b) => Some(b.len() as u64),
+                Inserted::Shared(pieces) => {
+                    let mut sum = Some(0u64);
+                    for p in pieces {
+                        let n = match p {
+                            Piece::Copy(s) if s.start > s.end || s.end > len => {
+                                return Err(EditError::OutOfBounds { index, len });
+                            }
+                            Piece::Copy(s) => s.end - s.start,
+                            Piece::Bytes(b) => b.len() as u64,
+                        };
+                        sum = sum.and_then(|sum| sum.checked_add(n));
+                    }
+                    sum
+                }
+            };
+            total = match inserted.and_then(|n| total.checked_add(n)) {
+                Some(total) if total <= MAX_LEN => total,
+                _ => return Err(EditError::TooLarge { index }),
+            };
             if let Some(p) = prev {
                 let same_insertion = p.range.is_empty() && r.is_empty() && p.range.start == r.start;
                 if r.start < p.range.end || same_insertion {
@@ -65,12 +167,17 @@ impl Transaction {
     }
 }
 
+/// Largest document length: positions and their deltas fit `i64`.
+pub const MAX_LEN: u64 = i64::MAX as u64;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EditError {
     /// Edit `index` is reversed or extends past the document length.
     OutOfBounds { index: usize, len: u64 },
     /// Edit `index` overlaps or precedes the previous edit, or repeats its insertion point.
     Unordered { index: usize },
+    /// With edit `index` the text would pass [`MAX_LEN`].
+    TooLarge { index: usize },
 }
 
 impl fmt::Display for EditError {
@@ -81,6 +188,9 @@ impl fmt::Display for EditError {
             }
             EditError::Unordered { index } => {
                 write!(f, "edit {index} overlaps or precedes the previous edit")
+            }
+            EditError::TooLarge { index } => {
+                write!(f, "edit {index} makes the text larger than {MAX_LEN} bytes")
             }
         }
     }

@@ -16,7 +16,7 @@ pub use popup::{
     Star, Tone, draw_palette, draw_panel,
 };
 
-use rte_edit::{Selection, column_after, column_of, content_range, offset_in_line};
+use rte_edit::{Selection, column_after, column_of, content_range, offset_in_line, scan_end};
 use rte_text::Snapshot;
 use std::fmt::Write;
 
@@ -74,6 +74,9 @@ pub struct Theme {
     pub syntax: [Color; 12],
     /// Background of a matching bracket pair.
     pub bracket_match: Color,
+    /// The scroll slider, and while it is dragged.
+    pub scroll_slider: Color,
+    pub scroll_slider_active: Color,
 }
 
 impl Theme {
@@ -122,6 +125,9 @@ impl Theme {
             0x9CDCFE, // attribute
         ],
         bracket_match: 0x3E4A45,
+        // VS Code's dark slider colors over the background.
+        scroll_slider: 0x434446,
+        scroll_slider_active: 0x5E5F61,
     };
 }
 
@@ -164,6 +170,10 @@ impl Rect {
 pub struct Options {
     pub tab_width: u32,
     pub line_numbers: bool,
+    /// The title strip is shown (not in full screen).
+    pub title_strip: bool,
+    /// Width in pixels of the scroll strip right of the text (0: none).
+    pub scroll_strip: u32,
 }
 
 impl Default for Options {
@@ -171,6 +181,8 @@ impl Default for Options {
         Options {
             tab_width: 4,
             line_numbers: true,
+            title_strip: true,
+            scroll_strip: 0,
         }
     }
 }
@@ -181,6 +193,8 @@ pub struct Layout {
     pub title: Rect,
     pub gutter: Rect,
     pub text: Rect,
+    /// Strip of the scroll slider, right of the text.
+    pub scrollbar: Rect,
     pub status: Rect,
     /// Fully or partially visible text rows.
     pub rows: u32,
@@ -195,7 +209,11 @@ impl Layout {
             x: 0,
             y: 0,
             w: width,
-            h: bar.min(height),
+            h: if options.title_strip {
+                bar.min(height)
+            } else {
+                0
+            },
         };
         let status_h = bar.min(height.saturating_sub(title.h));
         let status = Rect {
@@ -217,16 +235,24 @@ impl Layout {
             w: (gutter_cols * cell.width).min(width),
             h: body_h,
         };
+        let strip = options.scroll_strip.min(width - gutter.w);
         let text = Rect {
             x: gutter.w as i32,
             y: body_y,
-            w: width - gutter.w,
+            w: width - gutter.w - strip,
+            h: body_h,
+        };
+        let scrollbar = Rect {
+            x: text.x + text.w as i32,
+            y: body_y,
+            w: strip,
             h: body_h,
         };
         Layout {
             title,
             gutter,
             text,
+            scrollbar,
             status,
             rows: body_h.div_ceil(cell.height.max(1)),
             cols: text.w / cell.width.max(1),
@@ -236,6 +262,41 @@ impl Layout {
 
 fn digits(n: u64) -> u32 {
     n.max(1).ilog10() + 1
+}
+
+/// The scroll slider in `layout.scrollbar` for `line_count` lines, a view
+/// from `top_line` showing `page` full rows, at least `min` pixels high.
+/// The bottom of the track is the last line at the top of the view (as far
+/// as scrolling goes). `None` when there is no strip or the file fits.
+pub fn slider(
+    layout: &Layout,
+    line_count: u64,
+    top_line: u64,
+    page: u64,
+    min: u32,
+) -> Option<Rect> {
+    let track = layout.scrollbar;
+    let lines = line_count.max(1);
+    if track.w == 0 || track.h == 0 || (lines <= page && top_line == 0) {
+        return None;
+    }
+    let last = lines - 1;
+    let h = u64::from(track.h);
+    let size = (h * page / (last + page)).max(u64::from(min)).min(h);
+    let y = ((h - size) * top_line.min(last))
+        .checked_div(last)
+        .unwrap_or(0);
+    Some(Rect {
+        x: track.x,
+        y: track.y + y as i32,
+        w: track.w,
+        h: size as u32,
+    })
+}
+
+/// Full text rows of a layout (at least one).
+pub fn page_rows(layout: &Layout, cell: Cell) -> u64 {
+    u64::from((layout.text.h / cell.height.max(1)).max(1))
 }
 
 /// First visible line and column of the text area.
@@ -309,6 +370,8 @@ impl DisplayList {
 #[derive(Default)]
 pub struct ViewBuilder {
     line: Vec<u8>,
+    /// Visible bytes of a long row past its scan end.
+    tail: Vec<u8>,
     /// Line-number text, reused between rows and frames.
     number: String,
 }
@@ -329,6 +392,8 @@ pub struct Frame<'a> {
     /// No document: the body shows only this hint, centered (no line
     /// numbers, rows, selections or caret).
     pub empty: Option<&'a str>,
+    /// The scroll slider is being dragged.
+    pub slider_active: bool,
 }
 
 /// Search decorations and syntax colors of a frame.
@@ -368,6 +433,7 @@ impl ViewBuilder {
             caret,
             highlights: _,
             empty,
+            slider_active,
         } = *frame;
         let fill = |out: &mut DisplayList, rect: Rect, color| out.fills.push(Fill { rect, color });
         let status_background = if chrome.prompt {
@@ -382,6 +448,21 @@ impl ViewBuilder {
         };
         fill(out, layout.gutter, theme.background);
         fill(out, layout.text, theme.background);
+        if layout.scrollbar.w > 0 {
+            fill(out, layout.scrollbar, theme.background);
+        }
+        if empty.is_none() {
+            let page = page_rows(layout, cell);
+            let line_count = snapshot.line_count();
+            if let Some(rect) = slider(layout, line_count, scroll.top_line, page, cell.height) {
+                let color = if slider_active {
+                    theme.scroll_slider_active
+                } else {
+                    theme.scroll_slider
+                };
+                fill(out, rect, color);
+            }
+        }
         fill(out, layout.title, theme.title_background);
         fill(out, layout.status, status_background);
 
@@ -506,8 +587,11 @@ impl ViewBuilder {
             };
             // CRLF displays as one line break; a CR not followed by LF stays visible.
             let crlf = range.end < snapshot.len();
+            let long = end < range.end;
             let mut content_end = range.end;
-            if end == range.end && crlf && bytes.last() == Some(&b'\r') {
+            if long {
+                content_end = content_range(snapshot, line).end;
+            } else if crlf && bytes.last() == Some(&b'\r') {
                 bytes = &bytes[..bytes.len() - 1];
                 content_end -= 1;
             }
@@ -541,35 +625,68 @@ impl ViewBuilder {
             let syntax = frame.highlights.syntax;
             // Spans ending inside or after the row, advanced as offsets grow.
             let mut span = syntax.partition_point(|s| s.end <= range.start);
-            layout_line(
-                bytes,
-                scroll.first_col,
-                layout.cols + 1,
-                options.tab_width,
-                |col, ch, kind, offset| {
-                    let color = match kind {
-                        Kind::Text => {
-                            let at = range.start + offset as u64;
-                            while span < syntax.len() && syntax[span].end <= at {
-                                span += 1;
-                            }
-                            match syntax.get(span) {
-                                Some(s) if s.start <= at => theme.syntax[s.style as usize],
-                                _ => theme.text,
-                            }
+            let mut emit = |col: u32, ch, kind, offset: usize| {
+                let color = match kind {
+                    Kind::Text => {
+                        let at = range.start + offset as u64;
+                        while span < syntax.len() && syntax[span].end <= at {
+                            span += 1;
                         }
-                        Kind::Control => theme.control,
-                    };
-                    out.glyphs.push(Glyph {
-                        x: text_x + (col * cell.width) as i32,
-                        y,
-                        ch,
-                        bold: false,
-                        color,
-                        clip,
-                    });
-                },
+                        match syntax.get(span) {
+                            Some(s) if s.start <= at => theme.syntax[s.style as usize],
+                            _ => theme.text,
+                        }
+                    }
+                    Kind::Control => theme.control,
+                };
+                out.glyphs.push(Glyph {
+                    x: text_x + (col * cell.width) as i32,
+                    y,
+                    ch,
+                    bold: false,
+                    color,
+                    clip,
+                });
+            };
+            // A long line is drawn exactly up to its scan end, then one
+            // column per byte (the rule of carets, clicks and selections).
+            let seam = if long { scan_end(bytes) } else { bytes.len() };
+            let cols = layout.cols + 1;
+            let reached = layout_line(
+                &bytes[..seam],
+                scroll.first_col,
+                cols,
+                options.tab_width,
+                &mut emit,
             );
+            if long
+                && let Some(LineEnd {
+                    col: seam_col,
+                    last,
+                }) = reached
+            {
+                let end_col = scroll.first_col + u64::from(cols);
+                if end_col > seam_col {
+                    let base = range.start + seam as u64;
+                    let from = base + scroll.first_col.saturating_sub(seam_col).saturating_sub(3);
+                    let to = (base + (end_col - seam_col) + 3).min(content_end);
+                    if from < to {
+                        self.tail.clear();
+                        for chunk in snapshot.chunks(from..to) {
+                            self.tail.extend_from_slice(chunk);
+                        }
+                        layout_beyond(
+                            &self.tail,
+                            (from - range.start) as usize,
+                            (seam, seam_col),
+                            scroll.first_col,
+                            cols,
+                            last,
+                            &mut emit,
+                        );
+                    }
+                }
+            }
             if caret != CaretStyle::Hidden {
                 caret_row(out, frame, row_rect, bytes, content);
             }
@@ -899,16 +1016,27 @@ pub enum Kind {
     Control,
 }
 
+/// Where [`layout_line`] ended after all of its bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LineEnd {
+    /// Column after the last byte.
+    pub col: u64,
+    /// Visible column of the last drawn character and the marks drawn on
+    /// it; zero-width marks that follow join that cell.
+    pub last: Option<(u32, u32)>,
+}
+
 /// Lays out one line, calling `emit(visible_col, char, kind, offset)` for
 /// every character visible in `[first_col, first_col + cols)`; `offset` is
-/// the character's byte offset in `bytes`.
+/// the character's byte offset in `bytes`. Returns where it ended when
+/// every byte was laid out (`None` when the visible columns ended first).
 pub fn layout_line(
     bytes: &[u8],
     first_col: u64,
     cols: u32,
     tab_width: u32,
     mut emit: impl FnMut(u32, char, Kind, usize),
-) {
+) -> Option<LineEnd> {
     let end_col = first_col + u64::from(cols);
     let tab = u64::from(tab_width.max(1));
     let mut col = 0u64;
@@ -941,7 +1069,7 @@ pub fn layout_line(
     for chunk in bytes.utf8_chunks() {
         for ch in chunk.valid().chars() {
             if col >= end_col {
-                return;
+                return None;
             }
             let at = offset;
             offset += ch.len_utf8();
@@ -968,7 +1096,7 @@ pub fn layout_line(
         }
         for _ in chunk.invalid() {
             if col >= end_col {
-                return;
+                return None;
             }
             let at = offset;
             offset += 1;
@@ -980,6 +1108,69 @@ pub fn layout_line(
                 Kind::Control,
                 at,
             );
+        }
+    }
+    Some(LineEnd {
+        col,
+        last: last_visible,
+    })
+}
+
+/// Lays out bytes of a long line past its scan end (`seam`, exact column
+/// `seam_col`), where each byte takes one column: a character is drawn once
+/// at the column of its first byte. `window` holds the line's bytes from
+/// offset `start` (at or after `seam`); `emit` gets offsets from the line
+/// start. Characters starting before `first_col` are skipped, not shifted;
+/// zero-width marks join the previous drawn cell, which is `last` (from
+/// [`LineEnd`]) for marks right after the seam.
+pub fn layout_beyond(
+    window: &[u8],
+    start: usize,
+    seam: (usize, u64),
+    first_col: u64,
+    cols: u32,
+    last: Option<(u32, u32)>,
+    mut emit: impl FnMut(u32, char, Kind, usize),
+) {
+    let end_col = first_col + u64::from(cols);
+    // The cell before the seam only takes marks that start right at it.
+    let mut last = if start == seam.0 { last } else { None };
+    let mut offset = start;
+    for chunk in window.utf8_chunks() {
+        let valid = chunk.valid().chars().map(|ch| (ch, ch.len_utf8()));
+        let invalid = chunk.invalid().iter().map(|_| ('\u{FFFD}', 1));
+        for (ch, len) in valid.chain(invalid) {
+            let at = offset;
+            offset += len;
+            let col = seam.1 + (at - seam.0) as u64;
+            if col >= end_col {
+                return;
+            }
+            let (ch, kind) = match ch {
+                '\t' => {
+                    last = None;
+                    continue;
+                }
+                '\0'..='\u{1F}' => (char::from_u32(0x2400 + ch as u32).unwrap(), Kind::Control),
+                '\u{7F}' => ('\u{2421}', Kind::Control),
+                '\u{FFFD}' if len == 1 => (ch, Kind::Control),
+                _ => (ch, Kind::Text),
+            };
+            if kind == Kind::Text && ch.width() == Some(0) {
+                if let Some((v, marks)) = &mut last
+                    && *marks < MAX_MARKS_PER_CELL
+                {
+                    *marks += 1;
+                    emit(*v, ch, kind, at);
+                }
+                continue;
+            }
+            last = None;
+            if col >= first_col {
+                let v = (col - first_col) as u32;
+                emit(v, ch, kind, at);
+                last = Some((v, 0));
+            }
         }
     }
 }
@@ -1126,6 +1317,7 @@ mod tests {
                 caret,
                 highlights,
                 empty: None,
+                slider_active: false,
             },
             &mut list,
         );
@@ -1166,6 +1358,7 @@ mod tests {
                     caret: CaretStyle::Bar,
                     highlights: Highlights::default(),
                     empty: Some("Drop a file"),
+                    slider_active: false,
                 },
                 &mut list,
             );
@@ -1231,6 +1424,76 @@ mod tests {
                 ('y', theme.text),
             ]
         );
+    }
+
+    #[test]
+    fn the_slider_follows_the_view() {
+        let cell = Cell {
+            width: 10,
+            height: 20,
+        };
+        let options = Options {
+            scroll_strip: 6,
+            ..Options::default()
+        };
+        let layout = Layout::new(400, 300, cell, 1000, &options);
+        let plain = Layout::new(400, 300, cell, 1000, &Options::default());
+        assert_eq!(layout.text.w + 6, plain.text.w);
+        assert_eq!(layout.scrollbar.x, layout.text.x + layout.text.w as i32);
+        let track = layout.scrollbar;
+        let page = page_rows(&layout, cell);
+        assert_eq!(slider(&layout, page, 0, page, 20), None, "the file fits");
+        assert!(slider(&layout, page, 1, page, 20).is_some(), "scrolled");
+        let top = slider(&layout, 1000, 0, page, 20).unwrap();
+        assert_eq!((top.y, top.w), (track.y, 6));
+        let bottom = slider(&layout, 1000, 999, page, 20).unwrap();
+        assert_eq!(bottom.y + bottom.h as i32, track.y + track.h as i32);
+        let middle = slider(&layout, 1000, 500, page, 20).unwrap();
+        assert!(top.y < middle.y && middle.y < bottom.y);
+        let huge = slider(&layout, 10_000_000, 5_000_000, page, 20).unwrap();
+        assert_eq!(huge.h, 20, "minimum height");
+        assert_eq!(slider(&plain, 1000, 0, page, 20), None, "no strip");
+
+        let snapshot = Snapshot::from_bytes("x\n".repeat(999).as_bytes());
+        for (active, color) in [
+            (false, Theme::DARK.scroll_slider),
+            (true, Theme::DARK.scroll_slider_active),
+        ] {
+            let mut list = DisplayList::default();
+            ViewBuilder::default().build(
+                &Frame {
+                    snapshot: &snapshot,
+                    layout: &layout,
+                    scroll: Scroll::default(),
+                    cell,
+                    theme: &Theme::DARK,
+                    chrome: Chrome::default(),
+                    options: &options,
+                    selections: &[],
+                    caret: CaretStyle::Hidden,
+                    highlights: Highlights::default(),
+                    empty: None,
+                    slider_active: active,
+                },
+                &mut list,
+            );
+            assert!(list.fills.contains(&Fill { rect: top, color }));
+        }
+    }
+
+    #[test]
+    fn full_screen_layouts_have_no_title_strip() {
+        let cell = Cell {
+            width: 10,
+            height: 20,
+        };
+        let options = Options {
+            title_strip: false,
+            ..Options::default()
+        };
+        let layout = Layout::new(400, 300, cell, 10, &options);
+        assert_eq!((layout.title.h, layout.text.y), (0, 0));
+        assert_eq!(layout.status.y + layout.status.h as i32, 300);
     }
 
     #[test]
@@ -1559,5 +1822,132 @@ mod tests {
                 "column {col} hit {pos}"
             );
         }
+    }
+
+    /// Body glyphs `(visible column, char)` and caret columns of one row
+    /// scrolled to `first_col`.
+    fn long_row(bytes: &[u8], first_col: u64, carets: &[u64]) -> (Vec<(i32, char)>, Vec<i32>) {
+        let snapshot = Snapshot::from_bytes(bytes);
+        let cell = Cell {
+            width: 10,
+            height: 20,
+        };
+        let options = Options::default();
+        let layout = Layout::new(400, 200, cell, snapshot.line_count(), &options);
+        let sels: Vec<Selection> = carets.iter().map(|&c| Selection::caret(c)).collect();
+        let mut list = DisplayList::default();
+        ViewBuilder::default().build(
+            &Frame {
+                snapshot: &snapshot,
+                layout: &layout,
+                scroll: Scroll {
+                    top_line: 0,
+                    first_col,
+                },
+                cell,
+                theme: &Theme::DARK,
+                chrome: Chrome::default(),
+                options: &options,
+                selections: &sels,
+                caret: CaretStyle::Bar,
+                highlights: Highlights::default(),
+                empty: None,
+                slider_active: false,
+            },
+            &mut list,
+        );
+        let x = layout.text.x;
+        let glyphs = list
+            .glyphs
+            .iter()
+            .filter(|g| g.clip == layout.text && g.y == layout.text.y)
+            .map(|g| ((g.x - x) / 10, g.ch))
+            .collect();
+        let carets = list.overlays.iter().map(|f| (f.rect.x - x) / 10).collect();
+        (glyphs, carets)
+    }
+
+    #[test]
+    fn long_lines_draw_their_end() {
+        let mut text = vec![b'a'; 200 * 1024 - 3];
+        text.extend_from_slice(b"END");
+        let len = text.len() as u64;
+        let (glyphs, carets) = long_row(&text, len - 10, &[len]);
+        let tail: String = glyphs.iter().map(|g| g.1).collect();
+        assert!(tail.ends_with("aEND"), "{tail}");
+        assert_eq!(glyphs.last(), Some(&(9, 'D')));
+        assert_eq!(carets, vec![10]);
+    }
+
+    #[test]
+    fn a_character_straddling_the_scan_end_is_drawn_whole() {
+        let mut text = vec![b'a'; ROW_SCAN_LIMIT - 1];
+        text.extend_from_slice("\u{4E2D}bc".as_bytes());
+        let first = ROW_SCAN_LIMIT as u64 - 5;
+        let after = ROW_SCAN_LIMIT as u64 + 2;
+        let (glyphs, carets) = long_row(&text, first, &[after]);
+        assert!(glyphs.iter().all(|g| g.1 != '\u{FFFD}'), "{glyphs:?}");
+        assert!(glyphs.contains(&(4, '\u{4E2D}')));
+        // One column per byte past the scan end: 'b' and the caret after the character.
+        assert!(glyphs.contains(&(7, 'b')));
+        assert_eq!(carets, vec![7]);
+    }
+
+    #[test]
+    fn characters_cut_by_the_left_edge_past_the_scan_end_are_skipped() {
+        let mut text = vec![b'a'; ROW_SCAN_LIMIT];
+        for _ in 0..100 {
+            text.extend_from_slice("\u{4E2D}".as_bytes());
+        }
+        // Column 4 past the scan end is inside the second character (bytes 3..6).
+        let (glyphs, _) = long_row(&text, ROW_SCAN_LIMIT as u64 + 4, &[]);
+        assert!(glyphs.iter().all(|g| g.1 == '\u{4E2D}'), "{glyphs:?}");
+        assert_eq!(glyphs.first(), Some(&(2, '\u{4E2D}')));
+        assert_eq!(glyphs.last().map(|g| g.0 % 3), Some(2));
+    }
+
+    #[test]
+    fn marks_invalid_bytes_and_crlf_past_the_scan_end() {
+        let mut text = vec![b'a'; ROW_SCAN_LIMIT];
+        text.extend_from_slice(b"e\xCC\x81\xFFz\r\nq");
+        let (glyphs, _) = long_row(&text, ROW_SCAN_LIMIT as u64 - 2, &[]);
+        assert_eq!(
+            glyphs,
+            vec![
+                (0, 'a'),
+                (1, 'a'),
+                (2, 'e'),
+                (2, '\u{301}'),
+                (5, '\u{FFFD}'),
+                (6, 'z'),
+            ]
+        );
+    }
+
+    #[test]
+    fn marks_at_the_scan_end_join_the_cell_before_it() {
+        let mark = "\u{301}".as_bytes();
+        // A mark right at the seam, and one straddling it.
+        for before in [ROW_SCAN_LIMIT, ROW_SCAN_LIMIT - 1] {
+            let mut text = vec![b'a'; before];
+            text.extend_from_slice(mark);
+            text.push(b'z');
+            let (glyphs, _) = long_row(&text, before as u64 - 2, &[]);
+            assert_eq!(
+                glyphs,
+                vec![(0, 'a'), (1, 'a'), (1, '\u{301}'), (4, 'z')],
+                "{before}"
+            );
+        }
+        // Four marks before the seam: a fifth after it is not drawn.
+        let mut text = vec![b'a'; ROW_SCAN_LIMIT - 4 * mark.len()];
+        for _ in 0..5 {
+            text.extend_from_slice(mark);
+        }
+        text.push(b'z');
+        let first = (ROW_SCAN_LIMIT - 4 * mark.len()) as u64 - 1;
+        let (glyphs, _) = long_row(&text, first, &[]);
+        let marks = glyphs.iter().filter(|g| g.1 == '\u{301}').count();
+        assert_eq!((glyphs[0], marks), ((0, 'a'), 4));
     }
 }
