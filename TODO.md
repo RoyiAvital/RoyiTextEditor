@@ -35,6 +35,7 @@
 ## Bugs
 
  - [x] `Untitled` file can not be saved. Yet on close it asks for approval to discard.
+ - [x] On documents longer than the screen the scroll bar does not appear when the mouse is scrolling all the way up.
 
 ## Performance
 

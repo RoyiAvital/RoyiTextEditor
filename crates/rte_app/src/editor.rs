@@ -5035,6 +5035,35 @@ mod tests {
         );
     }
 
+    /// A file that fits the view still scrolls to its last line; the slider
+    /// shows that and stays when the wheel returns to the top.
+    #[test]
+    fn the_scroll_slider_stays_when_the_wheel_returns_to_the_top() {
+        let files = Arc::new(FakeFiles::default());
+        let lines = "echo x\r\n".repeat(9) + "echo end";
+        let mut editor = editor_on(&files, lines.as_bytes(), false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(Event::Wake, &mut ctx);
+        assert!(editor.page() > 10, "the file fits: {}", editor.page());
+        let wheel = |delta| Event::Wheel {
+            delta,
+            horizontal: false,
+            shift: false,
+            ctrl: false,
+        };
+        assert!(editor.slider().is_some(), "at the top");
+        editor.event(wheel(-120 * 2), &mut ctx);
+        assert!(editor.scroll.top_line > 0);
+        assert!(editor.slider().is_some(), "scrolled");
+        editor.event(wheel(120 * 10), &mut ctx);
+        assert_eq!(editor.scroll.top_line, 0);
+        assert!(editor.slider().is_some(), "back at the top");
+        // One line cannot scroll: no slider.
+        let mut one = editor_on(&files, b"a", false);
+        one.event(Event::Wake, &mut ctx);
+        assert!(one.slider().is_none());
+    }
+
     #[test]
     fn the_scroll_slider_drags_without_moving_the_caret() {
         let files = Arc::new(FakeFiles::default());

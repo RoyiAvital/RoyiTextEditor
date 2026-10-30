@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The scroll slider no longer disappears when a file that fits the window
+  is scrolled back to the top; it shows whenever the view can scroll (every
+  file of more than one line).
+
 ## [0.5.1] - 2026-10-28
 
 This version aligns the Search Box with VS Code's behavior.

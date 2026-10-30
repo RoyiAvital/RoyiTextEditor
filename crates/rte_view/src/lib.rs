@@ -267,7 +267,8 @@ fn digits(n: u64) -> u32 {
 /// The scroll slider in `layout.scrollbar` for `line_count` lines, a view
 /// from `top_line` showing `page` full rows, at least `min` pixels high.
 /// The bottom of the track is the last line at the top of the view (as far
-/// as scrolling goes). `None` when there is no strip or the file fits.
+/// as scrolling goes). `None` when there is no strip or nothing scrolls (one
+/// line); a file shorter than the view still scrolls to its last line.
 pub fn slider(
     layout: &Layout,
     line_count: u64,
@@ -277,7 +278,7 @@ pub fn slider(
 ) -> Option<Rect> {
     let track = layout.scrollbar;
     let lines = line_count.max(1);
-    if track.w == 0 || track.h == 0 || (lines <= page && top_line == 0) {
+    if track.w == 0 || track.h == 0 || lines == 1 {
         return None;
     }
     let last = lines - 1;
@@ -1445,7 +1446,10 @@ mod tests {
         assert_eq!(layout.scrollbar.x, layout.text.x + layout.text.w as i32);
         let track = layout.scrollbar;
         let page = page_rows(&layout, cell);
-        assert_eq!(slider(&layout, page, 0, page, 20), None, "the file fits");
+        assert_eq!(slider(&layout, 1, 0, page, 20), None, "nothing scrolls");
+        // A file shorter than the view keeps its slider at the top too.
+        let short = slider(&layout, page, 0, page, 20).unwrap();
+        assert_eq!(short.y, track.y);
         assert!(slider(&layout, page, 1, page, 20).is_some(), "scrolled");
         let top = slider(&layout, 1000, 0, page, 20).unwrap();
         assert_eq!((top.y, top.w), (track.y, 6));
