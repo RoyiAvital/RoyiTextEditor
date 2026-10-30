@@ -5,6 +5,7 @@
 - [Architecture](Plan/Architecture.md)
 - [Data Safety 001](Plan/DataSafety001.md)
 - [Minimap](Plan/Minimap.md)
+- [Spelling 001](Plan/Spelling001.md)
 
 ## Completed
 
