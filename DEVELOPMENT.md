@@ -151,7 +151,8 @@ Releases are built by the `Release` GitHub Actions workflow
 only when a version tag is pushed:
 
 1. Set the same `version` in `Meta/AppMeta.json` and in `[workspace.package]`
-   of `Cargo.toml`.
+   of `Cargo.toml`. CI sets the workspace crates' version in `Cargo.lock`
+   (`.github/scripts/Sync-LockVersions.ps1`); dependencies stay locked.
 2. In `CHANGELOG.md`, add `## [X.Y.Z]` below the first section,
    `## [Unreleased]`, and move this release's entries into it. A
    ` - YYYY-MM-DD` date suffix is optional. When performance results are

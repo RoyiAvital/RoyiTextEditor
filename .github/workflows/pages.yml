@@ -80,6 +80,10 @@ jobs:
           }
           rustc --version --verbose
 
+      - name: Sync workspace versions in Cargo.lock
+        shell: pwsh
+        run: ./.github/scripts/Sync-LockVersions.ps1
+
       - name: Build documentation
         shell: pwsh
         run: ./tools/Build-Docs.ps1
