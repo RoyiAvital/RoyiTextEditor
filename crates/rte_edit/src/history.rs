@@ -8,7 +8,8 @@ use crate::commands::EditKind;
 use crate::selection::Selections;
 
 pub const MAX_HISTORY_STEPS: usize = 10_000;
-/// Inserted bytes held by the history before the oldest steps drop.
+/// Inserted bytes and selections held by the history before the oldest
+/// steps drop.
 pub const MAX_HISTORY_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
@@ -28,11 +29,20 @@ struct Entry {
     last_word: bool,
 }
 
+impl Entry {
+    /// Inserted bytes plus the memory of the step's selections.
+    fn cost(&self) -> u64 {
+        let sels = self.step.sels_before.len() + self.step.sels_after.len();
+        self.inserted + (sels * size_of::<crate::Selection>()) as u64
+    }
+}
+
 #[derive(Debug)]
 pub struct History {
     undo: VecDeque<Entry>,
     redo: Vec<Entry>,
-    inserted: u64,
+    /// Total cost of the undo steps.
+    held: u64,
     sealed: bool,
     max_steps: usize,
     max_bytes: u64,
@@ -53,7 +63,7 @@ impl History {
         History {
             undo: VecDeque::new(),
             redo: Vec::new(),
-            inserted: 0,
+            held: 0,
             sealed: false,
             max_steps: max_steps.max(1),
             max_bytes,
@@ -74,22 +84,24 @@ impl History {
             && last.step.sels_after == step.sels_before
             && !(kind == EditKind::Typing && word && !last.last_word)
         {
+            self.held -= last.cost();
             last.step.after = step.after;
             last.step.sels_after = step.sels_after;
             last.inserted += inserted;
             last.last_word = word;
-            self.inserted += inserted;
+            self.held += last.cost();
             self.trim();
             return;
         }
         self.sealed = false;
-        self.inserted += inserted;
-        self.undo.push_back(Entry {
+        let entry = Entry {
             step,
             kind,
             inserted,
             last_word: word,
-        });
+        };
+        self.held += entry.cost();
+        self.undo.push_back(entry);
         self.trim();
     }
 
@@ -100,17 +112,17 @@ impl History {
 
     fn trim(&mut self) {
         while self.undo.len() > 1
-            && (self.undo.len() > self.max_steps || self.inserted > self.max_bytes)
+            && (self.undo.len() > self.max_steps || self.held > self.max_bytes)
         {
             let dropped = self.undo.pop_front().expect("non-empty");
-            self.inserted -= dropped.inserted;
+            self.held -= dropped.cost();
         }
     }
 
     /// The state before the last step, or `None` when nothing is left to undo.
     pub fn undo(&mut self) -> Option<(Snapshot, Selections)> {
         let entry = self.undo.pop_back()?;
-        self.inserted -= entry.inserted;
+        self.held -= entry.cost();
         self.sealed = true;
         let state = (entry.step.before.clone(), entry.step.sels_before.clone());
         self.redo.push(entry);
@@ -120,7 +132,7 @@ impl History {
     /// The state after the last undone step.
     pub fn redo(&mut self) -> Option<(Snapshot, Selections)> {
         let entry = self.redo.pop()?;
-        self.inserted += entry.inserted;
+        self.held += entry.cost();
         self.sealed = true;
         let state = (entry.step.after.clone(), entry.step.sels_after.clone());
         self.undo.push_back(entry);

@@ -12,6 +12,7 @@ These instructions apply to the entire repository.
  - Make the code easy to grasp for human and agents.
  - Be focused and short on documentation and text.
  - Do not apply `git add` or `git commit` unless explicitly asked for.
+ - Follow the Design Choices in `DEVELOPMENT.md` (for example: follow VS Code, no protection against misuse, no checks at startup or periodically).
 
 ## Task Documents
 

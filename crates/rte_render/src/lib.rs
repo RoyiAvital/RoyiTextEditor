@@ -239,6 +239,9 @@ impl Renderer {
             fill_rect(target, fill.rect, fill.color);
         }
         self.draw_glyphs(&list.glyphs, target);
+        for wave in &list.waves {
+            draw_wave(target, wave.rect, wave.color);
+        }
         for fill in &list.overlays {
             fill_rect(target, fill.rect, fill.color);
         }
@@ -398,6 +401,28 @@ fn empty_bitmap() -> Bitmap {
     }
 }
 
+/// A zigzag line across `rect`, from its top to its bottom and back. The
+/// phase follows the screen column, so adjacent waves join; the cost grows
+/// with the width only.
+pub fn draw_wave(target: &mut Target<'_>, rect: Rect, color: Color) {
+    let color = color | OPAQUE;
+    let h = rect.h as i32;
+    let thick = (h / 4).max(1);
+    let amp = (h - thick).max(1);
+    let period = 2 * amp;
+    let x0 = rect.x.max(0);
+    let x1 = (rect.x + rect.w as i32).min(target.width as i32);
+    let bottom = (rect.y + h).min(target.height as i32);
+    let stride = target.width as usize;
+    for x in x0..x1 {
+        let p = x.rem_euclid(period);
+        let top = rect.y + if p < amp { p } else { period - p };
+        for y in top.max(0)..(top + thick).min(bottom) {
+            target.pixels[y as usize * stride + x as usize] = color;
+        }
+    }
+}
+
 pub fn fill_rect(target: &mut Target<'_>, rect: Rect, color: Color) {
     let color = color | OPAQUE;
     let x0 = rect.x.clamp(0, target.width as i32) as usize;
@@ -473,6 +498,42 @@ mod tests {
 
     fn renderer() -> Renderer {
         Renderer::new(Cow::Borrowed(rte_assets::DEFAULT_FONT), 16.0).unwrap()
+    }
+
+    /// A wave covers its whole width with one pixel per column per
+    /// thickness row, inside its rectangle; adjacent waves join.
+    #[test]
+    fn waves_zigzag_inside_their_rectangle() {
+        let (width, height) = (20u32, 10u32);
+        let mut pixels = vec![0u32; (width * height) as usize];
+        let mut target = Target {
+            pixels: &mut pixels,
+            width,
+            height,
+        };
+        let rect = Rect {
+            x: 2,
+            y: 4,
+            w: 12,
+            h: 3,
+        };
+        draw_wave(&mut target, rect, 0x123456);
+        for x in 0..width as i32 {
+            let lit: Vec<i32> = (0..height as i32)
+                .filter(|&y| pixels[(y * width as i32 + x) as usize] != 0)
+                .collect();
+            if (2..14).contains(&x) {
+                assert_eq!(lit.len(), 1, "column {x}");
+                assert!((4..7).contains(&lit[0]), "column {x}: {lit:?}");
+            } else {
+                assert!(lit.is_empty(), "column {x}");
+            }
+        }
+        // The phase follows the screen column.
+        let row =
+            |x: i32| (0..height as i32).find(|&y| pixels[(y * width as i32 + x) as usize] != 0);
+        assert_eq!(row(4), row(8));
+        assert_ne!(row(4), row(5));
     }
 
     #[test]

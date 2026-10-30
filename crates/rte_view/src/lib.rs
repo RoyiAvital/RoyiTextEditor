@@ -12,8 +12,8 @@ pub use find::{
     Severity, TOGGLES, draw_find, draw_find_tooltip,
 };
 pub use popup::{
-    Image, Layer, PaletteFrame, PaletteGeometry, PaletteRow, PanelFrame, PanelGeometry, PanelLine,
-    Star, Tone, draw_palette, draw_panel,
+    Image, Layer, PALETTE_ROWS, PaletteFrame, PaletteGeometry, PaletteRow, PanelFrame,
+    PanelGeometry, PanelLine, Star, Tone, draw_palette, draw_panel,
 };
 
 use rte_edit::{Selection, column_after, column_of, content_range, offset_in_line, scan_end};
@@ -43,10 +43,11 @@ pub struct Theme {
     pub status_text: Color,
     pub selection: Color,
     pub caret: Color,
-    /// Unsaved marker of a document protected by its file.
+    /// Unsaved marker of the title strip.
     pub unsaved: Color,
-    /// Unsaved marker of a document that cannot be saved (untitled).
-    pub at_risk: Color,
+    /// Warnings of the search box (text and border); the unsaved marker
+    /// after a refused save.
+    pub warning: Color,
     pub prompt_background: Color,
     pub prompt_text: Color,
     pub popup_background: Color,
@@ -77,6 +78,8 @@ pub struct Theme {
     /// The scroll slider, and while it is dragged.
     pub scroll_slider: Color,
     pub scroll_slider_active: Color,
+    /// Wavy underline of misspelled words.
+    pub spelling: Color,
 }
 
 impl Theme {
@@ -92,7 +95,7 @@ impl Theme {
         selection: 0x264F78,
         caret: 0xAEAFAD,
         unsaved: 0x4FA3E0,
-        at_risk: 0xE0A040,
+        warning: 0xE0A040,
         prompt_background: 0x5A3E14,
         prompt_text: 0xF0E0C0,
         popup_background: 0x26282C,
@@ -128,6 +131,7 @@ impl Theme {
         // VS Code's dark slider colors over the background.
         scroll_slider: 0x434446,
         scroll_slider_active: 0x5E5F61,
+        spelling: 0x3794FF,
     };
 }
 
@@ -352,6 +356,8 @@ pub struct Glyph {
 pub struct DisplayList {
     pub fills: Vec<Fill>,
     pub glyphs: Vec<Glyph>,
+    /// Wavy lines filling their rectangles, drawn after the glyphs.
+    pub waves: Vec<Fill>,
     /// Filled after the glyphs (carets).
     pub overlays: Vec<Fill>,
     /// Drawn above everything else (palette, panels).
@@ -364,6 +370,7 @@ impl DisplayList {
     pub fn clear(&mut self) {
         self.fills.clear();
         self.glyphs.clear();
+        self.waves.clear();
         self.overlays.clear();
         self.popup.clear();
         self.tooltip.clear();
@@ -411,6 +418,8 @@ pub struct Highlights<'a> {
     pub syntax: &'a [SyntaxSpan],
     /// Offsets of matching brackets (the pair at the caret).
     pub brackets: &'a [u64],
+    /// Sorted, non-overlapping misspelled words (wavy underlines).
+    pub spelling: &'a [std::ops::Range<u64>],
 }
 
 /// Bytes drawn in a syntax color.
@@ -617,6 +626,7 @@ impl ViewBuilder {
             }
             selection_row(out, frame, row_rect, bytes, content.clone(), crlf);
             row_ranges.matches(out, frame);
+            row_ranges.waves(out, frame);
             for &at in frame.highlights.brackets {
                 if (content.start..content.end).contains(&at)
                     && let Some(rect) = row_ranges.rect(frame, &(at..at + 1))
@@ -698,6 +708,33 @@ impl ViewBuilder {
     }
 }
 
+/// Columns of increasing offsets of one row: each walks on from the last
+/// (an earlier offset restarts at the row start), so sorted ranges cost one
+/// pass over the row.
+struct ColumnWalk<'b> {
+    bytes: &'b [u8],
+    tab: u32,
+    at: (usize, u64),
+}
+
+impl<'b> ColumnWalk<'b> {
+    fn new(bytes: &'b [u8], tab: u32) -> ColumnWalk<'b> {
+        ColumnWalk {
+            bytes,
+            tab,
+            at: (0, 0),
+        }
+    }
+
+    fn column(&mut self, offset: usize) -> u64 {
+        if offset < self.at.0 {
+            self.at = (0, 0);
+        }
+        self.at = (offset, column_after(self.bytes, self.at, offset, self.tab));
+        self.at.1
+    }
+}
+
 /// One visible row for drawing range fills.
 struct RowRanges<'b> {
     row: Rect,
@@ -767,23 +804,50 @@ impl RowRanges<'_> {
         }
     }
 
+    /// Wavy underlines of the misspelled words on this row; past the scanned
+    /// part of a long row every byte takes one column, as for selections.
+    fn waves(&self, out: &mut DisplayList, frame: &Frame<'_>) {
+        let words = frame.highlights.spelling;
+        if words.is_empty() {
+            return;
+        }
+        let content = &self.content;
+        let h = (frame.cell.height / 6).max(3).min(self.row.h);
+        let last_col = frame.scroll.first_col + u64::from(frame.layout.cols) + 2;
+        let mut walk = ColumnWalk::new(self.bytes, frame.options.tab_width);
+        let mut column = |offset: u64| walk.column((offset - content.start) as usize);
+        let first = words.partition_point(|r| r.end <= content.start);
+        for word in &words[first..] {
+            if word.start >= content.end {
+                break;
+            }
+            let start = column(word.start.max(content.start));
+            if start > last_col {
+                break;
+            }
+            let end = column(word.end.min(content.end));
+            if let Some(rect) = self.rect_cols(frame, word, start, end) {
+                out.waves.push(Fill {
+                    rect: Rect {
+                        y: self.row.y + (self.row.h - h) as i32,
+                        h,
+                        ..rect
+                    },
+                    color: frame.theme.spelling,
+                });
+            }
+        }
+    }
+
     /// Match fills; a match equal to a selection is the current one and
     /// gets a border. Columns are computed in one pass over the row.
     fn matches(&self, out: &mut DisplayList, frame: &Frame<'_>) {
         let theme = frame.theme;
         let matches = frame.highlights.matches;
         let content = &self.content;
-        let tab = frame.options.tab_width;
         let last_col = frame.scroll.first_col + u64::from(frame.layout.cols) + 2;
-        let mut at = (0usize, 0u64);
-        let mut column = |offset: u64| {
-            let offset = (offset - content.start) as usize;
-            if offset < at.0 {
-                at = (0, 0);
-            }
-            at = (offset, column_after(self.bytes, at, offset, tab));
-            at.1
-        };
+        let mut walk = ColumnWalk::new(self.bytes, frame.options.tab_width);
+        let mut column = |offset: u64| walk.column((offset - content.start) as usize);
         let first = matches.partition_point(|r| r.end < content.start);
         for range in &matches[first..] {
             if range.start > content.end {
@@ -831,7 +895,8 @@ impl RowRanges<'_> {
 }
 
 /// Selection fills of one row (`bytes`: its scanned content); a selected
-/// line break adds one cell.
+/// line break adds one cell. Sorted selections take one column walk and stop
+/// past the right edge.
 fn selection_row(
     out: &mut DisplayList,
     frame: &Frame<'_>,
@@ -843,8 +908,10 @@ fn selection_row(
     let sels = frame.selections;
     let first = sels.partition_point(|s| s.end() < content.start);
     let cell_w = frame.cell.width;
-    let tab = frame.options.tab_width;
-    let column = |offset: u64| column_of(bytes, (offset - content.start) as usize, tab);
+    let first_col = frame.scroll.first_col;
+    let max = u64::from(frame.layout.cols) + 2;
+    let mut walk = ColumnWalk::new(bytes, frame.options.tab_width);
+    let mut column = |offset: u64| walk.column((offset - content.start) as usize);
     for sel in &sels[first..] {
         if sel.start() > content.end {
             break;
@@ -853,15 +920,16 @@ fn selection_row(
             continue;
         }
         let start = column(sel.start().max(content.start));
+        if start > first_col + max {
+            break;
+        }
         let mut end = column(sel.end().min(content.end));
         if sel.end() > content.end && has_break {
             end += 1;
         }
-        let first_col = frame.scroll.first_col;
         if end <= first_col || end <= start {
             continue;
         }
-        let max = u64::from(frame.layout.cols) + 2;
         let s = start.saturating_sub(first_col).min(max) as u32;
         let e = (end - first_col).min(max) as u32;
         let rect = Rect {
@@ -890,6 +958,8 @@ fn caret_row(
     let cell = frame.cell;
     let thickness = (cell.height / 10).max(1);
     let first = sels.partition_point(|s| s.end() < content.start);
+    // Heads of sorted, disjoint selections increase: one column walk.
+    let mut walk = ColumnWalk::new(bytes, frame.options.tab_width);
     for sel in &sels[first..] {
         if sel.start() > content.end {
             break;
@@ -897,16 +967,12 @@ fn caret_row(
         if sel.head < content.start || sel.head > content.end {
             continue;
         }
-        let col = column_of(
-            bytes,
-            (sel.head - content.start) as usize,
-            frame.options.tab_width,
-        );
+        let col = walk.column((sel.head - content.start) as usize);
         let Some(visible) = col.checked_sub(frame.scroll.first_col) else {
             continue;
         };
         if visible > u64::from(frame.layout.cols) + 1 {
-            continue;
+            break;
         }
         let x = row.x + (visible as u32 * cell.width) as i32;
         let rect = match frame.caret {
@@ -1293,6 +1359,26 @@ mod tests {
         caret: CaretStyle,
         highlights: Highlights<'_>,
     ) -> (Layout, DisplayList) {
+        build_at(
+            bytes,
+            width,
+            height,
+            Scroll::default(),
+            selections,
+            caret,
+            highlights,
+        )
+    }
+
+    fn build_at(
+        bytes: &[u8],
+        width: u32,
+        height: u32,
+        scroll: Scroll,
+        selections: &[Selection],
+        caret: CaretStyle,
+        highlights: Highlights<'_>,
+    ) -> (Layout, DisplayList) {
         let snapshot = Snapshot::from_bytes(bytes);
         let cell = Cell {
             width: 10,
@@ -1305,7 +1391,7 @@ mod tests {
             &Frame {
                 snapshot: &snapshot,
                 layout: &layout,
-                scroll: Scroll::default(),
+                scroll,
                 cell,
                 theme: &Theme::DARK,
                 chrome: Chrome {
@@ -1335,6 +1421,76 @@ mod tests {
             .filter(|g| g.clip == clip)
             .map(|g| g.ch)
             .collect()
+    }
+
+    /// A misspelled word gets a wave at the bottom of its cells; the text
+    /// keeps its color.
+    #[test]
+    fn misspelled_words_get_a_wave_under_their_cells() {
+        let spelling = [4..10, 15..18];
+        let highlights = Highlights {
+            spelling: &spelling,
+            ..Highlights::default()
+        };
+        let (layout, list) = build_full(
+            b"the recive\nnext tex",
+            400,
+            200,
+            &[],
+            CaretStyle::Hidden,
+            highlights,
+        );
+        let rects: Vec<Rect> = list.waves.iter().map(|w| w.rect).collect();
+        let row = |r: u32, col: u32, cols: u32| Rect {
+            x: layout.text.x + (col * 10) as i32,
+            y: layout.text.y + (r * 20 + 17) as i32,
+            w: cols * 10,
+            h: 3,
+        };
+        assert_eq!(rects, [row(0, 4, 6), row(1, 4, 3)]);
+        assert!(list.waves.iter().all(|w| w.color == Theme::DARK.spelling));
+        assert!(list.glyphs.iter().all(|g| g.color != Theme::DARK.spelling));
+    }
+
+    #[test]
+    fn misspelled_words_past_the_long_line_seam_get_a_wave() {
+        let at = ROW_SCAN_LIMIT as u64 + 101;
+        let text = format!("{} teh more", "x".repeat(ROW_SCAN_LIMIT + 100));
+        let word = at..at + 3;
+        let highlights = Highlights {
+            spelling: std::slice::from_ref(&word),
+            ..Highlights::default()
+        };
+        let scroll = Scroll {
+            first_col: at - 5,
+            ..Scroll::default()
+        };
+        let (layout, list) = build_at(
+            text.as_bytes(),
+            400,
+            200,
+            scroll,
+            &[],
+            CaretStyle::Hidden,
+            highlights,
+        );
+        let x = layout.text.x + 50;
+        let t = list
+            .glyphs
+            .iter()
+            .find(|g| g.ch == 't' && g.clip == layout.text)
+            .unwrap();
+        assert_eq!(t.x, x, "the word is drawn at its column");
+        let rects: Vec<Rect> = list.waves.iter().map(|w| w.rect).collect();
+        assert_eq!(
+            rects,
+            [Rect {
+                x,
+                y: layout.text.y + 17,
+                w: 30,
+                h: 3
+            }]
+        );
     }
 
     #[test]
@@ -1551,6 +1707,53 @@ mod tests {
         let got = cells(&line, 0, 10);
         assert_eq!(got.len(), 2 + MAX_MARKS_PER_CELL as usize);
         assert_eq!(got.last(), Some(&(1, 'b', Kind::Text)));
+    }
+
+    #[test]
+    fn many_same_row_selections_and_carets_draw_at_their_columns() {
+        // "a\tb\u{301} " repeated: tabs, a zero-width mark and spaces.
+        let unit = "a\tb\u{301} ";
+        let text = unit.repeat(400);
+        let starts: Vec<u64> = (0..400).map(|i| (i * unit.len()) as u64).collect();
+        let sels: Vec<Selection> = starts
+            .iter()
+            .enumerate()
+            .map(|(i, &s)| {
+                if i % 2 == 0 {
+                    Selection::new(s, s + 1)
+                } else {
+                    Selection::new(s + 2, s)
+                }
+            })
+            .collect();
+        let (layout, list) = build_with(text.as_bytes(), 800, 200, &sels, CaretStyle::Bar);
+        let x0 = layout.text.x;
+        let col = |offset: u64| column_of(text.as_bytes(), offset as usize, 4);
+        let cols = u64::from(layout.cols);
+        let fills: Vec<i32> = list
+            .fills
+            .iter()
+            .filter(|f| f.color == Theme::DARK.selection && f.rect.y == layout.text.y)
+            .map(|f| f.rect.x)
+            .collect();
+        let right = layout.text.x + layout.text.w as i32;
+        let expected: Vec<i32> = sels
+            .iter()
+            .map(|s| col(s.start()))
+            .take_while(|&c| c <= cols + 2)
+            .map(|c| x0 + (c * 10) as i32)
+            .filter(|&x| x < right)
+            .collect();
+        assert_eq!(fills, expected);
+        let carets: Vec<i32> = list.overlays.iter().map(|f| f.rect.x).collect();
+        let expected: Vec<i32> = sels
+            .iter()
+            .map(|s| col(s.head))
+            .take_while(|&c| c <= cols + 1)
+            .map(|c| x0 + (c * 10) as i32)
+            .filter(|&x| x < right)
+            .collect();
+        assert_eq!(carets, expected);
     }
 
     #[test]

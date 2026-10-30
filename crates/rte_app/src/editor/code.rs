@@ -45,6 +45,7 @@ impl Editor {
                 labels,
                 hints,
                 keep_order: false,
+                groups: Vec::new(),
             },
             current,
         );
@@ -312,6 +313,7 @@ impl Editor {
                 labels: Vec::new(),
                 hints: Vec::new(),
                 keep_order: true,
+                groups: Vec::new(),
             },
             0,
         );
@@ -350,6 +352,7 @@ impl Editor {
                 labels,
                 hints,
                 keep_order: true,
+                groups: Vec::new(),
             },
             current,
         );

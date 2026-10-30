@@ -18,8 +18,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use rte_syntax::{
-    InputEdit, Lang, Painter, Session, Span, Symbol, View, Work, changes_near, input_edits,
-    input_edits_near,
+    InputEdit, Lang, MarkdownMask, Painter, Session, Span, Symbol, View, Work, changes_near,
+    input_edits, input_edits_near,
 };
 use rte_text::{ChangeSet, Snapshot};
 use rte_view::SyntaxSpan;
@@ -108,8 +108,38 @@ enum Msg {
     /// A view the UI replaced: releasing the last tree handles can take
     /// milliseconds, so the worker drops it.
     Retire(View),
+    /// Markdown text that is not prose, for spelling.
+    Mask(MaskRequest),
     /// The UI dropped its [`Syntax`].
     Stop,
+}
+
+/// Ranges of `snapshot` whose excluded parts (code, links, HTML) spelling
+/// needs, answered from a whole-file parse of that text.
+pub struct MaskRequest {
+    pub snapshot: Snapshot,
+    pub ranges: Vec<Range<u64>>,
+    pub reply: Box<dyn FnOnce(MaskAnswer) + Send>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum MaskAnswer {
+    /// Sorted, disjoint excluded ranges, from a parse of the whole text.
+    Verified(Vec<Range<u64>>),
+    /// The worker has a newer text.
+    Stale,
+}
+
+/// Sends mask requests to a syntax thread from another thread.
+#[derive(Clone)]
+pub struct MaskPort(Sender<Msg>);
+
+impl MaskPort {
+    /// Queues `request` behind the edits sent so far, without interrupting
+    /// the worker; false when the worker has stopped.
+    pub fn request(&self, request: MaskRequest) -> bool {
+        self.0.send(Msg::Mask(request)).is_ok()
+    }
 }
 
 enum Reply {
@@ -259,6 +289,11 @@ impl Syntax {
     /// Hands `view` to the worker to drop, without interrupting its work.
     fn retire(&self, view: View) {
         let _ = self.tx.send(Msg::Retire(view));
+    }
+
+    /// A handle for Markdown mask requests.
+    pub fn mask_port(&self) -> MaskPort {
+        MaskPort(self.tx.clone())
     }
 
     /// Sends the document's changes since the last call to the thread. The
@@ -533,6 +568,45 @@ struct Requests {
     seq: u64,
     spans: Option<Vec<Range<u64>>>,
     symbols: bool,
+    masks: Vec<MaskRequest>,
+}
+
+/// Answers the mask requests of the worker's text once its whole file is
+/// parsed; requests of an older text are stale.
+fn answer_masks(session: &Session, requests: &mut Requests, mask: &mut Option<MarkdownMask>) {
+    if requests.masks.is_empty() {
+        return;
+    }
+    let whole = session.host_is_whole();
+    let mut waiting = Vec::new();
+    for req in requests.masks.drain(..) {
+        if !req.snapshot.same_tree(session.snapshot()) {
+            (req.reply)(MaskAnswer::Stale);
+        } else if !whole {
+            waiting.push(req);
+        } else {
+            let view = session.view();
+            let mut out = Vec::new();
+            if mask.is_none() {
+                *mask = MarkdownMask::new().ok();
+            }
+            match mask {
+                Some(mask) => {
+                    for range in &req.ranges {
+                        out.extend(
+                            mask.exclusions(&view, session.snapshot(), range.clone())
+                                .unwrap_or_default(),
+                        );
+                    }
+                }
+                // Unverifiable: everything is excluded.
+                None => out.extend(req.ranges.iter().cloned()),
+            }
+            out.sort_by_key(|r| r.start);
+            (req.reply)(MaskAnswer::Verified(out));
+        }
+    }
+    requests.masks = waiting;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -563,6 +637,7 @@ fn run(
     }));
     let mut requests = Requests::default();
     let mut painter = Painter::default();
+    let mut mask = None;
     let cancel = || pending.load(Ordering::Acquire);
     // State of the last posted view.
     let mut posted: Option<State> = None;
@@ -579,6 +654,7 @@ fn run(
                 Err(TryRecvError::Disconnected) => return,
             }
         }
+        answer_masks(&session, &mut requests, &mut mask);
         let seq = requests.seq;
         if requests.spans.is_some() && session.is_current() {
             let ranges = requests.spans.take().unwrap_or_default();
@@ -697,6 +773,7 @@ fn handle(msg: Msg, session: &mut Session, requests: &mut Requests) -> bool {
         Msg::Symbols { seq } => requests.symbols = seq == requests.seq,
         Msg::Parsed => {}
         Msg::Retire(view) => drop(view),
+        Msg::Mask(req) => requests.masks.push(req),
         Msg::Stop => return false,
     }
     true

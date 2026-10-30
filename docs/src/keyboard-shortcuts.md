@@ -94,3 +94,13 @@ larger requests are refused with a message on the status line.
 | `(` `[` `{` `"` `'` (language-dependent)                 | Insert the closing character; with a selection, wrap it                   |
 | `Backspace` between an empty pair                        | Delete both characters                                                    |
 | `Enter` after `(`, `[`, `{` (and `:` in Python and YAML) | New line indented one level                                               |
+
+## Spelling
+
+With spelling on (`View: Toggle Spelling`, `spelling.enabled`):
+
+| Keys                              | Action                                                                   |
+| --------------------------------- | ------------------------------------------------------------------------ |
+| `Ctrl+.`                          | Suggestions for the misspelled word, then Add to Dictionary and Ignore   |
+| `Enter` (Spelling palette)        | Replace the word with the selected suggestion (one undo step)            |
+| `F8`; `Shift+F8`                  | Select the next; previous misspelled word (wraps)                        |

@@ -1,5 +1,213 @@
 # Performance
 
+## 0.6.0
+
+### Main Performance Oriented Changes
+
+- Spelling costs nothing while off (the default): no thread, no dictionary
+  and no work per frame. Turned on, its thread starts after the first frame
+  and checks the visible rows: the first marks of a 1 MiB text file
+  follow the first paint by 12.4 ms (P06), scrolling shows complete marks
+  within 5.3-5.9 ms (p95, P01-P03) and `F8` selects a misspelling 4 MiB
+  ahead in 38.7 ms (P04).
+- Many carets or selections on one line read the line once, in one
+  advancing column walk, instead of once per caret: drawing, `Up` / `Down`,
+  `Ctrl+Alt+Up` / `Ctrl+Alt+Down`, `Tab`, `Ctrl+Shift+K` and `Enter`.
+  Drawing stops at the right edge of the window.
+- Copying or cutting one large selection makes one full copy fewer: C03
+  takes 101.2 ms instead of 112.7 ms and peaks at 491.0 MiB instead of
+  522.9 MiB (same-session A/B with 0.5.2).
+- Clipboard retries wait at most 20 ms (was 50 ms) on the UI thread.
+- The Read-only attribute is checked only when saving, on the save thread;
+  loading is unchanged.
+- Markdown spelling exclusions read only the syntax nodes that intersect
+  the checked rows.
+
+### Performance Results
+
+Using the Performance Benchmark v`1` (`cargo xtask bench-perf`).
+
+Reference machine: AMD Ryzen 9 9950X, 94 GiB RAM, Windows 11 Pro for
+Workstations, 2560 × 1600 at 59 Hz, release build, warm file cache.
+
+| ID  | Test                                          | Metric                       | 0.6.0  | 0.4.0  | 0.3.0  | 0.2.0  |
+| --- | --------------------------------------------- | ---------------------------- | ------ | ------ | ------ | ------ |
+| L01 | Empty file                                    | First paint [ms]             | 25.0   | 22.1   | 21.3   | 20.2   |
+| L01 | Empty file                                    | Peak private [MiB]           | 5.2    | 5.1    | 5.0    | 5.0    |
+| L02 | Text, 64 KiB                                  | First paint [ms]             | 24.2   | 21.6   | 21.4   | 20.6   |
+| L02 | Text, 64 KiB                                  | Peak private [MiB]           | 5.7    | 5.5    | 5.3    | 5.3    |
+| L03 | Text, 256 MiB                                 | First paint [ms]             | 27.5   | 23.6   | 23.3   | 21.5   |
+| L03 | Text, 256 MiB                                 | File read [ms]               | 93.1   | 76.9   | 77.7   | 71.9   |
+| L03 | Text, 256 MiB                                 | Peak private [MiB]           | 267.2  | 267.6  | 267.4  | 267.3  |
+| L04 | Python, 64 KiB                                | First paint [ms]             | 25.2   | 21.5   | 21.2 ¹ | 20.2 ¹ |
+| L04 | Python, 64 KiB                                | Peak private [MiB]           | 11.5   | 11.6   | 5.2    | 5.2    |
+| L05 | C, 64 KiB                                     | First paint [ms]             | 26.1   | 22.7   | 21.1 ¹ | 20.3 ¹ |
+| L05 | C, 64 KiB                                     | Peak private [MiB]           | 10.2   | 10.1   | 5.2    | 5.2    |
+| L06 | JSON, 64 KiB                                  | First paint [ms]             | 26.1   | 22.1   | 21.8 ¹ | 20.4 ¹ |
+| L06 | JSON, 64 KiB                                  | Peak private [MiB]           | 10.9   | 10.7   | 5.6    | 5.5    |
+| L07 | Markdown, 64 KiB                              | First paint [ms]             | 24.3   | 21.9   | 21.1 ¹ | 20.0 ¹ |
+| L07 | Markdown, 64 KiB                              | Peak private [MiB]           | 19.3   | 19.2   | 5.1    | 5.1    |
+| L08 | CSV, 64 KiB                                   | First paint [ms]             | 24.0   | 21.5   | 20.9 ¹ | 19.9 ¹ |
+| L08 | CSV, 64 KiB                                   | Peak private [MiB]           | 5.4    | 5.3    | 5.2    | 5.2    |
+| L09 | Python, 8 MiB                                 | First paint [ms]             | 24.5   | 22.7   | 21.4 ¹ | 20.4 ¹ |
+| L09 | Python, 8 MiB                                 | File read [ms]               | 9.0    | 9.2    | 8.9    | 8.5    |
+| L09 | Python, 8 MiB                                 | Highlighted [ms]             | 39.0   | 30.8   | n/i    | n/i    |
+| L09 | Python, 8 MiB                                 | Fully highlighted [ms]       | 799.0  | 797.8  | n/i    | n/i    |
+| L09 | Python, 8 MiB                                 | Peak private [MiB]           | 393.3  | 393.1  | 13.5   | 13.5   |
+| L10 | C, 8 MiB                                      | First paint [ms]             | 24.3   | 23.4   | 22.0 ¹ | 20.0 ¹ |
+| L10 | C, 8 MiB                                      | File read [ms]               | 9.1    | 8.9    | 8.6    | 8.4    |
+| L10 | C, 8 MiB                                      | Peak private [MiB]           | 23.7   | 23.5   | 13.4   | 13.4   |
+| L11 | JSON, 8 MiB                                   | First paint [ms]             | 25.2   | 23.5   | 22.8 ¹ | 20.8 ¹ |
+| L11 | JSON, 8 MiB                                   | File read [ms]               | 8.9    | 9.0    | 8.8    | 8.0    |
+| L11 | JSON, 8 MiB                                   | Peak private [MiB]           | 32.8   | 33.1   | 13.4   | 13.5   |
+| L12 | Markdown, 8 MiB                               | First paint [ms]             | 24.4   | 23.6   | 23.1 ¹ | 20.1 ¹ |
+| L12 | Markdown, 8 MiB                               | File read [ms]               | 8.9    | 9.0    | 9.2    | 8.3    |
+| L12 | Markdown, 8 MiB                               | Peak private [MiB]           | 38.3   | 37.7   | 13.5   | 13.4   |
+| L13 | CSV, 8 MiB                                    | First paint [ms]             | 24.1   | 21.4   | 22.8 ¹ | 20.0 ¹ |
+| L13 | CSV, 8 MiB                                    | File read [ms]               | 9.0    | 9.0    | 9.2    | 8.2    |
+| L13 | CSV, 8 MiB                                    | Peak private [MiB]           | 13.7   | 13.6   | 13.5   | 13.5   |
+| L14 | Read-only text, 256 MiB                       | First paint [ms]             | 27.0   | 22.7   | 24.8   | 20.8   |
+| L14 | Read-only text, 256 MiB                       | File read [ms]               | 82.2   | 77.9   | 85.2   | 72.7   |
+| L14 | Read-only text, 256 MiB                       | Peak private [MiB]           | 267.4  | 267.5  | 267.3  | 267.4  |
+| L15 | Read-only Python, 64 KiB                      | First paint [ms]             | 24.9   | 22.1   | 23.0 ¹ | 19.7 ¹ |
+| L15 | Read-only Python, 64 KiB                      | Peak private [MiB]           | 11.5   | 11.6   | 5.2    | 5.2    |
+| L16 | Single line text, 64 MiB                      | First paint [ms]             | 25.6   | 23.4   | 23.0   | 21.9   |
+| L16 | Single line text, 64 MiB                      | File read [ms]               | 26.6   | 26.5   | 25.2   | 24.3   |
+| L16 | Single line text, 64 MiB                      | Peak private [MiB]           | 72.2   | 72.2   | 72.0   | 72.1   |
+| L17 | Single line JSON, 8 MiB                       | First paint [ms]             | 27.4   | 23.1   | 21.2 ¹ | 19.9 ¹ |
+| L17 | Single line JSON, 8 MiB                       | File read [ms]               | 9.4    | 8.8    | 8.1    | 8.0    |
+| L17 | Single line JSON, 8 MiB                       | Peak private [MiB]           | 37.0   | 38.1   | 13.4   | 13.5   |
+| L18 | Notebook as JSON, 8 MiB                       | First paint [ms]             | 24.1   | 22.9   | 21.4 ¹ | 20.4 ¹ |
+| L18 | Notebook as JSON, 8 MiB                       | File read [ms]               | 8.8    | 8.6    | 8.4    | 8.1    |
+| L18 | Notebook as JSON, 8 MiB                       | Peak private [MiB]           | 22.2   | 22.4   | 13.4   | 13.4   |
+| L19 | Markdown, 128 MiB                             | First paint [ms]             | 25.9   | 24.4   | 23.4   | 21.4   |
+| L19 | Markdown, 128 MiB                             | File read [ms]               | 44.4   | 47.0   | 43.1   | 39.8   |
+| L19 | Markdown, 128 MiB                             | Peak private [MiB]           | 142.9  | 142.9  | 136.8  | 136.8  |
+| L20 | Python, 50,000 lines                          | First paint [ms]             | 25.9   | 23.7   | n/i    | n/i    |
+| L20 | Python, 50,000 lines                          | Highlighted [ms]             | 36.4   | 34.6   | n/i    | n/i    |
+| L20 | Python, 50,000 lines                          | Fully highlighted [ms]       | 174.1  | 171.4  | n/i    | n/i    |
+| L20 | Python, 50,000 lines                          | Peak private [MiB]           | 88.7   | 88.6   | n/i    | n/i    |
+| L21 | C, 50,000 lines                               | First paint [ms]             | 23.6   | 22.3   | n/i    | n/i    |
+| L21 | C, 50,000 lines                               | Highlighted [ms]             | 36.4   | 39.8   | n/i    | n/i    |
+| L21 | C, 50,000 lines                               | Fully highlighted [ms]       | 311.5  | 312.3  | n/i    | n/i    |
+| L21 | C, 50,000 lines                               | Peak private [MiB]           | 84.8   | 84.4   | n/i    | n/i    |
+| L22 | Single line JSON, 8 MiB, highlighted          | First paint [ms]             | 25.2   | 23.1   | n/i    | n/i    |
+| L22 | Single line JSON, 8 MiB, highlighted          | Highlighted [ms]             | 48.2   | 39.8   | n/i    | n/i    |
+| L22 | Single line JSON, 8 MiB, highlighted          | Fully highlighted [ms]       | 704.1  | 686.6  | n/i    | n/i    |
+| L22 | Single line JSON, 8 MiB, highlighted          | Peak private [MiB]           | 415.4  | 415.3  | n/i    | n/i    |
+| L23 | Python, 10,000 lines                          | First paint [ms]             | 24.8   | 22.4   | n/i    | n/i    |
+| L23 | Python, 10,000 lines                          | Highlighted [ms]             | 38.2   | 36.1   | n/i    | n/i    |
+| L23 | Python, 10,000 lines                          | Fully highlighted [ms]       | 42.3   | 40.7   | n/i    | n/i    |
+| L23 | Python, 10,000 lines                          | Peak private [MiB]           | 26.7   | 26.7   | n/i    | n/i    |
+| L24 | C, 10,000 lines                               | First paint [ms]             | 24.4   | 22.5   | n/i    | n/i    |
+| L24 | C, 10,000 lines                               | Highlighted [ms]             | 35.9   | 41.4   | n/i    | n/i    |
+| L24 | C, 10,000 lines                               | Fully highlighted [ms]       | 69.7   | 68.5   | n/i    | n/i    |
+| L24 | C, 10,000 lines                               | Peak private [MiB]           | 25.2   | 25.1   | n/i    | n/i    |
+| L25 | TypeScript, 10,000 lines                      | First paint [ms]             | 24.4   | 23.0   | n/i    | n/i    |
+| L25 | TypeScript, 10,000 lines                      | Highlighted [ms]             | 34.6   | 35.8   | n/i    | n/i    |
+| L25 | TypeScript, 10,000 lines                      | Fully highlighted [ms]       | 35.1   | 35.8   | n/i    | n/i    |
+| L25 | TypeScript, 10,000 lines                      | Peak private [MiB]           | 22.2   | 22.0   | n/i    | n/i    |
+| L26 | Start empty session                           | First paint [ms]             | 24.5   | n/i    | n/i    | n/i    |
+| L26 | Start empty session                           | Peak private [MiB]           | 5.2    | n/i    | n/i    | n/i    |
+| U01 | Show the Command Palette                      | Key to frame [ms]            | 0.44   | 0.42   | 0.38   | 0.38   |
+| U01 | Show the Command Palette                      | Key to frame, p95 [ms]       | 0.78   | 0.66   | 4.97   | 0.61   |
+| U02 | Show favorites                                | Key to frame [ms]            | 0.36   | 0.41   | 0.41   | 0.33   |
+| U02 | Show favorites                                | Key to frame, p95 [ms]       | 0.68   | 9.16   | 4.96   | 0.58   |
+| C01 | Copy 1 KiB                                    | Key to clipboard [ms]        | 0.56   | 0.52   | 0.53   | n/m    |
+| C02 | Copy 1 MiB                                    | Key to clipboard [ms]        | 1.40   | 1.63   | 1.61   | n/m    |
+| C03 | Copy 64 MiB                                   | Key to clipboard [ms]        | 108.64 | 111.39 | 113.88 | n/m    |
+| C04 | Paste 1 KiB into Python, 8 MiB                | Key to frame [ms]            | 0.69   | 0.62   | 0.60   | n/m    |
+| C05 | Paste 1 MiB into Python, 8 MiB                | Key to frame [ms]            | 2.47   | 2.88   | 2.02   | n/m    |
+| C06 | Paste 64 MiB into text                        | Key to frame [ms]            | 121.23 | 106.59 | 104.72 | n/m    |
+| C06 | Paste 64 MiB into text                        | Peak private [MiB]           | 781.9  | 781.9  | 781.4  | n/m    |
+| E01 | Typing in Python, 8 MiB                       | Key to frame [ms]            | 0.43   | 0.47   | 0.35   | n/m    |
+| E02 | Typing at the start of a 64 MiB line          | Key to frame [ms]            | 0.28   | 0.30   | 0.30   | n/m    |
+| E03 | End and Home on a 64 MiB line                 | Key to frame [ms]            | 0.47   | 0.40   | 0.42   | n/m    |
+| E04 | Move line down, Python, 8 MiB                 | Key to frame [ms]            | 0.48   | n/i    | n/i    | n/i    |
+| E05 | Copy line down, Python, 8 MiB                 | Key to frame [ms]            | 0.47   | n/i    | n/i    | n/i    |
+| M01 | Add next occurrence                           | Key to frame [ms]            | 0.56   | 0.57   | 0.42   | n/i    |
+| M02 | Select all occurrences                        | Key to frame [ms]            | 0.89   | 0.93   | 0.80   | n/i    |
+| M03 | Column selection, 1,000 lines                 | Key to frame [ms]            | 1.25   | 1.23   | 1.21   | n/i    |
+| M04 | Insert cursor below                           | Key to frame [ms]            | 0.52   | 0.55   | 0.44   | n/i    |
+| M05 | Type at 10,000 carets                         | Key to frame [ms]            | 4.37   | 4.28   | 3.64   | n/i    |
+| M05 | Type at 10,000 carets                         | Peak private [MiB]           | 141.2  | 134.1  | 33.8   | n/i    |
+| M06 | Backspace at 10,000 carets                    | Key to frame [ms]            | 5.04   | 4.11   | 4.25   | n/i    |
+| M07 | Paste 10,000 pieces                           | Key to frame [ms]            | 5.15   | 4.98   | 5.22   | n/i    |
+| M08 | Undo and redo, 10,000 carets                  | Key to frame [ms]            | 0.70   | 0.74   | 0.49   | n/i    |
+| S01 | Scroll and jump, Markdown, 64 KiB             | Key to frame, p95 [ms]       | 3.46   | 1.19   | 2.13   | n/m    |
+| S01 | Scroll and jump, Markdown, 64 KiB             | Key to frame, max [ms]       | 4.99   | 3.90   | 2.52   | n/m    |
+| S01 | Scroll and jump, Markdown, 64 KiB             | Missed refreshes [%]         | 0.0    | 0.0    | 0.0    | n/m    |
+| S02 | Scroll and jump, Markdown, 8 MiB              | Key to frame, p95 [ms]       | 2.60   | 1.23   | 2.49   | n/m    |
+| S02 | Scroll and jump, Markdown, 8 MiB              | Key to frame, max [ms]       | 4.66   | 3.92   | 3.88   | n/m    |
+| S02 | Scroll and jump, Markdown, 8 MiB              | Missed refreshes [%]         | 0.0    | 0.0    | 0.0    | n/m    |
+| S02 | Scroll and jump, Markdown, 8 MiB              | Jump to highlighted [ms]     | 4.13   | 4.08   | n/i    | n/i    |
+| S03 | Scroll and jump, Markdown, 128 MiB            | Key to frame, p95 [ms]       | 2.11   | 1.17   | 2.62   | n/m    |
+| S03 | Scroll and jump, Markdown, 128 MiB            | Key to frame, max [ms]       | 4.62   | 1.33   | 2.87   | n/m    |
+| S03 | Scroll and jump, Markdown, 128 MiB            | Missed refreshes [%]         | 0.0    | 0.0    | 0.0    | n/m    |
+| F01 | Find next, text, 256 MiB                      | Key to frame [ms]            | 0.55   | 0.55   | 0.53   | n/i    |
+| F02 | Count matches, text, 256 MiB                  | Key to final count [ms]      | 222.31 | 225.73 | 218.81 | n/i    |
+| F03 | Toggle RegEx, Python, 8 MiB                   | Key to final count [ms]      | 3.07   | 3.15   | 3.08   | n/i    |
+| K01 | Typing in Python, 50,000 lines                | Key to frame, p95 [ms]       | 4.46   | 3.74   | n/i    | n/i    |
+| K01 | Typing in Python, 50,000 lines                | Key to highlighted, p95 [ms] | 5.77   | 4.83   | n/i    | n/i    |
+| K02 | Enter and Backspace, Python, 50,000 lines     | Key to frame, p95 [ms]       | 2.02   | 1.30   | n/i    | n/i    |
+| K02 | Enter and Backspace, Python, 50,000 lines     | Key to highlighted, p95 [ms] | 69.90  | 70.30  | n/i    | n/i    |
+| K03 | Typing in C, 50,000 lines                     | Key to frame, p95 [ms]       | 1.99   | 1.33   | n/i    | n/i    |
+| K03 | Typing in C, 50,000 lines                     | Key to highlighted, p95 [ms] | 38.49  | 39.66  | n/i    | n/i    |
+| K04 | Scroll and jump, Python, 50,000 lines         | Key to frame, p95 [ms]       | 1.94   | 1.20   | n/i    | n/i    |
+| K04 | Scroll and jump, Python, 50,000 lines         | Missed refreshes [%]         | 0.0    | 0.0    | n/i    | n/i    |
+| K04 | Scroll and jump, Python, 50,000 lines         | Jump to highlighted [ms]     | 0.91   | 0.81   | n/i    | n/i    |
+| K05 | Go to Symbol, Python, 50,000 lines            | Key to frame [ms]            | 64.82  | 65.00  | n/i    | n/i    |
+| K06 | Typing in Python, 10,000 lines                | Key to frame, p95 [ms]       | 4.46   | 4.20   | n/i    | n/i    |
+| K06 | Typing in Python, 10,000 lines                | Key to highlighted, p95 [ms] | 5.79   | 5.16   | n/i    | n/i    |
+| K07 | Typing in C, 10,000 lines                     | Key to frame, p95 [ms]       | 4.37   | 3.91   | n/i    | n/i    |
+| K07 | Typing in C, 10,000 lines                     | Key to highlighted, p95 [ms] | 8.36   | 8.17   | n/i    | n/i    |
+| K08 | Typing in TypeScript, 10,000 lines            | Key to frame, p95 [ms]       | 4.62   | 4.35   | n/i    | n/i    |
+| K08 | Typing in TypeScript, 10,000 lines            | Key to highlighted, p95 [ms] | 6.10   | 5.25   | n/i    | n/i    |
+| K09 | Enter and Backspace, TypeScript, 10,000 lines | Key to frame, p95 [ms]       | 4.56   | 3.86   | n/i    | n/i    |
+| K09 | Enter and Backspace, TypeScript, 10,000 lines | Key to highlighted, p95 [ms] | 5.90   | 5.00   | n/i    | n/i    |
+| K10 | Go to Symbol, Python, 10,000 lines            | Key to frame [ms]            | 13.54  | 14.40  | n/i    | n/i    |
+| P01 | Scroll and jump, spelling, text, 1 MiB        | Key to marks, p95 [ms]       | 5.28   | n/i    | n/i    | n/i    |
+| P01 | Scroll and jump, spelling, text, 1 MiB        | Key to marks, max [ms]       | 5.74   | n/i    | n/i    | n/i    |
+| P02 | Scroll and jump, spelling, Markdown, 1 MiB    | Key to marks, p95 [ms]       | 5.71   | n/i    | n/i    | n/i    |
+| P02 | Scroll and jump, spelling, Markdown, 1 MiB    | Key to marks, max [ms]       | 7.47   | n/i    | n/i    | n/i    |
+| P03 | Scroll sideways, spelling, dense lines        | Key to marks, p95 [ms]       | 5.87   | n/i    | n/i    | n/i    |
+| P03 | Scroll sideways, spelling, dense lines        | Key to marks, max [ms]       | 6.33   | n/i    | n/i    | n/i    |
+| P03 | Scroll sideways, spelling, dense lines        | Missed refreshes [%]         | 0.0    | n/i    | n/i    | n/i    |
+| P04 | `F8` to a misspelling 4 MiB ahead             | Key to selection [ms]        | 38.68  | n/i    | n/i    | n/i    |
+| P05 | `Ctrl+.` on a misspelling                     | Key to suggestions [ms]      | 5.48   | n/i    | n/i    | n/i    |
+| P06 | First marks, text, 1 MiB                      | First paint to marks [ms]    | 12.4   | n/i    | n/i    | n/i    |
+| P06 | First marks, text, 1 MiB                      | Peak private [MiB]           | 7.6    | n/i    | n/i    | n/i    |
+| —   | Whole suite (implemented tests)               | Run time [s]                 | 56.9   | 54.9   | 21.8   | 9.6    |
+
+Values are medians of one full run; P01-P06 (spelling, built-in engine) are
+opt-in and ran separately (`--only P01,P02,P03,P04,P05,P06`, 7.6 s), so the
+whole suite excludes them. n/i: feature not implemented in that version;
+n/m: not measured. ¹ Plain text: syntax highlighting was not implemented
+before 0.4.0.
+
+- **First paint** is 23.6-27.5 ms (0.4.0: 21.4-24.4 ms). A same-session A/B
+  with 0.5.2, three alternating runs of L01, L03, L09 and L16, gives equal
+  medians (L01 24.7 ms in 0.6.0, 24.8 ms in 0.5.2). A later same-session run
+  of 0.4.0, 0.5.2 and 0.6.0 gives L01 medians of 25.1, 23.6 and 23.5 ms: the
+  machine is slower than when 0.4.0 was recorded, not the code. The first
+  highlighted frames of L09 and L22 vary between 31 and 48 ms in both
+  versions.
+- **Paced tests** (S01-S03, K01-K04): p95 is 0.7-2.3 ms higher than the
+  0.4.0 record, equal to 0.5.2 in a same-session A/B, with no missed
+  refreshes.
+- **C06** (121.23 ms) is a slow run: three alternating runs give medians of
+  108.2 ms (0.6.0) and 108.5 ms (0.5.2). M05, M06, M08, E01, E03 and U02 are
+  equal to 0.5.2 the same way; the M05 peak varies between 134 and 157 MiB
+  across runs of both versions.
+- **Many carets on one row** (release probes of the operation alone,
+  without paint, from [Done/CodeReview001.md](Done/CodeReview001.md)):
+  10,000 carets draw in 0.02 ms (was 134-190 ms) and 10,000 selections in
+  0.02 ms (was 214 ms); `Up` / `Down` takes 15 ms (was 242 ms), `Tab`
+  1.7 ms (was 112 ms) and `Enter` on a code line 4.2 ms (was 17.6 ms).
+  `Ctrl+Shift+K` on 2,000 separate lines takes 67 ms (was 102 ms) and now
+  grows linearly with the lines.
+- The whole suite runs three more tests than 0.4.0 (L26, E04, E05).
+
 ## 0.4.0
 
 ### Main Performance Oriented Changes
@@ -593,6 +801,12 @@ step is a key, a repeated key such as `Down*40`, or quoted text such as
 `--only L01,F01` runs a subset (its total is not checked). The whole
 suite should not exceed 60 seconds on the reference machine, including
 fixture generation on a first run; faster is better.
+`--spelling builtin|hunspell|windows` turns spelling on with that engine
+in every selected test (P01-P06 use `builtin` without it); input tests
+made without spelling get 3 s more on their cap, since a script then starts
+after the first marks. The spelling tests (P01-P06, about 8 s) run only
+when named in `--only` or with `--spelling`; the total cap applies to the
+default suite.
 
 #### Procedure
 
@@ -645,6 +859,14 @@ fixture generation on a first run; faster is better.
   number of keys not highlighted within 1 s (a paced run ends after the last
   key's highlighted frame). K05 and K10 are timed until the symbol
   list is shown; typing `x` after each run makes every run collect anew.
+- **Spelling** (P01-P06, `--spelling`): with spelling on, a script starts
+  once the marks of the view are complete, and a key is timed until the
+  frame that shows the complete marks of the new view (also the palette
+  with its suggestions, P05, and the selected misspelling, P04). P01-P03
+  are paced like S01-S03 (P03: `End`, `Home`, `Down` × 20 on 16 KiB lines).
+  P06 launches fresh processes (`--exit-after-highlight`) and reports the
+  time from the first paint to the first complete marks (trace stage
+  `spelling_marks`).
 - Statistics: median of all repetitions; p95 for tests with ≥ 20 repetitions;
   one warm-up per test, not counted (none for the scroll tests).
 - Each test has a time cap; a test over its cap fails the run, so the suite
@@ -683,30 +905,34 @@ see [Plan/Architecture.md](Plan/Architecture.md)) and are highlighted;
 single-line fixtures test long lines: rendering, caret movement and editing
 must not depend on the line length.
 
-| File           | Bytes       | XXH3-64              | Content                                           |
-| -------------- | ----------- | -------------------- | ------------------------------------------------- |
-| `empty.txt`    | 0           | `0x2d06800538d394c2` | Nothing                                           |
-| `small.txt`    | 65,528      | `0xb9279797cb449924` | Prose lines, LF                                   |
-| `large.log`    | 268,435,456 | `0x2f843a96190ac6c8` | Log lines, CRLF                                   |
-| `small.py`     | 65,106      | `0x20f0895dc8ca07af` | Python block, repeated                            |
-| `medium.py`    | 8,388,270   | `0x6e6658331bdaf703` | Python block, repeated                            |
-| `small.c`      | 65,082      | `0x9bc8db30d412b721` | C block, repeated                                 |
-| `medium.c`     | 8,388,345   | `0x667a78bba9ac72ae` | C block, repeated                                 |
-| `small.json`   | 65,447      | `0x5cccfe7086c520c0` | Array, one object per line                        |
-| `medium.json`  | 8,388,523   | `0x2f7b9d6dfd037f74` | Array, one object per line                        |
-| `medium.ipynb` | 8,386,352   | `0xdbaab2506662a999` | Jupyter Notebook, 618 Markdown and 618 code cells |
-| `small.md`     | 65,467      | `0xad1cf323b2be13aa` | Front matter, Markdown block, repeated            |
-| `medium.md`    | 8,388,443   | `0xea9a6a2abe0b1430` | Front matter, Markdown block, repeated            |
-| `large.md`     | 134,217,541 | `0xb5187e60707ad0a9` | Front matter, Markdown block, repeated            |
-| `small.csv`    | 65,504      | `0xb10add99c5c4f459` | Header, CSV row, repeated                         |
-| `medium.csv`   | 8,388,604   | `0x8641de1a0b731974` | Header, CSV row, repeated                         |
-| `line.txt`     | 67,108,864  | `0x178f1d1aaeb2328c` | Words without any line break                      |
-| `line.json`    | 8,388,551   | `0xcda2d7050b0bfede` | Minified JSON array on one line                   |
-| `code.py`      | 1,693,627   | `0x5ebabdd1ff1a5b60` | Python block, repeated to 50,000 lines            |
-| `code.c`       | 2,353,242   | `0xc89d830565836307` | C block, repeated to 50,000 lines                 |
-| `10k.py`       | 337,182     | `0x8e415b15e8bd4e98` | Python block, repeated to 10,000 lines            |
-| `10k.c`        | 464,767     | `0x057e008afce340c3` | C block, repeated to 10,000 lines                 |
-| `10k.ts`       | 283,728     | `0xa69187b2ee0c321f` | TypeScript block, repeated to 10,000 lines        |
+| File              | Bytes       | XXH3-64              | Content                                           |
+| ----------------- | ----------- | -------------------- | ------------------------------------------------- |
+| `empty.txt`       | 0           | `0x2d06800538d394c2` | Nothing                                           |
+| `small.txt`       | 65,528      | `0xb9279797cb449924` | Prose lines, LF                                   |
+| `large.log`       | 268,435,456 | `0x2f843a96190ac6c8` | Log lines, CRLF                                   |
+| `small.py`        | 65,106      | `0x20f0895dc8ca07af` | Python block, repeated                            |
+| `medium.py`       | 8,388,270   | `0x6e6658331bdaf703` | Python block, repeated                            |
+| `small.c`         | 65,082      | `0x9bc8db30d412b721` | C block, repeated                                 |
+| `medium.c`        | 8,388,345   | `0x667a78bba9ac72ae` | C block, repeated                                 |
+| `small.json`      | 65,447      | `0x5cccfe7086c520c0` | Array, one object per line                        |
+| `medium.json`     | 8,388,523   | `0x2f7b9d6dfd037f74` | Array, one object per line                        |
+| `medium.ipynb`    | 8,386,352   | `0xdbaab2506662a999` | Jupyter Notebook, 618 Markdown and 618 code cells |
+| `small.md`        | 65,467      | `0xad1cf323b2be13aa` | Front matter, Markdown block, repeated            |
+| `medium.md`       | 8,388,443   | `0xea9a6a2abe0b1430` | Front matter, Markdown block, repeated            |
+| `large.md`        | 134,217,541 | `0xb5187e60707ad0a9` | Front matter, Markdown block, repeated            |
+| `small.csv`       | 65,504      | `0xb10add99c5c4f459` | Header, CSV row, repeated                         |
+| `medium.csv`      | 8,388,604   | `0x8641de1a0b731974` | Header, CSV row, repeated                         |
+| `line.txt`        | 67,108,864  | `0x178f1d1aaeb2328c` | Words without any line break                      |
+| `line.json`       | 8,388,551   | `0xcda2d7050b0bfede` | Minified JSON array on one line                   |
+| `code.py`         | 1,693,627   | `0x5ebabdd1ff1a5b60` | Python block, repeated to 50,000 lines            |
+| `code.c`          | 2,353,242   | `0xc89d830565836307` | C block, repeated to 50,000 lines                 |
+| `10k.py`          | 337,182     | `0x8e415b15e8bd4e98` | Python block, repeated to 10,000 lines            |
+| `10k.c`           | 464,767     | `0x057e008afce340c3` | C block, repeated to 10,000 lines                 |
+| `10k.ts`          | 283,728     | `0xa69187b2ee0c321f` | TypeScript block, repeated to 10,000 lines        |
+| `spell.txt`       | 1,048,572   | `0x19a974ea626c00df` | Prose, 80-byte lines, 2 % misspelled              |
+| `spell.md`        | 1,048,213   | `0xf951c45e3c5457dd` | Prose sections with code, links, HTML and fences  |
+| `spell-dense.txt` | 2,097,147   | `0x2f5f18ad7f447f32` | Prose, 16 KiB lines, 2 % misspelled               |
+| `spell-far.txt`   | 4,259,853   | `0x0f5a3175454a96bc` | 4 MiB correct prose, one misspelling, more prose  |
 
 Each code fixture repeats a block containing every highlighted element:
 
@@ -733,6 +959,10 @@ Each code fixture repeats a block containing every highlighted element:
   rules, and fenced code blocks in Python, C and JSON (injections).
 - **CSV:** a header row; quoted fields with commas, escaped quotes and line
   breaks; numbers, dates, booleans, empty fields.
+- **Spelling:** sentences of 12 common words; every 50th word is
+  misspelled, alternately a common misspelling (repeated) and a new word.
+  `spell.md` adds per section a heading, a code span, a link, an HTML tag
+  and a fenced block, all holding misspellings that must not be marked.
 
 #### Tests
 
@@ -785,6 +1015,12 @@ Each code fixture repeats a block containing every highlighted element:
 | K06-K08 | Type, 10,000 lines (Python, C, TypeScript)  | `10k.py`, `10k.c`, `10k.ts`     | 100 each          | 8 each  |
 | K09     | `Enter`, `Backspace`, 10,000 lines          | `10k.ts`                        | 50                | 8       |
 | K10     | Go to Symbol, 10,000 lines                  | `10k.py`                        | 10                | 2       |
+| P01     | Scroll and jump, spelling                   | `spell.txt`                     | 140 keys          | 3       |
+| P02     | Scroll and jump, spelling Markdown          | `spell.md`                      | 140 keys          | 3       |
+| P03     | Scroll dense long lines sideways            | `spell-dense.txt`               | 60 keys           | 6       |
+| P04     | Next Misspelling (`F8`) 4 MiB ahead         | `spell-far.txt`                 | 5                 | 3       |
+| P05     | Spelling suggestions (`Ctrl+.`)             | `spell.txt`                     | 20                | 2       |
+| P06     | First marks after start                     | `spell.txt`                     | 20 processes      | 4       |
 
 Load caps add up to 47 s, interaction caps to 104 s and fixture generation is
 capped at 3 s; the total cap (60 s) is checked separately. Load caps are
@@ -824,6 +1060,10 @@ Setup and keys of the scripted interaction tests:
 | K06-K08 | Caret at byte 168,000, 232,000, 142,000           | `'x'`                           |
 | K09     | Caret at byte 142,000                             | `Enter`, `Backspace` (timed)    |
 | K10     | None                                              | `Ctrl+Shift+O`, `Escape`, `'x'` |
+| P01-P02 | None                                              | The 140 scroll keys (all timed) |
+| P03     | None                                              | `End`, `Home`, `Down` × 20      |
+| P04     | None                                              | `F8`, `Ctrl+Home`               |
+| P05     | Caret at byte 297 (in `recieve`)                  | `Ctrl+.`, `Escape`              |
 
 **10K selections:** `Ctrl+F`, `Alt+R`, `'sum_\d{1,4}\('`, `Alt+Enter`,
 `Escape` selects `sum_0(` to `sum_9999(`, exactly 10,000 matches (the

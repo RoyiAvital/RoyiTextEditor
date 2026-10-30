@@ -7,6 +7,116 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-30
+
+This release brings a _Spell Checker_ with a keyboard focused flow for correcting
+misspelled words.  
+This version also optimizes text operations to make work smoother and faster, even
+with thousands of cursors.
+
+### Added
+
+- Spelling for plain text and Markdown prose (US English), off by default:
+  `spelling.enabled`, `View: Toggle Spelling` or `--spelling
+  off|builtin|hunspell|windows`. Misspelled words of the visible rows get a
+  blue wavy underline and a status line hint; `Ctrl+.` shows suggestions
+  first (`Ctrl+.`, `Enter` fixes a word in one undo step), Add to Dictionary
+  and Ignore; `F8` / `Shift+F8` select the next / previous misspelling.
+  Markdown code, links, HTML and front matter are skipped, from verified
+  syntax trees. Spelling runs on its own thread, started after the first
+  frame; with spelling off nothing runs.
+- Spelling engines (`spelling.engine`): a built-in word list, Hunspell
+  (`spellbook`, MPL-2.0) with the SCOWL-based `en_US` dictionary shipped in
+  `Dictionaries/` (license kept; `spelling.hunspell` names another pair) and
+  the Windows spell checker (COM loaded at run time; no new imports). An
+  engine that cannot start falls back to the built-in one with a notice.
+  Added words are kept in `UserSettings/Spelling/en_US.txt`.
+
+### Changed
+
+- Choice lists of the Command Palette (Change Language Mode, Go to Symbol,
+  Go to Line) no longer show a favorites star: only commands can be
+  favorites. The Spelling palette separates suggestions from commands with a
+  line.
+- A file with the Windows Read-only attribute is not saved and nothing is
+  written: the unsaved dot turns orange and the status line asks to clear
+  the attribute and save again. The editor never changes attributes; the
+  attribute is checked only when saving.
+- A file whose lines end with a lone CR shows a status line notice that it
+  is displayed as one line.
+- Whole Word keeps combining marks (accents) with their word, as VS Code.
+- Many carets or selections on one line: drawing, `Up` / `Down`,
+  `Ctrl+Alt+Up` / `Ctrl+Alt+Down`, `Tab`, `Ctrl+Shift+K` and `Enter` read
+  each line once instead of once per caret (10,000 carets on one row: about
+  0.02 ms instead of 130-210 ms to draw, 15 ms instead of 240 ms to move).
+- Copying or cutting one large selection makes one full copy fewer.
+- Clipboard retries wait at most 20 ms (was 50 ms) on the UI thread.
+- The undo history counts the selections of each step in its memory limit.
+
+### Fixed
+
+- After a failed save whose file stayed unchanged (access denied, file in
+  use), the temporary copy is deleted and the cause is named.
+- `Enter` after an opening bracket past 64 KiB on a line indents by the text
+  before the caret, not by the text at the 64 KiB scan limit.
+- A scrolled panel (Keyboard Shortcuts, About) fills the window after it
+  grows.
+- The status line says `1 line` (and `1 line skipped`) instead of `1 lines`.
+
+### Documentation
+
+- New Spelling and Configuration pages: what spelling checks, its keys,
+  engines and user dictionary; every setting of `RoyiTextEditor.yaml` with
+  its default, values and remarks, and a complete commented file.
+- Saving a read-only file, CR-only files, Whole Word with accents, and
+  regular expressions with look-around: line breaks written as `\n`, and
+  heavy backtracking on very long lines.
+- New Files and Saving page: saving and conflicts, read-only files (with a
+  screenshot), encodings and line breaks, large files and long lines.
+
+### Performance
+
+| Operation                                    | Before     | 0.6.0     |
+| -------------------------------------------- | ---------- | --------- |
+| Draw 10,000 carets on one row                | 134-190 ms | 0.02 ms   |
+| Draw 10,000 selections on one row            | 214 ms     | 0.02 ms   |
+| `Up` / `Down` with 10,000 carets on one row  | 242 ms     | 15 ms     |
+| `Tab` with 10,000 carets on one row          | 112 ms     | 1.7 ms    |
+| `Enter` with 10,000 carets on a code line    | 17.6 ms    | 4.2 ms    |
+| `Ctrl+Shift+K` on 2,000 separate lines       | 102 ms     | 67 ms     |
+| Copy 64 MiB (C03)                            | 112.7 ms   | 101.2 ms  |
+| Copy 64 MiB (C03), peak memory               | 522.9 MiB  | 491.0 MiB |
+| UI wait for a clipboard held by another app  | 50 ms      | 20 ms     |
+
+Carets, selections and `Ctrl+Shift+K`: release probes of the operation
+alone, without paint. C03: same-session A/B with 0.5.2. Clipboard: the
+retry limit.
+
+| Question                                  | Scenario                                  | Measure             | Result    |
+| ----------------------------------------- | ----------------------------------------- | ------------------- | --------- |
+| How fast does it start?                   | Open an empty file                        | Time to first frame | 25.0 ms   |
+| How light is it?                          | Open an empty file                        | Peak memory         | 5.2 MiB   |
+| How fast does a normal code file open?    | Open an 8 MiB Python file                 | Time to first frame | 24.5 ms   |
+| Does a huge file still open instantly?    | Open a 256 MiB log file                   | Time to first frame | 27.5 ms   |
+| How long until all of it is loaded?       | Open a 256 MiB log file                   | Time to load fully  | 93.1 ms   |
+| What memory does a huge file cost?        | Open a 256 MiB log file                   | Peak memory         | 267.2 MiB |
+| Does a pathological file break it?        | Open a 64 MiB file with one line          | Time to first frame | 25.6 ms   |
+| Are commands instant?                     | Show the Command Palette                  | Key to frame        | 0.44 ms   |
+| Is typing instant in a big file?          | Type in an 8 MiB Python file              | Key to frame        | 0.43 ms   |
+| Is pasting a lot of text fast?            | Paste 1 MiB into an 8 MiB Python file     | Key to frame        | 2.47 ms   |
+| Is scrolling smooth?                      | Scroll and jump in an 8 MiB Markdown file | Missed refreshes    | 0.0 %     |
+| Is multi-cursor editing instant at scale? | Type at 10,000 carets                     | Key to frame        | 4.37 ms   |
+
+Medians of the Performance Benchmark v1 on an AMD Ryzen 9 9950X (Windows 11);
+full results in `Performance.md`.
+
+- With spelling on, the first marks of a 1 MiB text file follow the first
+  frame by 12.4 ms; scrolling shows complete marks within 5.3-5.9 ms (p95)
+  and `F8` selects a misspelling 4 MiB ahead in 38.7 ms. With spelling off
+  nothing runs.
+- Startup, scrolling, typing, pasting and multi-cursor editing are as fast
+  as in 0.5.2 (same-session A/B).
+
 ## [0.5.2] - 2026-10-30
 
 ### Fixed

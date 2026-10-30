@@ -1,5 +1,7 @@
 # Spelling 001
 
+Status: Fixed (2026_10_30). See [Final Status](#final-status).
+
 ## Task
 
 Mark misspelled English words in plain text and Markdown files, and offer
@@ -288,9 +290,10 @@ transaction through a fakeable storage boundary like `favorites::Storage`:
    them, the word stays for the session with a notice, and the file is
    unchanged.
 4. Write a sibling temporary file and rename it over the file.
-5. Re-read and verify that every merged word is there; if another writer
-   replaced the file meanwhile, repeat from 1, at most three times, then
-   report and keep the word for the session.
+5. No re-read or retry (operator decision, 2026_10_30): one user on one
+   computer cannot make two writes within milliseconds of each other, so
+   closely timed writers are out of scope. Words added by other sessions
+   earlier are kept by the merge.
 
 An unreadable or invalid file is never written; additions then last for
 the session. Additions made before the first read are applied after it.
@@ -821,3 +824,293 @@ the user chose a wavy blue underline and the status line hint.
 - Outcome: User chose the mark: a wavy underline in a blue `spelling`
   theme color (text color unchanged) plus the status line hint, drawn by a
   pattern display-list item. Ready for re-review.
+
+## Implementation Notes
+
+The user ordered the implementation before a re-review, asking that
+nothing be lost on performance. Deliberate differences from the design:
+
+- **Word list:** generated at build time by
+  [crates/rte_spell/build.rs](../crates/rte_spell/build.rs), which expands
+  the affixes of the shipped Hunspell `en_US` files (SCOWL 2020.12.07,
+  fetched and verified by
+  [tools/Get-Dictionaries.ps1](../tools/Get-Dictionaries.ps1) like the
+  fonts), instead of a committed list from `xtask spelling-words`. Both
+  engines start from the same dictionary. The list is 1.19 MB; the
+  executable grew by 1.62 MiB (34,604,032 against 32,904,192 bytes), not
+  about 0.5 MiB.
+- **Markdown exclusions:** the syntax worker answers only from a host tree
+  that is a current parse of the whole file
+  ([`Session::host_is_whole`](../crates/rte_syntax/src/session.rs)), parsing
+  the inline elements of the asked range on demand
+  ([`MarkdownMask`](../crates/rte_syntax/src/mask.rs)). Excluded text counts
+  as spaces, so `[word](url)` still checks `word`. Since every answer is
+  authoritative for its text, a later syntax result cannot change it: no
+  resubmission on syntax results is needed. The mask uses no injected
+  layers, so `syntax.injections: false` keeps Markdown checked; it is
+  unavailable only with highlighting off or above `syntax.maxFileMiB`.
+- **Drawn ranges:** the bytes of the visible columns of each row
+  (`offset_at_column`) and the drawn tail of a long line, cached per text and
+  view.
+- **Marks after edits:** a second document journal, recorded only while
+  spelling runs, maps the marks; undo and redo are not journaled, so their
+  marks wait for the reply.
+- **Benchmarks:** P01-P06 run when named in `--only` or with `--spelling`,
+  so the default suite keeps its 60 s cap; P03 has a 6 s cap; `--spelling`
+  adds 3 s to the caps of the existing input tests (a Markdown script starts
+  after the whole-file parse).
+- **Not measured separately:** the UI frame p95 while P04 scans. The scan
+  runs on the spelling thread; the UI thread receives only its result (and
+  progress after 200 ms).
+
+## Implementer
+
+### 2026_10_30 - Claude Opus 5.5
+
+- Role: Implementer
+- Activity: Implementation
+- Agent: GitHub Copilot
+- Model: Claude Opus 5.5
+- Effort: High
+- Context Window: 872K
+- Outcome: Implemented `rte_spell` (words, front end, built-in and Hunspell
+  engines, suggestions, user dictionary), the Windows engine in
+  `rte_platform`, Markdown masks in `rte_syntax` and the syntax worker, the
+  spelling thread (lanes, identity, bounds, resumable navigation,
+  persistence transaction) and the UI (wave marks, status hint, Spelling
+  palette, commands, `F8`, configuration, `--spelling`), packaging and
+  P01-P06. All three engines met the acceptance criteria on the reference
+  machine; the disabled path matched v0.5.2 in an A/B run. The design was
+  not re-reviewed by Sol after its revision.
+
+## Validation Results
+
+Commands (all passed):
+
+```powershell
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test -p rte_spell -p rte_syntax -p rte_view -p rte_render -p rte_app -p xtask
+cargo test -p rte_platform spell
+cargo xtask check-imports
+cargo xtask package
+cargo xtask bench-perf --only L01,L02,L07,S01,S02            # A/B, 3 rounds each
+cargo xtask bench-perf --only P01,P02,P03,P04,P05,P06 [--spelling hunspell|windows]
+cargo xtask bench-perf --only L01,L02,L07,S01,S02 --spelling builtin|hunspell|windows
+```
+
+- **Tests:** `rte_spell` 10, `rte_syntax` 32, `rte_view` 39, `rte_render`
+  10, `rte_app` 177 (1 existing ignore), `xtask` 11, `rte_platform spell` 1.
+  The Windows engine test ran natively with `en-US` installed (not
+  skipped).
+- **Imports:** unchanged from v0.5.2 (`bcryptprimitives`,
+  `api-ms-win-core-synch-l1-2-0`, `dwmapi`, `gdi32`, `kernel32`, `ntdll`,
+  `user32`, `ADVAPI32`, `msvcrt`); COM loads at run time.
+- **Package:** the ZIP holds `Dictionaries/en_US.aff`, `en_US.dic` and
+  `README_en_US.txt`. The extracted package with `--spelling hunspell`
+  loaded them (first marks 18.0 ms after the first paint, peak 9.05 MiB,
+  against 8.0 ms and 7.19 MiB with `builtin`).
+
+Disabled path against v0.5.2 (HEAD, built separately), 3 alternating rounds,
+median of the round medians; S01/S02 without missed refreshes in every round:
+
+| Test | Metric             | v0.5.2 | New  |
+| ---- | ------------------ | ------ | ---- |
+| L01  | First paint [ms]   | 16.7   | 16.4 |
+| L01  | Peak private [MiB] | 5.0    | 5.0  |
+| L02  | First paint [ms]   | 17.0   | 17.0 |
+| L02  | Peak private [MiB] | 5.4    | 5.3  |
+| L07  | First paint [ms]   | 16.7   | 17.0 |
+| L07  | Peak private [MiB] | 16.1   | 16.3 |
+| S01  | p95 [ms]           | 2.60   | 1.61 |
+| S02  | p95 [ms]           | 1.45   | 1.56 |
+
+Spelling on, per engine (59 Hz display, refresh 16.68 ms); no missed
+refresh in S01, S02 or P01-P03, and every key waited for its complete marks:
+
+| Test | Metric                                  | builtin     | hunspell    | windows     |
+| ---- | --------------------------------------- | ----------- | ----------- | ----------- |
+| L01  | First paint [ms]                        | 16.7        | 16.6        | 16.7        |
+| L02  | First paint [ms]                        | 16.9        | 16.9        | 16.8        |
+| L07  | First paint [ms]                        | 17.2        | 16.7        | 17.2        |
+| S01  | p95 key to marks [ms]                   | 3.55        | 3.66        | 3.53        |
+| S02  | p95 key to marks [ms]                   | 3.96        | 3.86        | 3.59        |
+| P01  | p95 / max key to marks [ms]             | 3.55 / 4.56 | 3.60 / 4.58 | 3.53 / 4.73 |
+| P02  | p95 / max key to marks [ms]             | 3.55 / 4.52 | 3.77 / 4.07 | 3.85 / 4.62 |
+| P03  | p95 / max key to marks [ms]             | 5.98 / 7.10 | 5.71 / 7.26 | 5.70 / 6.86 |
+| P04  | Key to selection, median [ms]           | 38.4        | 37.3        | 37.4        |
+| P05  | Key to suggestions, median [ms]         | 5.29        | 9.48        | 1.74        |
+| P06  | First paint to first marks, median [ms] | 10.0        | 23.6        | 21.6        |
+| P06  | Peak private [MiB]                      | 7.0         | 9.0         | 7.2         |
+
+- Marks latency is within two refresh periods for `builtin` (33.3 ms) and
+  within 50 ms for `hunspell` and `windows`: all three engines are
+  admitted.
+- With spelling on, S02 starts about 1.2 s later: Markdown marks wait for
+  the whole-file parse of the 8 MiB file.
+- Not run: the full test suite and the full benchmark (not requested).
+- Pinned artifacts: SCOWL `hunspell-en_US-2020.12.07.zip` (SHA-256
+  `616348AD…75AF`), `spellbook` 0.4.2, Windows 11 Pro for Workstations
+  spell checker for `en-US`.
+
+## Sol Implementation Review
+
+### 2026_10_30 - GPT-6.1 Sol
+
+- Role: Reviewer
+- Activity: Review
+- Agent: GitHub Copilot
+- Model: GPT-6.1 Sol
+- Effort: High
+- Context Window: 1M
+- Outcome: Changes requested for SP001I1-I3, all reproducible within one
+  session. The operator excluded tightly timed cross-session dictionary
+  writes from actionable review scope. Existing focused tests and clippy
+  pass; three isolated assertions reproduce the issues below. No production
+  fixes authored; historical implementation/completion records are retained.
+
+### SP001I1 [P2] Dense views silently discard marks but report completion
+
+[drain_spelling](../crates/rte_app/src/editor/spell.rs#L451) adds every reply's
+coverage to `checked`, appends its marks, then truncates the accumulated
+list to 4,096. Later partial replies can therefore be discarded while their
+ranges are permanently treated as checked. A 2400 x 1800 headless view of
+repeated misspelled words has 6,438 visible words but retains only 4,096
+marks, has no missing ranges and reports `spelling_complete() == true`.
+Those discarded words also lack the caret hint and suggestions target.
+
+Keep the resource cap, but distinguish checked-and-represented coverage
+from truncated coverage and expose partial state explicitly. Define a
+bounded continuation/rendering policy for a view larger than the cap;
+never report it as completely marked merely because the worker visited
+the discarded ranges. Add dense-view and partial-reply aggregation tests,
+including scrolling into previously discarded regions. Probe:
+`review_complete_dense_view_does_not_silently_drop_misspellings`.
+
+### SP001I2 [P2] Add and Ignore fail for typographic-apostrophe words
+
+[`Checker::is_correct`](../crates/rte_spell/src/lib.rs#L99) normalizes U+2019
+to ASCII apostrophes before looking up overrides, but
+[`add_user` and `ignore`](../crates/rte_spell/src/lib.rs#L71) store the original
+spelling. A valid unknown word such as `zzq\u{2019}zzq` is accepted by the UI,
+briefly loses its mark, then is marked again when the next worker reply
+arrives. Both Add and Ignore reproduce through the real editor commands.
+
+Canonicalize override keys consistently at insertion and lookup, including
+words loaded from the user dictionary, while retaining the original text
+for display where needed. Test both apostrophe forms, Add and Ignore,
+rechecking, and persistence/reload. Probe:
+`review_added_typographic_apostrophe_word_stays_accepted`.
+
+### SP001I3 [P2] A generation reset can leave F8 permanently busy
+
+[`Spell::reset`](../crates/rte_app/src/editor/spell.rs#L167) increments the
+generation but leaves `nav` intact. Add/Ignore calls it while an F8 scan
+can still be in flight. Its eventual old-generation reply is rejected by
+[drain_spelling](../crates/rte_app/src/editor/spell.rs#L431), so the retained
+navigation cannot complete; subsequent F8 in the same direction returns
+early because `nav` still exists. `spelling_busy()` stays true until another
+action clears the state, such as toggling spelling or changing direction.
+
+Cancel the old navigation and clear its UI state during a generation reset,
+or explicitly resubmit its intent with current identity. Check every reset
+caller, not just Ignore. Test Add/Ignore during a long scan, kind changes,
+late old replies, busy-state completion and a subsequent F8. This concerns
+one user's interaction with a pending scan, not two competing sessions.
+Probe: `review_ignore_cancels_the_old_navigation_generation`.
+
+### Validation and Scope
+
+- 72 existing focused tests passed: `rte_spell` 10, `rte_syntax` 32,
+  application spelling 27, native Windows spelling 1, view spelling 1,
+  render waves 1. The native test ran with `en-US`; its skip path did not
+  print. Focused clippy passed.
+- Three current-source headless probes fail on the assertions above, exit
+  101. Their fixtures use fake application files, no user settings and no
+  system clipboard. The console harness changes only module/include routing
+  and the Windows subsystem attribute in memory; probes live under ignored
+  `target/`. Release dependency artifacts are selected from Cargo JSON,
+  with matching fat-LTO, one-codegen-unit and x86-64-v3 settings.
+- The earlier two-writer persistence probe is explicitly ignored after the
+  operator's scope clarification. It is not an approval blocker or a request
+  for cross-session coordination. No other timing race is substituted for it.
+- No fresh startup/performance benchmark or package verification was run;
+  the preceding implementer measurements are not new reviewer measurements.
+  No full test or performance suite was run.
+- Both existing task byte prefixes and production-source fingerprints are
+  checked after appending. The completed task's location and prior reviewer
+  records are unchanged; the old Plan copy links here without duplicating
+  the review findings.
+
+Commands run:
+
+```powershell
+cargo test -p rte_spell -p rte_syntax --locked
+cargo test -p rte_app spell --locked | Out-String
+cargo test -p rte_platform spell --locked -- --nocapture
+cargo test -p rte_view spell --locked
+cargo test -p rte_render wave --locked
+cargo clippy -p rte_spell -p rte_syntax -p rte_app -p rte_platform --all-targets --locked -- -D warnings
+./target/spelling-sol-review.ps1
+```
+
+## Sol Implementation Review Response
+
+### 2026_10_30 - Claude Opus 5.5
+
+Operator scope rule: the application serves one user on one computer;
+nothing protects against events closer together than a person can act
+(about 10 ms). All three findings are reachable at human pace and are
+fixed; the persistence retry loop, which only guarded closely timed
+writers, is removed.
+
+- **SP001I1:** fixed. The UI no longer truncates the accumulated marks:
+  they are already bounded by the visible rows (marks outside the view are
+  dropped on each sync), and each reply stays capped at 4,096. Test
+  `dense_views_keep_every_visible_mark` (2400 x 1800 view, more than 4,096
+  visible misspellings, all marked, complete).
+- **SP001I2:** fixed. `Checker::add_user` and `ignore` store the
+  normalized word (typographic apostrophe as `'`), as lookups do; words
+  read from the user dictionary go through `add_user`. Test
+  `overrides_match_both_apostrophes`.
+- **SP001I3:** fixed. `Spell::reset` (Add, Ignore, engine fallback, kind
+  change) cancels a running scan and clears its state. Test
+  `ignore_during_a_scan_cancels_it` (Ignore during a scan of 4 MiB, then
+  `F8` finds the next word).
+- **Persistence:** `persist` is read, merge, write; the re-read check and
+  its three retries are gone (Design, Persistence, step 5).
+
+### Implementer
+
+#### 2026_10_30 - Claude Opus 5.5
+
+- Role: Implementer
+- Activity: Implementation
+- Agent: GitHub Copilot
+- Model: Claude Opus 5.5
+- Effort: High
+- Context Window: 872K
+- Outcome: Fixed SP001I1-I3 and simplified persistence per the operator's
+  scope rule. Focused tests and clippy pass.
+
+### Validation Results
+
+```powershell
+cargo fmt --all
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test -p rte_spell             # 11 passed
+cargo test -p rte_app               # 180 passed, 1 existing ignore
+```
+
+Not run: Sol's ignored-`target/` probes, the full test suite and the
+benchmarks (no change to the measured paths besides dropping a truncate).
+
+## Final Status
+
+Fixed. The design findings SP001R1-R6 were resolved in the design, and the
+implementation findings SP001I1-I3 are fixed. Later spelling fixes from
+[Code Review 001](CodeReview001.md): C2 (missing and swapped letters rank
+before wrong ones), S3 (marks past the long-line seam) and S5 (Markdown
+masks seek to the requested range). The stale `Plan/Spelling001.md` copy
+was removed; its only extra text was the superseded persistence retry and
+Sol's pointer record to the review above.

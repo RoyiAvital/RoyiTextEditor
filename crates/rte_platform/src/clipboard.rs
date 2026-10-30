@@ -15,14 +15,17 @@ use crate::wide;
 
 const CF_UNICODETEXT: u32 = 13;
 
-/// Opens the clipboard, retrying briefly while another process holds it.
+/// Opens the clipboard, retrying briefly while another process holds it
+/// (at most 20 ms of waiting on the calling thread).
 fn open(hwnd: HWND) -> bool {
-    for _ in 0..10 {
+    for attempt in 0..5 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         // SAFETY: plain Win32 call with a valid window handle.
         if unsafe { OpenClipboard(hwnd) } != 0 {
             return true;
         }
-        std::thread::sleep(std::time::Duration::from_millis(5));
     }
     false
 }

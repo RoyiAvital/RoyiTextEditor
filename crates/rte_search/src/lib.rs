@@ -190,8 +190,14 @@ fn short_error(text: &str) -> String {
     }
 }
 
+/// Letters, digits, `_` and zero-width marks (an accent belongs to its word,
+/// as in VS Code, which splits words only at separators).
 fn is_word(ch: Option<char>) -> bool {
-    ch.is_some_and(|c| c.is_alphanumeric() || c == '_')
+    ch.is_some_and(|c| {
+        c.is_alphanumeric()
+            || c == '_'
+            || (c > '\u{7F}' && unicode_width::UnicodeWidthChar::width(c) == Some(0))
+    })
 }
 
 /// Resumable state of an in-order match enumeration over `from..end`

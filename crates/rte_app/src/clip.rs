@@ -13,26 +13,33 @@ use rte_text::LineEnding;
 pub const FORMAT: &str = "RoyiTextEditor.Selections";
 const MAGIC: &[u8; 4] = b"RTE1";
 
-/// Plain text and private data for `clip`. Invalid UTF-8 becomes U+FFFD;
-/// valid pieces are borrowed and copied once, into the result.
-pub fn encode(clip: &Clip, line_ending: LineEnding) -> (String, Vec<u8>) {
-    let pieces: Vec<Cow<'_, str>> = clip
-        .pieces
-        .iter()
-        .map(|p| String::from_utf8_lossy(p))
-        .collect();
+/// Plain text and private data for `clip`. Invalid UTF-8 becomes U+FFFD.
+/// A single valid piece becomes the text without a copy; other valid pieces
+/// are copied once, into the result.
+pub fn encode(clip: Clip, line_ending: LineEnding) -> (String, Vec<u8>) {
+    let mut data = MAGIC.to_vec();
+    data.push(u8::from(clip.line_mode));
     let separator = if clip.line_mode {
         ""
     } else {
         std::str::from_utf8(line_ending.as_bytes()).expect("ASCII")
     };
+    data.push(separator.len() as u8);
+    data.extend_from_slice(&(clip.pieces.len() as u32).to_le_bytes());
+    let mut raw = clip.pieces;
+    if raw.len() == 1 {
+        match String::from_utf8(raw.pop().expect("one piece")) {
+            Ok(text) => {
+                data.extend_from_slice(&(text.len() as u32).to_le_bytes());
+                return (text, data);
+            }
+            Err(e) => raw.push(e.into_bytes()),
+        }
+    }
+    let pieces: Vec<Cow<'_, str>> = raw.iter().map(|p| String::from_utf8_lossy(p)).collect();
     let len = pieces.iter().map(|p| p.len()).sum::<usize>()
         + separator.len() * pieces.len().saturating_sub(1);
     let mut text = String::with_capacity(len);
-    let mut data = MAGIC.to_vec();
-    data.push(u8::from(clip.line_mode));
-    data.push(separator.len() as u8);
-    data.extend_from_slice(&(pieces.len() as u32).to_le_bytes());
     for (i, piece) in pieces.iter().enumerate() {
         if i > 0 {
             text.push_str(separator);
@@ -105,7 +112,7 @@ mod tests {
             pieces: vec![b"ab".to_vec(), "\u{4E2D}".as_bytes().to_vec(), Vec::new()],
             line_mode: false,
         };
-        let (text, mut data) = encode(&clip, LineEnding::CrLf);
+        let (text, mut data) = encode(clip.clone(), LineEnding::CrLf);
         assert_eq!(text, "ab\r\n\u{4E2D}\r\n");
         data.extend_from_slice(&[0; 7]);
         assert_eq!(decode(text, Some(&data)), clip);
@@ -113,14 +120,25 @@ mod tests {
             pieces: vec![b"x\n".to_vec(), b"y\n".to_vec()],
             line_mode: true,
         };
-        let (text, data) = encode(&lines, LineEnding::Lf);
+        let (text, data) = encode(lines.clone(), LineEnding::Lf);
         assert_eq!(decode(text, Some(&data)), lines);
         let line = Clip {
             pieces: vec![b"one line\n".to_vec()],
             line_mode: true,
         };
-        let (text, one) = encode(&line, LineEnding::Lf);
+        let (text, one) = encode(line.clone(), LineEnding::Lf);
         assert_eq!(decode(text, Some(&one)), line);
+        // A single piece with invalid UTF-8 is replaced, and its length follows.
+        let invalid = Clip {
+            pieces: vec![b"a\xFFb".to_vec()],
+            line_mode: false,
+        };
+        let (text, data) = encode(invalid, LineEnding::Lf);
+        assert_eq!(text, "a\u{FFFD}b");
+        assert_eq!(
+            decode(text, Some(&data)).pieces,
+            vec!["a\u{FFFD}b".as_bytes().to_vec()]
+        );
         // Text replaced by another program, or no private data: plain text.
         let plain = decode("other".to_owned(), Some(&data));
         assert_eq!(plain.pieces, vec![b"other".to_vec()]);

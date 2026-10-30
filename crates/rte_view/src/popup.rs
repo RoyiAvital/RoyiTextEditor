@@ -83,6 +83,18 @@ impl PaletteGeometry {
     /// `top`: first pixel row below the title strip; `count`: rows to show.
     /// The palette moves up over the title strip when the client is too low.
     pub fn new(width: u32, height: u32, top: i32, cell: Cell, count: usize) -> PaletteGeometry {
+        PaletteGeometry::with_rows(width, height, top, cell, count, PALETTE_ROWS)
+    }
+
+    /// [`PaletteGeometry::new`] showing at most `max_rows` rows.
+    pub fn with_rows(
+        width: u32,
+        height: u32,
+        top: i32,
+        cell: Cell,
+        count: usize,
+        max_rows: usize,
+    ) -> PaletteGeometry {
         let (cw, ch) = (cell.width.max(1), cell.height.max(1));
         let pad = ch / 3;
         let window_cols = width / cw;
@@ -108,7 +120,7 @@ impl PaletteGeometry {
         let list_y = input.y + (input.h + pad) as i32;
         let avail = (height as i32 - list_y - (pad + 1) as i32).max(0) as u32;
         let rows = count
-            .clamp(1, PALETTE_ROWS)
+            .clamp(1, max_rows.max(1))
             .min((avail / row_h).max(1) as usize);
         let list = Rect {
             x: x + 1,
@@ -161,12 +173,16 @@ impl PaletteGeometry {
 #[derive(Clone, Copy, Debug)]
 pub enum PaletteRow<'a> {
     Header(&'a str),
+    /// A line between groups of rows.
+    Separator,
     Command {
         label: &'a str,
         /// Sorted character indices of `label` matching the query.
         matched: &'a [u32],
         keys: &'a str,
-        starred: bool,
+        /// Favorites star: `Some(starred)`; `None` for rows that cannot be
+        /// favorites (choices).
+        star: Option<bool>,
         enabled: bool,
     },
 }
@@ -253,34 +269,51 @@ pub fn draw_palette<'a>(
             PaletteRow::Header(text) => {
                 text_run(&mut out.glyphs, text, r.x + cw, y, cell, theme.popup_dim, r);
             }
+            PaletteRow::Separator => {
+                let h = (cell.height / 16).max(1);
+                out.fill(
+                    Rect {
+                        x: r.x + cw,
+                        y: r.y + ((r.h - h) / 2) as i32,
+                        w: r.w.saturating_sub(2 * cell.width),
+                        h,
+                    },
+                    theme.popup_border,
+                );
+            }
             PaletteRow::Command {
                 label,
                 matched,
                 keys,
-                starred,
+                star,
                 enabled,
             } => {
                 if f.selected == Some(i) {
                     out.fill(r, theme.popup_selected);
                 }
-                let area = g.star_area(i, cell);
-                let size = cell.height.min(2 * cell.width) * 4 / 5;
-                out.stars.push(Star {
-                    rect: Rect {
-                        x: area.x + (area.w.saturating_sub(size) / 2) as i32,
-                        y: area.y + (area.h.saturating_sub(size) / 2) as i32,
-                        w: size,
-                        h: size,
-                    },
-                    color: if starred {
-                        theme.favorite
-                    } else {
-                        theme.popup_dim
-                    },
-                    filled: starred,
-                });
+                if let Some(starred) = star {
+                    let area = g.star_area(i, cell);
+                    let size = cell.height.min(2 * cell.width) * 4 / 5;
+                    out.stars.push(Star {
+                        rect: Rect {
+                            x: area.x + (area.w.saturating_sub(size) / 2) as i32,
+                            y: area.y + (area.h.saturating_sub(size) / 2) as i32,
+                            w: size,
+                            h: size,
+                        },
+                        color: if starred {
+                            theme.favorite
+                        } else {
+                            theme.popup_dim
+                        },
+                        filled: starred,
+                    });
+                }
                 let keys_x = r.x + r.w as i32 - cw - (keys.width() as u32 * cell.width) as i32;
-                let label_x = r.x + (STAR_COLS * cell.width) as i32;
+                let label_x = match star {
+                    Some(_) => r.x + (STAR_COLS * cell.width) as i32,
+                    None => r.x + cw,
+                };
                 let clip = Rect {
                     w: (keys_x - cw - r.x).max(0) as u32,
                     ..r
@@ -570,6 +603,14 @@ mod tests {
         let small = PaletteGeometry::new(300, 120, 30, CELL, 40);
         assert_eq!(small.rows, 1);
         assert!(small.panel.x >= 0);
+        // A longer palette, still within the window and its rows.
+        let long = PaletteGeometry::with_rows(1000, 700, 30, CELL, 40, PALETTE_ROWS + 1);
+        assert_eq!(long.rows, PALETTE_ROWS + 1);
+        assert_eq!(long.panel.h, g.panel.h + g.row_h);
+        assert_eq!(
+            PaletteGeometry::with_rows(1000, 700, 30, CELL, 3, 20).rows,
+            3
+        );
     }
 
     #[test]
@@ -603,7 +644,7 @@ mod tests {
                 label: "File: Save",
                 matched: &[6, 7],
                 keys: "Ctrl+S",
-                starred: true,
+                star: Some(true),
                 enabled: true,
             },
         ];
@@ -640,6 +681,44 @@ mod tests {
                 .iter()
                 .any(|f| f.rect == g.row(1) && f.color == Theme::DARK.popup_selected)
         );
+    }
+
+    /// Choices have no star and start one column in; a separator is a
+    /// line across its row.
+    #[test]
+    fn choice_rows_have_no_star_and_separators_draw_a_line() {
+        let g = PaletteGeometry::new(1000, 700, 30, CELL, 3);
+        let choice = |label| PaletteRow::Command {
+            label,
+            matched: &[],
+            keys: "",
+            star: None,
+            enabled: true,
+        };
+        let rows = [choice("receive"), PaletteRow::Separator, choice("Ignore")];
+        let mut out = Layer::default();
+        let frame = PaletteFrame {
+            cell: CELL,
+            theme: &Theme::DARK,
+            query: "",
+            caret: 0,
+            selection: (0, 0),
+            placeholder: "",
+            empty: "",
+            selected: Some(0),
+        };
+        draw_palette(&g, &frame, rows, &mut out);
+        assert!(out.stars.is_empty());
+        assert_eq!(text(&out, g.row(0)), "receive");
+        let first = out.glyphs.iter().find(|gl| gl.ch == 'r').unwrap();
+        assert_eq!(first.x, g.row(0).x + CELL.width as i32);
+        assert_eq!(text(&out, g.row(1)), "");
+        let line = out
+            .fills
+            .iter()
+            .find(|f| f.color == Theme::DARK.popup_border && g.row(1).contains(f.rect.x, f.rect.y))
+            .unwrap();
+        assert!(line.rect.h < g.row_h && line.rect.w > g.row(1).w / 2);
     }
 
     #[test]

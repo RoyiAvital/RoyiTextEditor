@@ -23,6 +23,8 @@ pub enum Mode {
     Symbol,
     /// Go to Line/Column: one row describing the parsed query.
     Line,
+    /// Suggestions and commands for a misspelled word.
+    Spelling,
 }
 
 /// Rows of a choice mode: label and right-aligned hint.
@@ -32,11 +34,16 @@ pub struct Choices {
     pub hints: Vec<String>,
     /// Choices kept in list order (symbols), not sorted by score.
     pub keep_order: bool,
+    /// Group of each choice (empty: one group). Groups are listed in
+    /// order, a separator between them; sorting applies within a group.
+    pub groups: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Item {
     Header(&'static str),
+    /// A line between groups of choices.
+    Separator,
     Command {
         /// Index into [`COMMANDS`].
         index: usize,
@@ -237,6 +244,8 @@ pub struct Palette {
     pub selected: Option<usize>,
     /// First visible item.
     pub first: usize,
+    /// Most rows shown; `None`: the default. Reset when the mode changes.
+    pub max_rows: Option<usize>,
     matcher: Matcher,
     /// Score, command and matched range of one section (reused).
     scored: Vec<(i32, usize, Range<usize>)>,
@@ -252,6 +261,7 @@ impl Palette {
             matched: Vec::new(),
             selected: None,
             first: 0,
+            max_rows: None,
             matcher: Matcher::default(),
             scored: Vec::new(),
         };
@@ -277,7 +287,7 @@ impl Palette {
                     (0..COMMANDS.len()).filter(|i| store.is_favorite(*i) && !recent.contains(i));
                 self.push_matches(Some("favorites"), favorites);
             }
-            Mode::Language | Mode::Symbol => self.push_choices(),
+            Mode::Language | Mode::Symbol | Mode::Spelling => self.push_choices(),
             // The editor sets the one row from the query.
             Mode::Line => {
                 if !self.choices.labels.is_empty() {
@@ -299,6 +309,7 @@ impl Palette {
         self.mode = mode;
         self.choices = choices;
         self.query = Query::default();
+        self.max_rows = None;
     }
 
     fn push_choices(&mut self) {
@@ -312,11 +323,18 @@ impl Palette {
         if !self.choices.keep_order {
             self.scored.sort_by_key(|(score, ..)| Reverse(*score));
         }
-        self.items.extend(
-            self.scored
-                .drain(..)
-                .map(|(_, index, matched)| Item::Choice { index, matched }),
-        );
+        let groups = &self.choices.groups;
+        let group = |index: usize| groups.get(index).copied().unwrap_or(0);
+        // Stable: each group keeps its score or list order.
+        self.scored.sort_by_key(|&(_, index, _)| group(index));
+        let mut last = None;
+        for (_, index, matched) in self.scored.drain(..) {
+            if last.is_some_and(|g| g != group(index)) {
+                self.items.push(Item::Separator);
+            }
+            last = Some(group(index));
+            self.items.push(Item::Choice { index, matched });
+        }
     }
 
     /// Index into [`Palette::choices`] of the choice at `item`.
@@ -380,7 +398,7 @@ impl Palette {
         self.items
             .iter()
             .enumerate()
-            .filter(|(_, item)| !matches!(item, Item::Header(_)))
+            .filter(|(_, item)| !matches!(item, Item::Header(_) | Item::Separator))
             .map(|(i, _)| i)
     }
 
@@ -463,6 +481,7 @@ mod tests {
             .iter()
             .map(|item| match item {
                 Item::Header(h) => h,
+                Item::Separator => "---",
                 Item::Command { index, .. } => COMMANDS[*index].label,
                 Item::Choice { index, .. } => p.choices.labels[*index].as_str(),
             })
@@ -498,6 +517,7 @@ mod tests {
                 labels: names.iter().map(|s| s.to_string()).collect(),
                 hints: vec![String::new(); 4],
                 keep_order: false,
+                groups: Vec::new(),
             },
         );
         p.refresh(&store, 3);
@@ -511,6 +531,37 @@ mod tests {
         set_query(&mut p, "t", &store);
         p.move_selection(1, 10);
         assert!(p.selected.and_then(|i| p.choice_at(i)).is_some());
+    }
+
+    /// Groups keep their order, sorted within, with a separator between
+    /// groups that have rows; separators are never selected.
+    #[test]
+    fn choice_groups_are_separated() {
+        let store = Store::memory();
+        let mut p = Palette::new(Mode::All, &store, 3);
+        let names = ["receive", "recipe", "Add to Dictionary", "Ignore"];
+        p.set_choices(
+            Mode::Spelling,
+            Choices {
+                labels: names.iter().map(|s| s.to_string()).collect(),
+                hints: vec![String::new(); 4],
+                keep_order: true,
+                groups: vec![0, 0, 1, 1],
+            },
+        );
+        p.refresh(&store, 3);
+        assert_eq!(
+            labels(&p),
+            ["receive", "recipe", "---", "Add to Dictionary", "Ignore"]
+        );
+        assert_eq!(p.selected, Some(0));
+        p.move_selection(1, 10);
+        p.move_selection(1, 10);
+        assert_eq!(p.selected.and_then(|i| p.choice_at(i)), Some(2));
+        p.move_selection(-1, 10);
+        assert_eq!(p.selected.and_then(|i| p.choice_at(i)), Some(1));
+        set_query(&mut p, "ig", &store);
+        assert_eq!(labels(&p), ["Ignore"], "no separator without both groups");
     }
 
     #[test]

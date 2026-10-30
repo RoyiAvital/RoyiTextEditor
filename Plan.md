@@ -5,7 +5,6 @@
 - [Architecture](Plan/Architecture.md)
 - [Data Safety 001](Plan/DataSafety001.md)
 - [Minimap](Plan/Minimap.md)
-- [Spelling 001](Plan/Spelling001.md)
 
 ## Completed
 
@@ -17,3 +16,5 @@
 - [Syntax Performance](Done/SyntaxPerformance.md)
 - [Empty State and Drag and Drop](Done/EmptyStateAndDragDrop.md)
 - [M7 Polish](Done/M7Polish.md)
+- [Spelling 001](Done/Spelling001.md)
+- [Code Review 001](Done/CodeReview001.md)

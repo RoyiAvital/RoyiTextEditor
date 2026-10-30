@@ -51,9 +51,11 @@ pub mod vk {
     pub const VK_F2: u16 = 0x71;
     pub const VK_F3: u16 = 0x72;
     pub const VK_F4: u16 = 0x73;
+    pub const VK_F8: u16 = 0x77;
     pub const VK_F11: u16 = 0x7A;
     pub const VK_OEM_PLUS: u16 = 0xBB;
     pub const VK_OEM_MINUS: u16 = 0xBD;
+    pub const VK_OEM_PERIOD: u16 = 0xBE;
     /// `/` and `?` on US keyboards.
     pub const VK_OEM_2: u16 = 0xBF;
     /// `[` and `{` on US keyboards.
@@ -146,6 +148,12 @@ pub enum Action {
     ScrollPageDown,
     GoToLine,
     ToggleFullScreen,
+    ToggleSpelling,
+    SpellingSuggestions,
+    NextMisspelling,
+    PreviousMisspelling,
+    AddToDictionary,
+    IgnoreWord,
 }
 
 /// A key with exactly these modifiers.
@@ -733,6 +741,41 @@ pub static COMMANDS: &[CommandDef] = &[
         false,
         Action::ShrinkSelection,
     ),
+    command(
+        "royi.addToDictionary",
+        "Spelling: Add to Dictionary",
+        &[],
+        false,
+        Action::AddToDictionary,
+    ),
+    command(
+        "royi.ignoreWord",
+        "Spelling: Ignore Word",
+        &[],
+        false,
+        Action::IgnoreWord,
+    ),
+    command(
+        "royi.nextMisspelling",
+        "Spelling: Next Misspelling",
+        &[plain(VK_F8)],
+        false,
+        Action::NextMisspelling,
+    ),
+    command(
+        "royi.previousMisspelling",
+        "Spelling: Previous Misspelling",
+        &[shift(VK_F8)],
+        false,
+        Action::PreviousMisspelling,
+    ),
+    command(
+        "royi.spellingSuggestions",
+        "Spelling: Show Suggestions",
+        &[ctrl(VK_OEM_PERIOD)],
+        false,
+        Action::SpellingSuggestions,
+    ),
     chord(
         "workbench.action.editor.changeLanguageMode",
         "View: Change Language Mode",
@@ -796,6 +839,13 @@ pub static COMMANDS: &[CommandDef] = &[
         Action::ToggleFullScreen,
     ),
     command(
+        "royi.toggleSpelling",
+        "View: Toggle Spelling",
+        &[],
+        false,
+        Action::ToggleSpelling,
+    ),
+    command(
         "royi.toggleSyntaxHighlighting",
         "View: Toggle Syntax Highlighting",
         &[],
@@ -854,6 +904,7 @@ pub fn works_without_file(action: Action) -> bool {
             | Action::ToggleReadOnly
             | Action::ToggleSyntax
             | Action::ToggleFullScreen
+            | Action::ToggleSpelling
     )
 }
 
@@ -962,6 +1013,7 @@ pub fn key_text(b: Binding) -> String {
         VK_SUBTRACT => "Numpad-",
         VK_OEM_PLUS => "=",
         VK_OEM_MINUS => "-",
+        VK_OEM_PERIOD => ".",
         VK_OEM_2 => "/",
         VK_OEM_4 => "[",
         VK_OEM_5 => "\\",
@@ -1034,6 +1086,7 @@ mod tests {
             "Go",
             "Search",
             "Selection",
+            "Spelling",
             "View",
         ];
         for (i, c) in COMMANDS.iter().enumerate() {

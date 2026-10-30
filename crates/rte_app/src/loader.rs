@@ -30,6 +30,8 @@ pub struct FileInfo {
     pub indent_tabs: bool,
     /// Malformed UTF-16: the document must stay read-only and unsaved.
     pub malformed: bool,
+    /// The sampled lines break with a lone CR only (no LF): shown as one line.
+    pub cr_breaks: bool,
     /// The path does not exist yet.
     pub new_file: bool,
 }
@@ -171,6 +173,7 @@ fn read(
                     line_ending: LineEnding::CrLf,
                     indent_tabs: false,
                     malformed: false,
+                    cr_breaks: false,
                     new_file: true,
                 },
                 baseline: None,
@@ -278,6 +281,12 @@ fn read(
         // A file that changed size while loading keeps no hash; its stamp differs anyway.
         hash: hasher.filter(|_| loaded == stamp.size).map(|h| h.digest()),
     });
+    // Without LF a CR is lone, unless it ends the sample and the next byte is LF.
+    let cr_breaks = !sample.contains(&b'\n')
+        && sample.iter().position(|&b| b == b'\r').is_some_and(|i| {
+            let next = i as u64 + 1;
+            i + 1 < sample.len() || snapshot.to_vec(next..next + 1) != b"\n"
+        });
     // A stopped load starts no syntax work and publishes nothing.
     if stopped() {
         return Ok(());
@@ -292,6 +301,7 @@ fn read(
             line_ending: LineEnding::detect(&sample),
             indent_tabs: tabs > spaces,
             malformed,
+            cr_breaks,
             new_file: false,
         },
         baseline,
@@ -376,6 +386,23 @@ mod tests {
         assert_eq!(info.encoding, Encoding::Utf8Bom);
         assert_eq!(info.line_ending, LineEnding::CrLf);
         assert!(!info.malformed);
+        assert!(!info.cr_breaks);
+    }
+
+    #[test]
+    fn cr_only_line_breaks_are_flagged() {
+        assert!(done(&load_bytes("cr", b"a\rb\rc")).1.cr_breaks);
+        assert!(done(&load_bytes("cr_end", b"abc\r")).1.cr_breaks);
+        assert!(!done(&load_bytes("lf", b"a\rb\nc")).1.cr_breaks);
+        assert!(!done(&load_bytes("plain", b"abc")).1.cr_breaks);
+        // A CRLF pair around the end of the sample is not a lone CR.
+        let sample = LINE_ENDING_SAMPLE as usize;
+        for prefix in [sample - 2, sample - 1, sample] {
+            let mut bytes = vec![b'a'; prefix];
+            bytes.extend_from_slice(b"\r\nnext\r\n");
+            let name = format!("crlf_{prefix}");
+            assert!(!done(&load_bytes(&name, &bytes)).1.cr_breaks, "{prefix}");
+        }
     }
 
     #[test]

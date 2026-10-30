@@ -9,7 +9,10 @@ use std::ops::Range;
 use rte_text::{Bias, Change, ChangeSet, Snapshot};
 
 use crate::columns::COLUMN_SCAN_LIMIT;
-use crate::commands::{Command, EditKind, EditOptions, build, covered_lines, indent_unit};
+use crate::commands::{
+    Command, EditKind, EditOptions, build, covered_lines, indent_before, indent_unit,
+    last_non_blank_before,
+};
 use crate::motion::content_range;
 use crate::selection::{Selection, Selections};
 
@@ -462,19 +465,8 @@ pub fn newline_indent<'a>(
     let mut any = false;
     for sel in sels.as_slice() {
         let (brackets, colon) = rules_at(sel.start());
-        let content = content_range(s, s.line_of(sel.start()));
-        let upto = sel.start().min(content.start + COLUMN_SCAN_LIMIT as u64);
-        let prefix = s.to_vec(content.start..upto);
-        let indent: Vec<u8> = prefix
-            .iter()
-            .copied()
-            .take_while(|&b| b == b' ' || b == b'\t')
-            .collect();
-        let before = prefix
-            .iter()
-            .rev()
-            .find(|b| !matches!(b, b' ' | b'\t'))
-            .copied();
+        let indent = indent_before(s, sel.start());
+        let before = last_non_blank_before(s, sel.start());
         // The text after the selection, on the line where it ends.
         let end_line = content_range(s, s.line_of(sel.end()));
         let after = s

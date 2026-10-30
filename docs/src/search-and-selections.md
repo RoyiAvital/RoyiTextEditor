@@ -21,6 +21,12 @@ search wraps at the document ends. Press `Esc` to close the panel.
 
 Rest the pointer on a control of the panel to see its name and shortcut.
 
+- **Whole words** keep accents (combining marks) with their word, as in VS Code.
+- **Regular expressions** use Rust syntax. With look-around or
+  backreferences, write line breaks as `\n`: `.` with `(?s)` or `\s` does not
+  reach the next line. Such a pattern that backtracks heavily on a very long
+  line keeps the search busy until it finishes; `Esc` does not interrupt it.
+
 ## Replace and Select
 
 Press `Ctrl+H`, or click the arrow at the left of the panel, to show Replace. `Enter` in the Replace field replaces the

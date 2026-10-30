@@ -2,7 +2,9 @@
 param(
     [switch] $SearchPanel,
     [switch] $SyntaxCode,
-    [switch] $SyntaxLanguages
+    [switch] $SyntaxLanguages,
+    [switch] $Spelling,
+    [switch] $ReadOnlySave
 )
 
 $ErrorActionPreference = 'Stop'
@@ -19,10 +21,36 @@ $Modes = @()
 if ($SearchPanel) { $Modes += 'search' }
 if ($SyntaxCode) { $Modes += 'syntax-code' }
 if ($SyntaxLanguages) { $Modes += 'syntax-languages' }
+if ($Spelling) { $Modes += 'spelling' }
+if ($ReadOnlySave) { $Modes += 'read-only-save' }
 if ($Modes.Count -gt 1) { throw 'Choose only one screenshot mode.' }
 
 $IsSyntaxCapture = $SyntaxCode -or $SyntaxLanguages
-$Fixture = if ($IsSyntaxCapture) {
+$Fixture = if ($Spelling) {
+    $SpellingFixture = Join-Path $OutputDir 'Spelling.txt'
+    $SpellingSample = @'
+Recieve the package before the meeting starts.
+Spelling marks show misspelled words with a blue wave, like teh one here.
+Press Ctrl+. on a marked word to see suggestions first, then the commands.
+F8 moves to the next misspelling and Shift+F8 to the previous one.
+'@
+    [IO.File]::WriteAllText($SpellingFixture, $SpellingSample, (New-Object Text.UTF8Encoding $false))
+    $SpellingFixture
+} elseif ($ReadOnlySave) {
+    # The fixture gets the Read-only attribute; the editor refuses to save it.
+    $ReadOnlyFixture = Join-Path $OutputDir 'ReadOnly.txt'
+    if (Test-Path $ReadOnlyFixture) {
+        (Get-Item $ReadOnlyFixture).IsReadOnly = $false
+    }
+    $ReadOnlySample = @'
+This file has the Windows Read-only attribute.
+An edit is made and Ctrl+S is pressed: nothing is written.
+The unsaved dot turns orange and the status line explains why.
+'@
+    [IO.File]::WriteAllText($ReadOnlyFixture, $ReadOnlySample, (New-Object Text.UTF8Encoding $false))
+    (Get-Item $ReadOnlyFixture).IsReadOnly = $true
+    $ReadOnlyFixture
+} elseif ($IsSyntaxCapture) {
     $SyntaxFixture = Join-Path $OutputDir 'syntax-example.rs'
     $SyntaxSample = @'
 use std::collections::HashMap;
@@ -46,7 +74,7 @@ fn main() {
     $SyntaxFixture
 } else {
     # The editor screenshot shows these two lines (generated, like the syntax sample).
-    $TextFixture = Join-Path $OutputDir 'Untitled'
+    $TextFixture = Join-Path $OutputDir 'Notes.txt'
     $TextSample = "Text is the optimal universal IO interface`nText is the final frontier of interfaces`n"
     [IO.File]::WriteAllText($TextFixture, $TextSample, (New-Object Text.UTF8Encoding $false))
     $TextFixture
@@ -57,6 +85,10 @@ $OutputName = if ($SearchPanel) {
     'syntax-highlighted-code.png'
 } elseif ($SyntaxLanguages) {
     'syntax-language-picker.png'
+} elseif ($Spelling) {
+    'spelling.png'
+} elseif ($ReadOnlySave) {
+    'read-only-save.png'
 } else {
     'editor-screenshot.png'
 }
@@ -95,7 +127,11 @@ if (Test-Path $Output) {
     Remove-Item $Output -Force
 }
 
-$EditorProcess = Start-Process -FilePath $EditorExe -ArgumentList ('"{0}"' -f $Fixture) -PassThru
+$Arguments = @(('"{0}"' -f $Fixture))
+if ($Spelling) {
+    $Arguments = @('--spelling', 'builtin') + $Arguments
+}
+$EditorProcess = Start-Process -FilePath $EditorExe -ArgumentList $Arguments -PassThru
 try {
     if (-not $EditorProcess.WaitForInputIdle(10000)) {
         throw "The editor did not become idle while opening $Fixture."
@@ -144,6 +180,21 @@ try {
         [System.Windows.Forms.SendKeys]::SendWait('^a')
         [System.Windows.Forms.SendKeys]::SendWait('{BACKSPACE}')
     }
+    if ($Spelling) {
+        # The marks come from the spelling thread after the first frame; the caret stays
+        # on the first word (left of the palette), so its wave and the palette show together.
+        Start-Sleep -Milliseconds 800
+        [System.Windows.Forms.SendKeys]::SendWait('^{HOME}')
+        Start-Sleep -Milliseconds 300
+        [System.Windows.Forms.SendKeys]::SendWait('^.')
+        Start-Sleep -Milliseconds 800
+    }
+    if ($ReadOnlySave) {
+        [System.Windows.Forms.SendKeys]::SendWait('^{END}')
+        [System.Windows.Forms.SendKeys]::SendWait('{ENTER}A new line, not saved.')
+        [System.Windows.Forms.SendKeys]::SendWait('^s')
+        Start-Sleep -Milliseconds 500
+    }
     [void][DocsBuildCaptureV2]::DwmFlush()
 
     $Client = New-Object 'DocsBuildCaptureV2+Rect'
@@ -175,13 +226,19 @@ try {
 }
 finally {
     if (-not $EditorProcess.HasExited) {
-        [void]$EditorProcess.CloseMainWindow()
-        if (-not $EditorProcess.WaitForExit(5000)) {
+        # The refused save leaves unsaved changes: closing would only ask.
+        if (-not $ReadOnlySave) {
+            [void]$EditorProcess.CloseMainWindow()
+        }
+        if ($ReadOnlySave -or -not $EditorProcess.WaitForExit(5000)) {
             $EditorProcess.Kill()
             $EditorProcess.WaitForExit()
         }
     }
     $EditorProcess.Dispose()
+    if ($ReadOnlySave) {
+        (Get-Item $Fixture).IsReadOnly = $false
+    }
 }
 
 Write-Output $Output

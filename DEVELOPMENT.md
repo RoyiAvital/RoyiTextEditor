@@ -252,7 +252,7 @@ workflow only builds the book and shows a warning.
 
 `docs/src/SUMMARY.md` defines sections, page order and hierarchy. Content lives
 in separate files; the introduction is `docs/src/introduction.md`. The build
-reads the summary directly and regenerates all four screenshots for the book,
+reads the summary directly and regenerates all screenshots for the book,
 restoring existing source assets afterwards.
 
 Serve it locally with live reload:

@@ -69,6 +69,7 @@ impl Editor {
             labels: vec![label],
             hints: vec![String::new()],
             keep_order: true,
+            groups: Vec::new(),
         };
         if let Some(store) = &self.store {
             p.refresh(store, self.settings.recent_count);

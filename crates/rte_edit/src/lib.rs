@@ -30,8 +30,9 @@ pub use commands::{
 pub use history::{History, MAX_HISTORY_BYTES, MAX_HISTORY_STEPS, Step};
 pub use lines::{copy_lines, delete_lines, indent_lines, insert_line, line_blocks, move_lines};
 pub use motion::{
-    MOTION_SCAN_LIMIT, column_at, content_range, line_end, line_home, next_boundary,
-    offset_in_line, prev_boundary, snap_to_boundary, vertical, word_at, word_left, word_right,
+    LineWalk, MOTION_SCAN_LIMIT, Vertical, column_at, content_range, line_end, line_home,
+    next_boundary, offset_in_line, prev_boundary, snap_to_boundary, vertical, word_at, word_left,
+    word_right,
 };
 pub use multi::{add_cursors_vertical, box_select, cell_of, cursors_at_line_ends, select_lines};
 pub use selection::{Selection, Selections};

@@ -3,7 +3,7 @@
 
 use rte_text::Snapshot;
 
-use crate::motion::{column_at, content_range, offset_in_line};
+use crate::motion::{LineWalk, column_at, content_range, offset_in_line};
 use crate::selection::{Selection, Selections};
 
 /// `Ctrl+Alt+Up` / `Ctrl+Alt+Down`: adds a caret `lines` away from each
@@ -13,13 +13,14 @@ pub fn add_cursors_vertical(s: &Snapshot, sels: &Selections, lines: i64, tab: u3
     let last = s.line_count() - 1;
     let mut out: Vec<Selection> = sels.as_slice().to_vec();
     let mut primary = sels.primary_index();
+    let (mut source, mut target_walk) = (LineWalk::default(), LineWalk::default());
     for (i, sel) in sels.as_slice().iter().enumerate() {
         let target = s.line_of(sel.head) as i64 + lines;
         if target < 0 || target as u64 > last {
             continue;
         }
-        let goal = sel.goal.unwrap_or_else(|| column_at(s, sel.head, tab));
-        let pos = offset_in_line(s, content_range(s, target as u64), goal, tab);
+        let goal = sel.goal.unwrap_or_else(|| source.column(s, sel.head, tab));
+        let pos = target_walk.offset(s, target as u64, goal, tab);
         if i == sels.primary_index() {
             primary = out.len();
         }

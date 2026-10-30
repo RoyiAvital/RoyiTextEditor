@@ -29,16 +29,24 @@ Requirements: Windows 11, x64 CPU with AVX2.
 ## Usage
 
 ```text
-RoyiTextEditor.exe [--read-only] [--syntax <id>] [file]
+RoyiTextEditor.exe [--read-only] [--syntax <id>] [--spelling <engine>] [file]
 ```
 
-| Option          | Effect                                                                                     |
-| --------------- | ------------------------------------------------------------------------------------------ |
-| `--read-only`   | Open files without allowing edits                                                          |
-| `--syntax <id>` | Highlighting language, e.g. `json` ([ids](cli.md#syntax-ids)); `none` or `off` disables it |
+| Option                | Effect                                                                                     |
+| --------------------- | ------------------------------------------------------------------------------------------ |
+| `--read-only`         | Open files without allowing edits                                                          |
+| `--syntax <id>`       | Highlighting language, e.g. `json` ([ids](cli.md#syntax-ids)); `none` or `off` disables it |
+| `--spelling <engine>` | Spelling `off`, or on with `builtin`, `hunspell` or `windows`                              |
 
 New files are created only from the command line: a path that does not exist
 opens an empty document and the first save creates it.
+
+Unsaved changes show `●` in the title strip. A file with the Windows
+Read-only attribute is not saved: the `●` turns orange and the status line
+asks to clear the attribute and save again; the editor never changes
+attributes. A file whose lines end with a lone CR is shown as one line, and
+the status line says so. [Files and Saving](files-and-saving.md) describes
+these and the other unusual cases.
 
 ## One File per Session
 
@@ -122,10 +130,37 @@ indentation after an opening bracket, the matching bracket
 (<kbd>Shift</kbd>+<kbd>Alt</kbd>+<kbd>Right</kbd> / <kbd>Left</kbd>) and Go to
 Symbol (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>O</kbd>).
 
+## Spelling
+
+Spelling is off by default; turn it on with `spelling.enabled: true`,
+`--spelling builtin` or `View: Toggle Spelling`. US English words of plain
+text and Markdown prose get a blue wavy underline when misspelled (Markdown
+code, links, HTML and front matter are skipped; code files are not
+checked). With the caret on one, the status line shows
+`Spelling: recieve (Ctrl+.)`.
+
+- <kbd>Ctrl</kbd>+<kbd>.</kbd> lists suggestions first, then Add to
+  Dictionary, Ignore and Next/Previous Misspelling;
+  <kbd>Ctrl</kbd>+<kbd>.</kbd>, <kbd>Enter</kbd> fixes the word in one undo
+  step.
+- <kbd>F8</kbd> / <kbd>Shift</kbd>+<kbd>F8</kbd> select the next / previous
+  misspelled word, wrapping at the end of the file.
+- Engines (`spelling.engine`): `builtin` (a word list in the executable,
+  the default), `hunspell` (the shipped `Dictionaries/en_US` files, or the
+  pair named by `spelling.hunspell`) and `windows` (the Windows spell
+  checker for US English). An engine that cannot start is reported and the
+  built-in one is used.
+- Added words are kept in `UserSettings/Spelling/en_US.txt` for all
+  engines; ignored words last for the session.
+- Markdown is checked while syntax highlighting is on; with `--syntax none`
+  a Markdown file is checked as plain text.
+
+Details: [Spelling](spelling.md).
+
 ## Command Palette
 
 Every command is in the palette, grouped in families: `Application:`, `File:`,
-`Edit:`, `Selection:`, `Search:`, `Go:` and `View:`. Type any part of a name (for example
+`Edit:`, `Selection:`, `Search:`, `Go:`, `Spelling:` and `View:`. Type any part of a name (for example
 `fsave`), choose with <kbd>Up</kbd> / <kbd>Down</kbd>, run with
 <kbd>Enter</kbd> or a click, close with <kbd>Esc</kbd>.
 
@@ -136,6 +171,7 @@ Every command is in the palette, grouped in families: `Application:`, `File:`,
 - `Application: Keyboard Shortcuts` lists all keys; `Application: About` shows
   the version and links.
 - `View: Toggle Syntax Highlighting` turns highlighting off or on.
+- `View: Toggle Spelling` turns spelling off or on for the session.
 
 Favorites and recent commands are kept in `UserSettings/Palette.json` beside
 the executable.
@@ -148,12 +184,18 @@ values keep their defaults.
 
 ```yaml
 palette:
-  recentCount: 3          # recent commands listed by Ctrl+P, 0 to 20
+  recentCount: 3          # recent commands listed by Ctrl+P, 0 to 20 (0: none)
 editor:
-  multiCursorLimit: 10000 # most selections, 1 to 1,000,000
+  multiCursorLimit: 10000 # most selections, 1 to 1,000,000; more is refused
 search:
-  replaceAllMaxMiB: 512   # memory for one Replace All [MiB], 1 to 4096
+  replaceAllMaxMiB: 512   # memory for one Replace All [MiB], 1 to 4096; more is refused
 syntax:
   maxFileMiB: 32          # larger files are not highlighted, 1 to 1024
-  injections: true        # embedded languages (Markdown, HTML)
+  injections: true        # embedded languages (Markdown fences, HTML scripts and styles)
+spelling:
+  enabled: false          # mark misspelled words (plain text, Markdown prose)
+  engine: builtin         # builtin, hunspell or windows; a failing engine falls back to builtin
+  hunspell: Dictionaries/en_US  # .aff/.dic base, relative to the executable
 ```
+
+Every setting, its values and remarks: [Configuration](configuration.md).

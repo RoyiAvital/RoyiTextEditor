@@ -10,6 +10,7 @@ mod edits;
 #[cfg(any(test, feature = "generate"))]
 pub mod generate;
 mod highlight;
+mod mask;
 mod registry;
 mod session;
 
@@ -17,6 +18,7 @@ pub use alloc::install_allocator;
 pub use aware::{BRACKET_SCAN_LIMIT, Symbol, enclosing_node, matching_bracket, symbols};
 pub use edits::{changes_near, input_edits, input_edits_near};
 pub use highlight::{Highlighter, Span, highlighter, warm};
+pub use mask::MarkdownMask;
 pub use registry::{Grammar, LANGUAGES, Lang, MARKDOWN_INLINE, by_fence, by_id, detect};
 pub use session::{Painter, Session, View, WINDOW, WINDOW_THRESHOLD, Work};
 pub use tree_sitter::InputEdit;

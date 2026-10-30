@@ -8,7 +8,7 @@ use rte_text::{Bias, ChangeSet, Edit, EditError, LineEnding, Snapshot, Transacti
 
 use crate::columns::COLUMN_SCAN_LIMIT;
 use crate::motion::{
-    column_at, content_range, line_end, next_boundary, prev_boundary, word_left, word_right,
+    LineWalk, content_range, line_end, next_boundary, prev_boundary, word_left, word_right,
 };
 use crate::selection::{Selection, Selections};
 
@@ -140,22 +140,55 @@ pub fn insert(s: &Snapshot, sels: &Selections, text: &[u8], opts: &EditOptions) 
     }
 }
 
+/// Leading spaces and tabs of the line holding `pos`, up to `pos` (at most
+/// [`COLUMN_SCAN_LIMIT`] bytes). Reads only the indentation.
+pub(crate) fn indent_before(s: &Snapshot, pos: u64) -> Vec<u8> {
+    let start = content_range(s, s.line_of(pos)).start;
+    let upto = pos.min(start + COLUMN_SCAN_LIMIT as u64);
+    let mut indent = Vec::new();
+    for chunk in s.chunks(start..upto) {
+        let n = chunk
+            .iter()
+            .take_while(|&&b| b == b' ' || b == b'\t')
+            .count();
+        indent.extend_from_slice(&chunk[..n]);
+        if n < chunk.len() {
+            break;
+        }
+    }
+    indent
+}
+
+/// The last byte before `pos` on its line that is not a space or tab;
+/// `None` when there is none within [`COLUMN_SCAN_LIMIT`] bytes.
+pub(crate) fn last_non_blank_before(s: &Snapshot, pos: u64) -> Option<u8> {
+    let start = content_range(s, s.line_of(pos))
+        .start
+        .max(pos.saturating_sub(COLUMN_SCAN_LIMIT as u64));
+    let mut end = pos;
+    while end > start {
+        let from = end.saturating_sub(256).max(start);
+        let found = s
+            .to_vec(from..end)
+            .into_iter()
+            .rev()
+            .find(|b| !matches!(b, b' ' | b'\t'));
+        if found.is_some() {
+            return found;
+        }
+        end = from;
+    }
+    None
+}
+
 /// `Enter`: a line break plus the indentation before the caret.
 pub fn newline(s: &Snapshot, sels: &Selections, opts: &EditOptions) -> Command {
     let edits = sels
         .as_slice()
         .iter()
         .map(|sel| {
-            let content = content_range(s, s.line_of(sel.start()));
-            let upto = sel.start().min(content.start + COLUMN_SCAN_LIMIT as u64);
-            let prefix = s.to_vec(content.start..upto);
-            let indent: Vec<u8> = prefix
-                .iter()
-                .copied()
-                .take_while(|&b| b == b' ' || b == b'\t')
-                .collect();
             let mut text = opts.line_ending.as_bytes().to_vec();
-            text.extend_from_slice(&indent);
+            text.extend_from_slice(&indent_before(s, sel.start()));
             (sel.range(), text)
         })
         .collect();
@@ -271,12 +304,13 @@ pub fn tab(s: &Snapshot, sels: &Selections, opts: &EditOptions) -> Command {
         };
     }
     let tab = u64::from(opts.tab_width.max(1));
+    let mut walk = LineWalk::default();
     let edits = sels
         .as_slice()
         .iter()
         .map(|sel| {
             let text = if opts.insert_spaces {
-                let col = column_at(s, sel.start(), opts.tab_width);
+                let col = walk.column(s, sel.start(), opts.tab_width);
                 vec![b' '; (tab - col % tab) as usize]
             } else {
                 b"\t".to_vec()

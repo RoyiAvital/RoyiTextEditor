@@ -10,6 +10,7 @@
 
 mod clipboard;
 pub mod files;
+pub mod spell;
 
 use std::ffi::c_void;
 use std::ptr::{null, null_mut};

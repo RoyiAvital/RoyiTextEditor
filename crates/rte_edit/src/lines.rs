@@ -166,14 +166,16 @@ pub fn delete_lines(s: &Snapshot, sels: &Selections, opts: &EditOptions) -> Code
     let blocks = line_blocks(s, sels);
     let mut ranges = Vec::new();
     let mut targets = Vec::new();
+    // Sorted selections and blocks: one forward pass finds each block's first selection.
+    let all = sels.as_slice();
+    let mut next = 0;
     for &(a, b) in &blocks {
         let start = line_start(s, a);
         let end = next_start(s, b);
-        let head = sels
-            .as_slice()
-            .iter()
-            .find(|sel| s.line_of(sel.start()) >= a)
-            .map_or(start, |sel| sel.head);
+        while next < all.len() && s.line_of(all[next].start()) < a {
+            next += 1;
+        }
+        let head = all.get(next).map_or(start, |sel| sel.head);
         let col = column_at(s, head, opts.tab_width);
         let (range, target) = if b == last && a > 0 {
             (content_range(s, a - 1).end..end, Some(a - 1))

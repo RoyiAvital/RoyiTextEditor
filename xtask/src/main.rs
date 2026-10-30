@@ -237,6 +237,11 @@ fn package() -> ExitCode {
         std::fs::create_dir_all(&stage)?;
         std::fs::copy(&exe, stage.join(format!("{APP}.exe")))?;
         copy_dir(&root().join("assets").join("fonts"), &stage.join("Fonts"))?;
+        // The Hunspell dictionary and its license (fetched by the build).
+        copy_dir(
+            &root().join("assets").join("dictionaries"),
+            &stage.join("Dictionaries"),
+        )?;
         for doc in ["README.md", "CHANGELOG.md"] {
             std::fs::copy(root().join(doc), stage.join(doc))?;
         }

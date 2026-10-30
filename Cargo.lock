@@ -692,7 +692,7 @@ checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 
 [[package]]
 name = "rte_app"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "resvg",
  "rte_assets",
@@ -700,6 +700,7 @@ dependencies = [
  "rte_platform",
  "rte_render",
  "rte_search",
+ "rte_spell",
  "rte_syntax",
  "rte_text",
  "rte_view",
@@ -711,11 +712,11 @@ dependencies = [
 
 [[package]]
 name = "rte_assets"
-version = "0.5.1"
+version = "0.6.0"
 
 [[package]]
 name = "rte_edit"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "divan",
  "proptest",
@@ -725,14 +726,14 @@ dependencies = [
 
 [[package]]
 name = "rte_platform"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "windows-sys",
 ]
 
 [[package]]
 name = "rte_render"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "divan",
  "rte_assets",
@@ -744,18 +745,26 @@ dependencies = [
 
 [[package]]
 name = "rte_search"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "fancy-regex",
  "memchr",
  "proptest",
  "regex-cursor",
  "rte_text",
+ "unicode-width",
+]
+
+[[package]]
+name = "rte_spell"
+version = "0.6.0"
+dependencies = [
+ "spellbook",
 ]
 
 [[package]]
 name = "rte_syntax"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "libmimalloc-sys",
  "rte_text",
@@ -789,7 +798,7 @@ dependencies = [
 
 [[package]]
 name = "rte_text"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "divan",
  "memchr",
@@ -799,7 +808,7 @@ dependencies = [
 
 [[package]]
 name = "rte_view"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "rte_edit",
  "rte_text",
@@ -928,6 +937,16 @@ name = "smallvec"
 version = "1.16.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b3dc8af474f516a851ff4bd12db780f948b9250ad37211e4eec0bccea54e01b"
+
+[[package]]
+name = "spellbook"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d204abcbdf8e88729306a8d0ca01a79d8a49969fe1f84696909d6dbc4321c1a"
+dependencies = [
+ "foldhash",
+ "hashbrown",
+]
 
 [[package]]
 name = "str_indices"
@@ -1432,7 +1451,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "rte_syntax",
  "serde_json",

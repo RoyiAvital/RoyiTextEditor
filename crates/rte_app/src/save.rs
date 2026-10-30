@@ -30,6 +30,8 @@ pub struct Baseline {
 pub trait FileOps: Send + Sync {
     /// Stamp of `path`, `None` when it does not exist.
     fn stamp(&self, path: &Path) -> io::Result<Option<FileStamp>>;
+    /// The read-only attribute of `path`; `false` when it does not exist.
+    fn read_only(&self, path: &Path) -> io::Result<bool>;
     /// XXH3-64 of the bytes of `path`.
     fn hash(&self, path: &Path) -> io::Result<u64>;
     /// Creates `path` (failing if it exists), lets `write` fill it and
@@ -53,6 +55,10 @@ pub struct SystemFiles;
 impl FileOps for SystemFiles {
     fn stamp(&self, path: &Path) -> io::Result<Option<FileStamp>> {
         files::stamp(path)
+    }
+
+    fn read_only(&self, path: &Path) -> io::Result<bool> {
+        files::is_read_only(path)
     }
 
     fn hash(&self, path: &Path) -> io::Result<u64> {
@@ -119,12 +125,12 @@ pub enum SaveOutcome {
     },
     /// The file differs from the baseline; nothing was changed.
     Conflict { disk: Baseline },
+    /// The file has the read-only attribute; nothing was written.
+    ReadOnly,
     /// Nothing was saved; the message lists any surviving files.
     Failed { error: String },
 }
 
-const ERROR_UNABLE_TO_REMOVE_REPLACED: u32 = 1175;
-const ERROR_UNABLE_TO_MOVE_REPLACEMENT: u32 = 1176;
 const ERROR_UNABLE_TO_MOVE_REPLACEMENT_2: u32 = 1177;
 
 /// Writes `snapshot` in `encoding` (with its BOM).
@@ -283,6 +289,10 @@ fn failed(error: String) -> SaveOutcome {
 pub fn save(ops: &dyn FileOps, req: &SaveRequest) -> SaveOutcome {
     let path = req.path.as_path();
     let shown = path.display();
+    // Checked only here, before anything is written; the editor never changes attributes.
+    if ops.read_only(path).unwrap_or(false) {
+        return SaveOutcome::ReadOnly;
+    }
     let tmp = match free_sibling(ops, path, "tmp") {
         Ok(tmp) => tmp,
         Err(e) => return failed(format!("Cannot save {shown}: {e}")),
@@ -427,18 +437,20 @@ fn replace_failed(
     };
     let shown = path.display();
     match code {
-        ERROR_UNABLE_TO_REMOVE_REPLACED | ERROR_UNABLE_TO_MOVE_REPLACEMENT if target_intact() => {
-            let _ = ops.delete(tmp);
-            failed(format!(
-                "Cannot replace {shown} (error {code}); the file is unchanged.{}",
-                kept(&[tmp, backup])
-            ))
-        }
         ERROR_UNABLE_TO_MOVE_REPLACEMENT_2 => failed(format!(
             "Cannot replace {shown} (error {code}). The previous version is at {} and the new text at {}",
             backup.display(),
             tmp.display()
         )),
+        // Access denied, sharing violations and the like: the new text is still in the editor.
+        _ if target_intact() => {
+            let _ = ops.delete(tmp);
+            let reason = io::Error::from_raw_os_error(code as i32);
+            failed(format!(
+                "Cannot replace {shown}: {reason}; the file is unchanged.{}",
+                kept(&[backup])
+            ))
+        }
         _ => failed(format!(
             "Cannot replace {shown} (error {code}).{}",
             kept(&[path, tmp, backup])
@@ -495,6 +507,8 @@ pub mod fake {
         pub create_error: Mutex<Option<io::ErrorKind>>,
         /// Blocks `write_new` until the receiver gets a message.
         pub gate: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+        /// Existing files have the read-only attribute.
+        pub read_only: Mutex<bool>,
     }
 
     impl FakeFiles {
@@ -562,6 +576,10 @@ pub mod fake {
     impl FileOps for FakeFiles {
         fn stamp(&self, path: &Path) -> io::Result<Option<FileStamp>> {
             Ok(self.files.lock().unwrap().get(path).map(|f| f.stamp))
+        }
+
+        fn read_only(&self, path: &Path) -> io::Result<bool> {
+            Ok(*self.read_only.lock().unwrap() && self.get(path).is_some())
         }
 
         fn hash(&self, path: &Path) -> io::Result<u64> {
@@ -894,8 +912,28 @@ mod tests {
         files.put(&target(), b"old");
         *files.replace_error.lock().unwrap() = Some(5);
         let message = error(save(&files, &request(&files, b"new")));
-        assert_eq!(files.names(), vec!["a.txt".to_owned(), tmp.clone()]);
-        assert!(message.contains(&tmp));
+        assert_eq!(files.names(), vec!["a.txt"]);
+        assert!(
+            message.contains("os error 5") && message.contains("unchanged"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn read_only_files_are_refused_before_writing() {
+        let files = FakeFiles::default();
+        files.put(&target(), b"old");
+        *files.read_only.lock().unwrap() = true;
+        assert!(matches!(
+            save(&files, &request(&files, b"new")),
+            SaveOutcome::ReadOnly
+        ));
+        assert_eq!(files.get(&target()).unwrap(), b"old");
+        assert_eq!(files.names(), vec!["a.txt"]);
+        // A file that does not exist yet is created.
+        files.delete(&target()).unwrap();
+        saved(save(&files, &request(&files, b"new")));
+        assert_eq!(files.get(&target()).unwrap(), b"new");
     }
 
     #[test]

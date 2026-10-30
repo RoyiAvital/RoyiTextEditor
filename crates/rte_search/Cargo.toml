@@ -10,6 +10,7 @@ fancy-regex.workspace = true
 memchr.workspace = true
 regex-cursor.workspace = true
 rte_text = { path = "../rte_text" }
+unicode-width.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

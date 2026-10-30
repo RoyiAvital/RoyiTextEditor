@@ -819,6 +819,61 @@ fn parsed_with(lang: &str, text: &str, injections: bool) -> (Snapshot, crate::Vi
     (snapshot, session.view())
 }
 
+/// Markdown code, link destinations, HTML and front matter are not prose;
+/// inline elements are parsed for any range, without injected layers.
+#[test]
+fn markdown_mask_excludes_code_links_and_html() {
+    let text = "---\ntitel: x\n---\n# Heading wrold\n\nSee `codez` and [linkk](http://exmple.org) or <b>tagg</b>.\n\n```py\nprnt(1)\n```\n\n    indnted\n\nLast wrods.\n";
+    let (snapshot, view) = parsed_with("markdown", text, false);
+    let mut mask = crate::MarkdownMask::new().unwrap();
+    let all = mask
+        .exclusions(&view, &snapshot, 0..snapshot.len())
+        .unwrap();
+    let excluded = |word: &str| {
+        let at = text.find(word).unwrap() as u64;
+        all.iter()
+            .any(|r| r.start <= at && at + word.len() as u64 <= r.end)
+    };
+    for word in ["titel", "codez", "exmple", "<b>", "prnt", "indnted"] {
+        assert!(excluded(word), "{word}: {all:?}");
+    }
+    for word in ["wrold", "linkk", "tagg", "wrods", "See"] {
+        assert!(!excluded(word), "{word}: {all:?}");
+    }
+    // Only the nodes touching the range are visited.
+    let at = text.find("wrods").unwrap() as u64;
+    assert_eq!(
+        mask.exclusions(&view, &snapshot, at..at + 5),
+        Some(Vec::new())
+    );
+    let (s, js) = parsed("javascript", "let a;");
+    assert_eq!(mask.exclusions(&js, &s, 0..1), None);
+}
+
+/// A small range among many paragraphs gets the exclusions of its own
+/// paragraphs only, the same as from the whole-document answer.
+#[test]
+fn markdown_mask_of_a_small_range_matches_the_whole_answer() {
+    let text: String = (0..2000)
+        .map(|i| format!("Para {i} with `code{i}` here.\n\n"))
+        .collect();
+    let (snapshot, view) = parsed_with("markdown", &text, false);
+    let mut mask = crate::MarkdownMask::new().unwrap();
+    let all = mask
+        .exclusions(&view, &snapshot, 0..snapshot.len())
+        .unwrap();
+    let start = text.find("Para 1000 ").unwrap() as u64;
+    let range = start..start + 60;
+    let part = mask.exclusions(&view, &snapshot, range.clone()).unwrap();
+    let expected: Vec<_> = all
+        .iter()
+        .filter(|r| r.start < range.end && r.end > range.start)
+        .cloned()
+        .collect();
+    assert_eq!(part, expected);
+    assert_eq!(part.len(), 2, "code1000 and code1001: {part:?}");
+}
+
 /// The language of code outside the parsed layers (an offscreen fence) or
 /// after an edit comes from the host tree, never from a missing layer.
 #[test]

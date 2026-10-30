@@ -17,6 +17,7 @@ mod loader;
 mod palette;
 mod save;
 mod search;
+mod spelling;
 mod syntax;
 mod trace;
 
@@ -50,6 +51,9 @@ struct Args {
     /// `--syntax <id>`: language id overriding detection by file name;
     /// `none` or `off` (any case) disables highlighting.
     syntax: Option<String>,
+    /// `--spelling off|builtin|hunspell|windows`: overrides
+    /// `spelling.enabled` and `spelling.engine` for the session.
+    spelling: Option<String>,
     trace_startup: bool,
     exit_after_first_frame: bool,
     exit_after_load: bool,
@@ -72,6 +76,7 @@ fn parse_args(raw: impl IntoIterator<Item = OsString>) -> Args {
         path: None,
         read_only: false,
         syntax: None,
+        spelling: None,
         trace_startup: false,
         exit_after_first_frame: false,
         exit_after_load: false,
@@ -89,6 +94,7 @@ fn parse_args(raw: impl IntoIterator<Item = OsString>) -> Args {
         match arg.to_str() {
             Some("--read-only") => args.read_only = true,
             Some("--syntax") => args.syntax = raw.next().and_then(|id| id.into_string().ok()),
+            Some("--spelling") => args.spelling = raw.next().and_then(|e| e.into_string().ok()),
             Some("--trace-startup") => args.trace_startup = true,
             Some("--exit-after-first-frame") => args.exit_after_first_frame = true,
             Some("--exit-after-load") => args.exit_after_load = true,
@@ -116,6 +122,29 @@ impl Args {
             .syntax
             .as_deref()
             .is_some_and(|id| id.eq_ignore_ascii_case("none") || id.eq_ignore_ascii_case("off"))
+    }
+
+    /// Spelling on or off and its engine: `--spelling`, else the
+    /// configuration; an invalid value is reported and ignored.
+    fn spelling(
+        &self,
+        enabled: bool,
+        engine: spelling::Engine,
+    ) -> (bool, spelling::Engine, Option<String>) {
+        match self.spelling.as_deref() {
+            None => (enabled, engine, None),
+            Some("off") => (false, engine, None),
+            Some(name) => match spelling::Engine::parse(name) {
+                Some(engine) => (true, engine, None),
+                None => (
+                    enabled,
+                    engine,
+                    Some(format!(
+                        "Unknown --spelling {name:?}: use off, builtin, hunspell or windows"
+                    )),
+                ),
+            },
+        }
     }
 }
 
@@ -213,6 +242,12 @@ fn main() {
     let renderer = glyphs.join().expect("glyph thread");
     trace.mark("glyphs_ready");
 
+    let (spelling, spelling_engine, spelling_problem) =
+        args.spelling(config.spelling, config.spelling_engine);
+    let hunspell = exe_dir.as_ref().map_or_else(
+        || PathBuf::from(&config.hunspell),
+        |dir| dir.join(&config.hunspell),
+    );
     let editor = Editor::new(
         args.path.as_deref(),
         first,
@@ -228,11 +263,14 @@ fn main() {
             multi_cursor_limit: config.multi_cursor_limit,
             replace_all_max_mib: config.replace_all_max_mib,
             user_dir: exe_dir.map(|dir| dir.join("UserSettings")),
-            notice: config_problem,
+            notice: config_problem.or(spelling_problem),
             highlighting: args.highlighting(),
             syntax: args.syntax.clone(),
             syntax_max_mib: config.syntax_max_mib,
             injections: config.injections,
+            spelling,
+            spelling_engine,
+            hunspell,
             early_syntax: early,
             bench,
         },
@@ -261,6 +299,24 @@ mod tests {
         let args = parse(&["a.ipynb", "--syntax"]);
         assert_eq!(args.syntax, None);
         assert_eq!(args.path, Some(PathBuf::from("a.ipynb")));
+    }
+
+    #[test]
+    fn spelling_argument_overrides_the_configuration() {
+        use spelling::Engine;
+        let on = |raw: &[&str]| parse(raw).spelling(false, Engine::Builtin);
+        assert_eq!(on(&["a.txt"]), (false, Engine::Builtin, None));
+        assert_eq!(
+            on(&["--spelling", "windows"]),
+            (true, Engine::Windows, None)
+        );
+        assert_eq!(
+            parse(&["--spelling", "off"]).spelling(true, Engine::Hunspell),
+            (false, Engine::Hunspell, None)
+        );
+        let (enabled, engine, problem) = on(&["--spelling", "aspell"]);
+        assert_eq!((enabled, engine), (false, Engine::Builtin));
+        assert!(problem.unwrap().contains("--spelling"));
     }
 
     #[test]

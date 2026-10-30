@@ -85,6 +85,13 @@ fn whole_word_uses_word_characters() {
     );
     let q = query("-x", Mode::Text, true, true);
     assert_eq!(texts(&q, "a-x b -xy"), ["-x"]);
+    // A combining accent belongs to its word: "cafe" + U+0301 is not "cafe".
+    let q = query("cafe", Mode::Text, true, true);
+    assert_eq!(texts(&q, "cafe\u{301} cafe"), ["cafe"]);
+    assert_eq!(
+        all(&q, &Snapshot::from_bytes("cafe\u{301} cafe".as_bytes())),
+        [7..11]
+    );
 }
 
 #[test]

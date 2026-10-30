@@ -15,6 +15,7 @@ rte_edit = { path = "../rte_edit" }
 rte_platform = { path = "../rte_platform" }
 rte_render = { path = "../rte_render" }
 rte_search = { path = "../rte_search" }
+rte_spell = { path = "../rte_spell" }
 rte_syntax = { path = "../rte_syntax" }
 rte_text = { path = "../rte_text" }
 rte_view = { path = "../rte_view" }

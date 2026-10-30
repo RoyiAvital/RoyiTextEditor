@@ -23,6 +23,8 @@ const MIB: usize = 1024 * 1024;
 const FIXTURE_CAP: Duration = Duration::from_secs(3);
 /// Whole run, excluding the release build.
 const TOTAL_CAP: Duration = Duration::from_secs(60);
+/// Extra time of an input test run with `--spelling`.
+const SPELLING_START: Duration = Duration::from_secs(3);
 
 struct Fixture {
     name: &'static str,
@@ -143,6 +145,26 @@ const FIXTURES: &[Fixture] = &[
         generate: || lines(TS, TYPICAL_LINES),
         hash: 0xa69187b2ee0c321f,
     },
+    Fixture {
+        name: "spell.txt",
+        generate: || prose(MIB, 80, true),
+        hash: 0x19a974ea626c00df,
+    },
+    Fixture {
+        name: "spell.md",
+        generate: || spell_markdown(MIB),
+        hash: 0xf951c45e3c5457dd,
+    },
+    Fixture {
+        name: "spell-dense.txt",
+        generate: || prose(2 * MIB, 16 * KIB, true),
+        hash: 0x2f5f18ad7f447f32,
+    },
+    Fixture {
+        name: "spell-far.txt",
+        generate: spell_far,
+        hash: 0x0f5a3175454a96bc,
+    },
 ];
 
 /// Lines of the code fixtures: a large hand-written source file.
@@ -165,6 +187,8 @@ struct LoadTest {
     /// Wait for the whole file to be highlighted (`--exit-after-highlight`)
     /// and report the time.
     highlight: bool,
+    /// Spelling on: wait for the first complete marks and report the time.
+    spelling: bool,
 }
 
 const fn test(
@@ -185,6 +209,7 @@ const fn test(
         cap: Duration::from_secs(cap_secs),
         loaded,
         highlight: false,
+        spelling: false,
     }
 }
 
@@ -245,6 +270,10 @@ const LOAD_TESTS: &[LoadTest] = &[
         ..test("L25", "TypeScript, 10,000 lines", "10k.ts", 10, 2, false)
     },
     test("L26", "Start empty session", "", 20, 2, false),
+    LoadTest {
+        spelling: true,
+        ..test("P06", "First marks, text 1 MiB", "spell.txt", 20, 4, false)
+    },
 ];
 
 /// An interaction test: one process loads the fixture, sends the untimed
@@ -270,6 +299,8 @@ struct InputTest {
     paced: bool,
     full: bool,
     warmup: bool,
+    /// Spelling on (`--spelling`, default `builtin`).
+    spelling: bool,
     cap: Duration,
 }
 
@@ -295,6 +326,7 @@ const fn input(
         paced: false,
         full: false,
         warmup: true,
+        spelling: false,
         cap: Duration::from_secs(cap_secs),
     }
 }
@@ -609,7 +641,63 @@ const INPUT_TESTS: &[InputTest] = &[
             2,
         )
     },
+    InputTest {
+        spelling: true,
+        ..scroll("P01", "Scroll and jump, spelling", "spell.txt")
+    },
+    InputTest {
+        spelling: true,
+        ..scroll("P02", "Scroll, spelling MD", "spell.md")
+    },
+    InputTest {
+        spelling: true,
+        all_steps: true,
+        paced: true,
+        warmup: false,
+        ..input(
+            "P03",
+            "Sideways, dense lines",
+            "spell-dense.txt",
+            SIDEWAYS_KEYS,
+            1,
+            6,
+        )
+    },
+    InputTest {
+        spelling: true,
+        ..input(
+            "P04",
+            "F8 4 MiB ahead",
+            "spell-far.txt",
+            "F8,Ctrl+Home",
+            5,
+            3,
+        )
+    },
+    InputTest {
+        spelling: true,
+        select: SPELL_TYPO,
+        ..input(
+            "P05",
+            "Ctrl+. on a misspelling",
+            "spell.txt",
+            "Ctrl+.,Escape",
+            20,
+            2,
+        )
+    },
 ];
+
+/// To the end of a long line and back, a row at a time (60 keys).
+const SIDEWAYS_KEYS: &str = concat!(
+    "End,Home,Down,End,Home,Down,End,Home,Down,End,Home,Down,End,Home,Down,",
+    "End,Home,Down,End,Home,Down,End,Home,Down,End,Home,Down,End,Home,Down,",
+    "End,Home,Down,End,Home,Down,End,Home,Down,End,Home,Down,End,Home,Down,",
+    "End,Home,Down,End,Home,Down,End,Home,Down,End,Home,Down,End,Home,Down"
+);
+
+/// The caret inside the first misspelling of `spell.txt`.
+const SPELL_TYPO: &str = "297..297";
 
 /// Middles of the 10,000-line fixtures.
 const MID_PY_10K: &str = "168000..168000";
@@ -899,6 +987,176 @@ fn lines(block: &str, count: usize) -> Vec<u8> {
 
 fn markdown(size: usize) -> Vec<u8> {
     repeat(MD_FRONT, MD, size)
+}
+
+/// Correct words of the spelling fixtures.
+const PROSE: &[&str] = &[
+    "the",
+    "quick",
+    "brown",
+    "fox",
+    "jumps",
+    "over",
+    "lazy",
+    "dog",
+    "and",
+    "a",
+    "of",
+    "to",
+    "in",
+    "is",
+    "it",
+    "that",
+    "for",
+    "on",
+    "with",
+    "as",
+    "was",
+    "editor",
+    "text",
+    "file",
+    "window",
+    "spelling",
+    "word",
+    "line",
+    "page",
+    "scroll",
+    "simple",
+    "fast",
+    "small",
+    "large",
+    "every",
+    "after",
+    "before",
+    "while",
+    "because",
+    "people",
+    "write",
+    "read",
+    "check",
+    "mark",
+    "under",
+    "light",
+    "blue",
+    "wave",
+    "keyboard",
+    "command",
+    "palette",
+    "dictionary",
+    "language",
+    "English",
+    "plain",
+    "document",
+    "number",
+    "letter",
+    "sentence",
+    "paragraph",
+    "morning",
+    "evening",
+    "river",
+    "mountain",
+    "garden",
+    "kitchen",
+    "library",
+    "station",
+    "village",
+];
+/// Common misspellings, repeated through the fixtures.
+const TYPOS: &[&str] = &[
+    "recieve",
+    "teh",
+    "wrod",
+    "adress",
+    "seperate",
+    "occured",
+    "definately",
+    "untill",
+];
+
+/// Word `i` of the spelling prose: one in 50 is misspelled (`typos`),
+/// alternately a common misspelling and a new word.
+fn prose_word(i: usize, typos: bool) -> String {
+    if typos && i % 50 == 49 {
+        let n = i / 50;
+        if n.is_multiple_of(2) {
+            return TYPOS[(n / 2) % TYPOS.len()].to_owned();
+        }
+        // A new word each time: "zq" and the letters of `n`.
+        let mut word = "zq".to_owned();
+        let mut k = n;
+        while k > 0 {
+            word.push(char::from(b'a' + (k % 26) as u8));
+            k /= 26;
+        }
+        return word;
+    }
+    PROSE[(i * 7 + i / 13) % PROSE.len()].to_owned()
+}
+
+/// Prose of `size` bytes in sentences of 12 words, lines broken after
+/// `line` bytes.
+fn prose(size: usize, line: usize, typos: bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(size);
+    let mut row = 0;
+    for i in 0.. {
+        let mut word = prose_word(i, typos);
+        if i % 12 == 0 {
+            word[..1].make_ascii_uppercase();
+        }
+        if i % 12 == 11 {
+            word.push('.');
+        }
+        let sep: &[u8] = if row + word.len() + 1 > line {
+            b"\n"
+        } else {
+            b" "
+        };
+        if out.len() + word.len() + 2 > size {
+            break;
+        }
+        if i > 0 {
+            out.extend_from_slice(sep);
+            row = if sep == b"\n" { 0 } else { row + 1 };
+        }
+        out.extend_from_slice(word.as_bytes());
+        row += word.len();
+    }
+    out.push(b'\n');
+    out
+}
+
+/// Markdown of `size` bytes: prose with headings, code spans, links, HTML
+/// and fenced code that hold misspellings (never to be marked).
+fn spell_markdown(size: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(size);
+    let mut i = 0;
+    for n in 0.. {
+        let mut paragraph = Vec::new();
+        for _ in 0..48 {
+            paragraph.push(prose_word(i, true));
+            i += 1;
+        }
+        let block = format!(
+            "## Section {n}\n\n{} `teh codez` and [{}](https://exmaple.com/pth{n}) with <span class=\"wrod\">{}</span>.\n{}\n\n```text\nrecieve teh wrod {n}\n```\n\n",
+            paragraph[..20].join(" "),
+            paragraph[20..23].join(" "),
+            paragraph[23..26].join(" "),
+            paragraph[26..].join(" "),
+        );
+        if out.len() + block.len() > size {
+            break;
+        }
+        out.extend_from_slice(block.as_bytes());
+    }
+    out
+}
+
+/// 4 MiB of correct prose, one misspelling, then a little more.
+fn spell_far() -> Vec<u8> {
+    let mut out = prose(4 * MIB, 80, false);
+    out.extend_from_slice(b"One recieve here.\n");
+    out.extend_from_slice(&prose(64 * KIB, 80, false));
+    out
 }
 
 fn csv(size: usize) -> Vec<u8> {
@@ -1202,12 +1460,23 @@ struct Samples {
     first_highlighted: Vec<f64>,
     /// First frame highlighted from a parse of the whole file.
     highlighted: Vec<f64>,
+    /// First complete spelling marks of the view.
+    marks: Vec<f64>,
     peak: Vec<f64>,
     /// Wall time of the whole test, warm-up included.
     elapsed: Duration,
 }
 
-fn run_load(exe: &Path, t: &LoadTest) -> Result<Samples, String> {
+/// `--spelling <engine>` for a test: its own default (`builtin`) or the
+/// engine given to the benchmark, which applies to every test.
+fn spelling_arg(test_wants: bool, engine: Option<&str>) -> Option<String> {
+    match engine {
+        Some(engine) => Some(engine.to_owned()),
+        None => test_wants.then(|| "builtin".to_owned()),
+    }
+}
+
+fn run_load(exe: &Path, t: &LoadTest, engine: Option<&str>) -> Result<Samples, String> {
     let path = fixture_dir().join(t.fixture);
     let mut samples = Samples {
         first_paint: Vec::new(),
@@ -1215,14 +1484,16 @@ fn run_load(exe: &Path, t: &LoadTest) -> Result<Samples, String> {
         loaded: Vec::new(),
         first_highlighted: Vec::new(),
         highlighted: Vec::new(),
+        marks: Vec::new(),
         peak: Vec::new(),
         elapsed: Duration::ZERO,
     };
+    let spelling = spelling_arg(t.spelling, engine);
     let start = Instant::now();
     // One warm-up run (file cache, executable image), not counted.
     for run in 0..=t.runs {
         let mut command = Command::new(exe);
-        let exit = if t.highlight {
+        let exit = if t.highlight || t.spelling {
             "--exit-after-highlight"
         } else {
             "--exit-after-load"
@@ -1233,6 +1504,9 @@ fn run_load(exe: &Path, t: &LoadTest) -> Result<Samples, String> {
         }
         if let Some(id) = t.syntax {
             command.args(["--syntax", id]);
+        }
+        if let Some(engine) = &spelling {
+            command.args(["--spelling", engine]);
         }
         // An empty fixture name starts the editor without a file.
         if !t.fixture.is_empty() {
@@ -1258,6 +1532,11 @@ fn run_load(exe: &Path, t: &LoadTest) -> Result<Samples, String> {
         if t.highlight {
             samples.first_highlighted.push(value("highlighted")?);
             samples.highlighted.push(value("fully_highlighted")?);
+        }
+        if t.spelling {
+            samples
+                .marks
+                .push(value("spelling_marks")? - value("first_paint")?);
         }
         samples.peak.push(value("peak_private_mib")?);
     }
@@ -1294,7 +1573,7 @@ impl InputSamples {
     }
 }
 
-fn run_input(exe: &Path, t: &InputTest) -> Result<InputSamples, String> {
+fn run_input(exe: &Path, t: &InputTest, engine: Option<&str>) -> Result<InputSamples, String> {
     let start = Instant::now();
     let warmup = usize::from(t.warmup);
     let runs = (t.runs + warmup).to_string();
@@ -1303,6 +1582,9 @@ fn run_input(exe: &Path, t: &InputTest) -> Result<InputSamples, String> {
     command
         .args(["--bench-keys", t.keys, "--bench-runs", &runs])
         .args(["--bench-setup", &setup]);
+    if let Some(engine) = spelling_arg(t.spelling, engine) {
+        command.args(["--spelling", &engine]);
+    }
     if !t.select.is_empty() {
         command.args(["--bench-select", t.select]);
     }
@@ -1366,12 +1648,18 @@ fn run_input(exe: &Path, t: &InputTest) -> Result<InputSamples, String> {
     // Lines are in run order; the first run is the warm-up.
     all.drain(..all.len() / (t.runs + warmup) * warmup);
     let elapsed = start.elapsed();
-    if elapsed > t.cap {
+    // With spelling on, a script starts after the first marks (Markdown:
+    // after the whole-file parse), which the original cap does not cover.
+    let cap = match engine {
+        Some(_) if !t.spelling => t.cap + SPELLING_START,
+        _ => t.cap,
+    };
+    if elapsed > cap {
         return Err(format!(
             "{} took {:.2} s, over its {} s cap",
             t.id,
             elapsed.as_secs_f64(),
-            t.cap.as_secs()
+            cap.as_secs()
         ));
     }
     Ok(InputSamples {
@@ -1407,6 +1695,23 @@ pub fn bench_perf(args: &[String]) -> ExitCode {
         only.as_ref().is_none_or(|ids| ids.iter().any(|i| i == id))
             && (!short || short_includes(id))
     };
+    // `--spelling <engine>`: spelling on in every test with that engine.
+    let engine = args
+        .iter()
+        .position(|a| a == "--spelling")
+        .and_then(|i| args.get(i + 1))
+        .map(String::as_str);
+    if let Some(engine) = engine
+        && !["builtin", "hunspell", "windows"].contains(&engine)
+    {
+        eprintln!("--spelling: use builtin, hunspell or windows");
+        return ExitCode::FAILURE;
+    }
+    // The spelling tests run when named or with `--spelling`, so the
+    // default suite keeps its 60 s budget.
+    let spelling_test = |id: &str| id.starts_with('P');
+    let selected =
+        |id: &str| selected(id) && (!spelling_test(id) || only.is_some() || engine.is_some());
     if !print_hashes && !build_release() {
         eprintln!("release build failed");
         return ExitCode::FAILURE;
@@ -1444,11 +1749,25 @@ pub fn bench_perf(args: &[String]) -> ExitCode {
         command_output("rustc", &["--version"]),
         std::env::var("PROCESSOR_IDENTIFIER").unwrap_or_default(),
     );
+    if let Some(engine) = engine {
+        println!("Spelling on: {engine}");
+    }
     println!();
     let exe = release_exe();
+    // The Hunspell engine reads `Dictionaries/` beside the executable.
+    if engine == Some("hunspell")
+        && let Some(dir) = exe.parent()
+        && let Err(e) = crate::copy_dir(
+            &root().join("assets").join("dictionaries"),
+            &dir.join("Dictionaries"),
+        )
+    {
+        eprintln!("staging the dictionaries failed: {e}");
+        return ExitCode::FAILURE;
+    }
     let mut results = Vec::new();
     for t in LOAD_TESTS.iter().filter(|t| selected(t.id)) {
-        match run_load(&exe, t) {
+        match run_load(&exe, t, engine) {
             Ok(samples) => results.push((t, samples)),
             Err(e) => {
                 eprintln!("{e}");
@@ -1458,7 +1777,7 @@ pub fn bench_perf(args: &[String]) -> ExitCode {
     }
     let mut inputs = Vec::new();
     for t in INPUT_TESTS.iter().filter(|t| selected(t.id)) {
-        match run_input(&exe, t) {
+        match run_input(&exe, t, engine) {
             Ok(samples) => inputs.push((t, samples)),
             Err(e) => {
                 eprintln!("{e}");
@@ -1479,7 +1798,7 @@ pub fn bench_perf(args: &[String]) -> ExitCode {
     println!(
         "| --- | ------------------------ | ---------------- | ---------------- | -------------- | ---------------- | ---------------------- | ------------------ | -------- |"
     );
-    for (t, samples) in &results {
+    for (t, samples) in results.iter().filter(|(t, _)| !t.spelling) {
         let loaded = if t.loaded {
             format!("{:.1}", median(&samples.loaded))
         } else {
@@ -1505,6 +1824,29 @@ pub fn bench_perf(args: &[String]) -> ExitCode {
             median(&samples.peak),
             samples.elapsed.as_secs_f64()
         );
+    }
+    if results.iter().any(|(t, _)| t.spelling) {
+        println!();
+        println!(
+            "| ID  | Test                     | First paint [ms] | First marks after paint [ms] | p95 [ms] | Peak private [MiB] | Time [s] |"
+        );
+        println!(
+            "| --- | ------------------------ | ---------------- | ---------------------------- | -------- | ------------------ | -------- |"
+        );
+        for (t, samples) in results.iter().filter(|(t, _)| t.spelling) {
+            let mut sorted = samples.marks.clone();
+            sorted.sort_by(f64::total_cmp);
+            println!(
+                "| {:<3} | {:<24} | {:>16.1} | {:>28.1} | {:>8.1} | {:>18.1} | {:>8.2} |",
+                t.id,
+                t.label,
+                median(&samples.first_paint),
+                median(&samples.marks),
+                percentile(&sorted, 0.95),
+                median(&samples.peak),
+                samples.elapsed.as_secs_f64()
+            );
+        }
     }
     println!();
     println!(
@@ -1572,7 +1914,7 @@ pub fn bench_perf(args: &[String]) -> ExitCode {
         total.as_secs_f64(),
         TOTAL_CAP.as_secs(),
     );
-    if only.is_none() && total > TOTAL_CAP {
+    if only.is_none() && engine.is_none() && total > TOTAL_CAP {
         eprintln!("the run exceeded its {} s cap", TOTAL_CAP.as_secs());
         return ExitCode::FAILURE;
     }
@@ -1666,6 +2008,44 @@ mod tests {
         assert!(line.len() <= 64 * KIB && !line.contains(&b'\n'));
         assert!(std::str::from_utf8(&json(64 * KIB, "  ", ",\n")).is_ok());
         assert_eq!(tile(b"abc", 7), b"abcabca");
+    }
+
+    #[test]
+    fn spelling_fixtures_have_their_misspellings() {
+        let text = prose(64 * KIB, 80, true);
+        let words = text
+            .split(|b| b.is_ascii_whitespace())
+            .filter(|w| !w.is_empty())
+            .count();
+        let typos = TYPOS
+            .iter()
+            .map(|t| text.windows(t.len()).filter(|w| w == &t.as_bytes()).count())
+            .sum::<usize>();
+        // About 2 %: half repeated misspellings, half new words.
+        assert!(
+            (words / 120..words / 80).contains(&typos),
+            "{typos} of {words}"
+        );
+        assert!(text.split(|&b| b == b'\n').all(|l| l.len() <= 80));
+        let at = text.windows(7).position(|w| w == b"recieve").unwrap();
+        let (start, _) = SPELL_TYPO.split_once("..").unwrap();
+        let start: usize = start.parse().unwrap();
+        assert!(
+            (at..at + 7).contains(&start),
+            "SPELL_TYPO should be {}..{}",
+            at + 2,
+            at + 2
+        );
+        let far = spell_far();
+        let at = far.windows(7).position(|w| w == b"recieve").unwrap();
+        assert!(at >= 4 * MIB - 100);
+        let md = spell_markdown(64 * KIB);
+        assert!(md.len() <= 64 * KIB);
+        assert!(
+            std::str::from_utf8(&md)
+                .unwrap()
+                .contains("```text\nrecieve")
+        );
     }
 
     #[test]

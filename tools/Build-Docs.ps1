@@ -179,6 +179,30 @@ try {
     }
     Copy-Item $LanguageImageCache $SourceLanguageImage -Force
 
+    $SpellingImageCache = & $CaptureScript -Spelling | Select-Object -Last 1
+    if (-not $SpellingImageCache -or -not (Test-Path $SpellingImageCache)) {
+        throw 'Spelling screenshot helper did not produce an image.'
+    }
+    $SourceSpellingImage = Join-Path $SourceAssetsDir 'spelling.png'
+    if (Test-Path $SourceSpellingImage) {
+        $SourceAssetBackups[$SourceSpellingImage] = [IO.File]::ReadAllBytes($SourceSpellingImage)
+    } else {
+        $StagedFiles.Add($SourceSpellingImage)
+    }
+    Copy-Item $SpellingImageCache $SourceSpellingImage -Force
+
+    $ReadOnlyImageCache = & $CaptureScript -ReadOnlySave | Select-Object -Last 1
+    if (-not $ReadOnlyImageCache -or -not (Test-Path $ReadOnlyImageCache)) {
+        throw 'Read-only save screenshot helper did not produce an image.'
+    }
+    $SourceReadOnlyImage = Join-Path $SourceAssetsDir 'read-only-save.png'
+    if (Test-Path $SourceReadOnlyImage) {
+        $SourceAssetBackups[$SourceReadOnlyImage] = [IO.File]::ReadAllBytes($SourceReadOnlyImage)
+    } else {
+        $StagedFiles.Add($SourceReadOnlyImage)
+    }
+    Copy-Item $ReadOnlyImageCache $SourceReadOnlyImage -Force
+
     New-Item -ItemType Directory -Path $MermaidStage | Out-Null
     [IO.File]::WriteAllText(
         (Join-Path $MermaidStage 'book.toml'),
@@ -238,7 +262,11 @@ try {
             (Join-Path $BookDir 'assets\editor-screenshot.png'),
             (Join-Path $BookDir 'assets\search-panel.png'),
             (Join-Path $BookDir 'assets\syntax-highlighted-code.png'),
-            (Join-Path $BookDir 'assets\syntax-language-picker.png')
+            (Join-Path $BookDir 'assets\syntax-language-picker.png'),
+            (Join-Path $BookDir 'spelling.html'),
+            (Join-Path $BookDir 'assets\spelling.png'),
+            (Join-Path $BookDir 'files-and-saving.html'),
+            (Join-Path $BookDir 'assets\read-only-save.png')
         )) {
             if (-not (Test-Path $OutputFile)) {
                 throw "mdbook did not create $OutputFile"

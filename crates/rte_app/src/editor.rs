@@ -6,6 +6,7 @@ mod cursors;
 mod find;
 mod goto;
 mod lifecycle;
+mod spell;
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -20,9 +21,9 @@ use rte_render::{Renderer, Target};
 use rte_syntax::Lang;
 use rte_text::{Encoding, LineEnding, Snapshot};
 use rte_view::{
-    CaretStyle, Cell, Chrome, DisplayList, Frame, Highlights, Layout, Options, PaletteFrame,
-    PaletteGeometry, PaletteRow, PanelFrame, PanelGeometry, PanelLine, ROW_SCAN_LIMIT, Scroll,
-    Theme, Tone, ViewBuilder, draw_palette, draw_panel, hit_test,
+    CaretStyle, Cell, Chrome, DisplayList, Frame, Highlights, Layout, Options, PALETTE_ROWS,
+    PaletteFrame, PaletteGeometry, PaletteRow, PanelFrame, PanelGeometry, PanelLine,
+    ROW_SCAN_LIMIT, Scroll, Theme, Tone, ViewBuilder, draw_palette, draw_panel, hit_test,
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -107,6 +108,11 @@ pub struct Settings {
     pub syntax_max_mib: u64,
     /// Embedded languages (`syntax.injections`).
     pub injections: bool,
+    /// Spelling on at startup (`spelling.enabled`, `--spelling`).
+    pub spelling: bool,
+    pub spelling_engine: crate::spelling::Engine,
+    /// Base path of the Hunspell dictionary files.
+    pub hunspell: PathBuf,
     /// Syntax thread started while loading (adopted once).
     pub early_syntax: Option<EarlySyntax>,
     /// Scripted keys of an interaction benchmark.
@@ -200,6 +206,8 @@ pub struct Editor {
     prompt: Option<Prompt>,
     saving: Option<Receiver<SaveOutcome>>,
     save_queued: bool,
+    /// The last save was refused (read-only file): the unsaved dot is orange.
+    save_refused: bool,
     /// Quit or close the file once the running save finishes.
     closing: Option<Exit>,
     drag: Option<Drag>,
@@ -263,8 +271,14 @@ pub struct Editor {
     full_screen: bool,
     /// Tooltip of the search box under the pointer.
     tip: find::Tip,
-    /// Trace marks done: first highlighted frame, fully highlighted.
-    marked: (bool, bool),
+    /// Trace marks done: first highlighted frame, fully highlighted, first
+    /// complete spelling marks.
+    marked: (bool, bool, bool),
+    /// Spelling, started on first need while `spell_on`.
+    spell: Option<Box<spell::Spell>>,
+    spell_on: bool,
+    /// Changes when the drawn spelling marks change.
+    spell_rev: u64,
 }
 
 /// What a frame shows; a repaint is requested only when it changes.
@@ -289,6 +303,8 @@ struct Visible {
     popup: u64,
     full_screen: bool,
     slider_active: bool,
+    /// Revision of the spelling marks.
+    spelling: u64,
 }
 
 impl Visible {
@@ -310,6 +326,7 @@ impl Visible {
             && self.popup == other.popup
             && self.full_screen == other.full_screen
             && self.slider_active == other.slider_active
+            && self.spelling == other.spelling
     }
 }
 
@@ -333,6 +350,11 @@ pub fn window_title(path: Option<&Path>, dirty: bool) -> String {
     format!("{mark}{} - {APP_NAME}", display_name(path))
 }
 
+/// `"s"` unless `n` is 1.
+fn plural(n: u64) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
 impl Editor {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -353,6 +375,7 @@ impl Editor {
         doc.locks.loading = loads.is_some();
         let notice = settings.notice.clone();
         let highlighting = settings.highlighting;
+        let spell_on = settings.spelling;
         let bench = settings.bench.take().map(bench::Driver::new);
         let mut editor = Editor {
             doc,
@@ -386,6 +409,7 @@ impl Editor {
             prompt: None,
             saving: None,
             save_queued: false,
+            save_refused: false,
             closing: None,
             drag: None,
             files,
@@ -422,7 +446,10 @@ impl Editor {
             line_preview: None,
             full_screen: false,
             tip: find::Tip::default(),
-            marked: (false, false),
+            marked: (false, false, false),
+            spell: None,
+            spell_on,
+            spell_rev: 0,
         };
         // `--syntax` belongs to the command-line file; without one it is unused.
         if editor.path.is_some() {
@@ -728,7 +755,8 @@ impl Editor {
     /// file (see [`App::presented`]).
     fn exit_if_loaded(&mut self, ctx: &mut Ctx) {
         let loaded = !matches!(self.status, LoadStatus::Loading { .. });
-        let highlight_pending = self.settings.exit_after_highlight && self.syntax.is_some();
+        let highlight_pending =
+            self.settings.exit_after_highlight && (self.syntax.is_some() || self.spelling_wanted());
         if (self.settings.exit_after_load || self.settings.exit_after_highlight)
             && loaded
             && !highlight_pending
@@ -738,23 +766,33 @@ impl Editor {
         }
     }
 
-    /// Trace marks of the first highlighted frame and of the first one from
-    /// a parse of the whole file (`--trace-startup`).
+    /// Trace marks of the first highlighted frame, of the first one from a
+    /// parse of the whole file and of the first complete spelling marks
+    /// (`--trace-startup`). `--exit-after-highlight` closes once both
+    /// apply.
     fn mark_highlights(&mut self, ctx: &mut Ctx) {
-        let Some(syntax) = &self.syntax else {
-            return;
-        };
-        if !self.marked.0 && syntax.highlighted() {
-            self.marked.0 = true;
-            self.trace.mark("highlighted");
-        }
-        if !self.marked.1 && syntax.fully_highlighted() {
-            self.marked.1 = true;
-            self.trace.mark("fully_highlighted");
-            if self.settings.exit_after_highlight {
-                self.trace.report();
-                ctx.close();
+        let mut done = false;
+        if let Some(syntax) = &self.syntax {
+            if !self.marked.0 && syntax.highlighted() {
+                self.marked.0 = true;
+                self.trace.mark("highlighted");
             }
+            if !self.marked.1 && syntax.fully_highlighted() {
+                self.marked.1 = true;
+                self.trace.mark("fully_highlighted");
+                done = true;
+            }
+        }
+        if !self.marked.2 && self.spelling_wanted() && self.spelling_complete() {
+            self.marked.2 = true;
+            self.trace.mark("spelling_marks");
+            done = true;
+        }
+        let syntax_done = self.syntax.is_none() || self.marked.1;
+        let spelling_done = !self.spelling_wanted() || self.marked.2;
+        if done && syntax_done && spelling_done && self.settings.exit_after_highlight {
+            self.trace.report();
+            ctx.close();
         }
     }
 
@@ -917,6 +955,7 @@ impl Editor {
             popup: self.popup_view(),
             full_screen: self.full_screen,
             slider_active: self.slider_active(),
+            spelling: self.spell_rev,
         }
     }
 
@@ -936,7 +975,7 @@ impl Editor {
     fn move_heads(
         &mut self,
         extend: bool,
-        f: impl Fn(&Snapshot, &Selection) -> (u64, Option<u64>),
+        mut f: impl FnMut(&Snapshot, &Selection) -> (u64, Option<u64>),
     ) {
         let snapshot = &self.doc.snapshot;
         let sels = self.doc.selections.map(|sel| {
@@ -980,7 +1019,7 @@ impl Editor {
         } else {
             (edit::copy(snapshot, sels, &opts), None)
         };
-        let (text, data) = clip::encode(&clip, opts.line_ending);
+        let (text, data) = clip::encode(clip, opts.line_ending);
         if !ctx.set_clipboard(&text, clip::FORMAT, &data) {
             self.notice = Some("The clipboard is not available".to_owned());
             return;
@@ -1021,6 +1060,7 @@ impl Editor {
         let wake = self.wake.clone();
         // Edits after this point start a new undo step, so undo reaches the saved text.
         self.doc.history.seal();
+        self.save_refused = false;
         let request = SaveRequest {
             path,
             snapshot: self.doc.snapshot.clone(),
@@ -1059,6 +1099,14 @@ impl Editor {
             SaveOutcome::Conflict { disk } => {
                 self.save_queued = false;
                 self.prompt = Some(Prompt::Conflict(disk));
+            }
+            SaveOutcome::ReadOnly => {
+                self.save_queued = false;
+                self.save_refused = true;
+                let name = self.path.as_deref().map(display_name).unwrap_or_default();
+                self.notice = Some(format!(
+                    "{name} is read-only. Clear its Read-only attribute and save again"
+                ));
             }
             SaveOutcome::Failed { error } => {
                 self.save_queued = false;
@@ -1308,6 +1356,12 @@ impl Editor {
             Action::ScrollPageDown => self.scroll_lines(self.page() as i64),
             Action::GoToLine => self.open_go_to_line(),
             Action::ToggleFullScreen => self.toggle_full_screen(ctx),
+            Action::ToggleSpelling => self.toggle_spelling(),
+            Action::SpellingSuggestions => self.show_spelling(),
+            Action::NextMisspelling => self.next_misspelling(false),
+            Action::PreviousMisspelling => self.next_misspelling(true),
+            Action::AddToDictionary => self.add_word(false),
+            Action::IgnoreWord => self.add_word(true),
         }
     }
 
@@ -1349,8 +1403,9 @@ impl Editor {
                 if vk == VK_PRIOR || vk == VK_NEXT {
                     self.scroll_lines(lines);
                 }
+                let mut walk = edit::Vertical::default();
                 self.move_heads(shift, |s, sel| {
-                    let (head, goal) = edit::vertical(s, sel.head, sel.goal, lines, tab);
+                    let (head, goal) = walk.step(s, sel.head, sel.goal, lines, tab);
                     (head, Some(goal))
                 });
             }
@@ -1501,6 +1556,7 @@ impl Editor {
         match &mut self.popup {
             Some(Popup::Palette(p)) => {
                 p.mode = mode;
+                p.max_rows = None;
                 p.refresh(store, recent);
             }
             _ => self.popup = Some(Popup::Palette(Box::new(Palette::new(mode, store, recent)))),
@@ -1543,7 +1599,14 @@ impl Editor {
     fn palette_geometry(&self, p: &Palette) -> PaletteGeometry {
         let (w, h) = self.size;
         let top = self.layout().title.h as i32;
-        PaletteGeometry::new(w, h, top, self.ui_cell(), p.items.len())
+        PaletteGeometry::with_rows(
+            w,
+            h,
+            top,
+            self.ui_cell(),
+            p.items.len(),
+            p.max_rows.unwrap_or(PALETTE_ROWS),
+        )
     }
 
     fn panel_geometry(&self, panel: &Panel) -> PanelGeometry {
@@ -1552,6 +1615,13 @@ impl Editor {
         let cols = panel.lines.iter().map(PanelLine::cols).max().unwrap_or(0);
         let icon = panel.icon.then(|| self.icon_side());
         PanelGeometry::new(w, h, top, self.ui_cell(), cols, panel.lines.len(), icon)
+    }
+
+    /// First shown line of `panel`: at most the start of its last page, also
+    /// after the window grew.
+    fn panel_first(&self, panel: &Panel) -> usize {
+        let page = self.panel_geometry(panel).lines.max(1);
+        panel.first.min(panel.lines.len().saturating_sub(page))
     }
 
     fn icon_side(&self) -> u32 {
@@ -1656,15 +1726,16 @@ impl Editor {
         };
         let page = self.panel_geometry(panel).lines.max(1);
         let last = panel.lines.len().saturating_sub(page);
+        let current = self.panel_first(panel);
         let first = match key.vk {
             VK_ESCAPE => {
                 self.popup = None;
                 return true;
             }
-            VK_UP => panel.first.saturating_sub(1),
-            VK_DOWN => panel.first + 1,
-            VK_PRIOR => panel.first.saturating_sub(page),
-            VK_NEXT => panel.first + page,
+            VK_UP => current.saturating_sub(1),
+            VK_DOWN => current + 1,
+            VK_PRIOR => current.saturating_sub(page),
+            VK_NEXT => current + page,
             VK_HOME => 0,
             VK_END => last,
             _ => {
@@ -1704,11 +1775,15 @@ impl Editor {
         };
         if let Some(choice) = p.choice_at(item) {
             let (mode, query) = (p.mode, p.query.as_str().to_owned());
+            if mode == Mode::Spelling && self.spelling_row_inert(choice) {
+                return;
+            }
             self.popup = None;
             match mode {
                 Mode::Language => self.set_language(choice),
                 Mode::Symbol => self.go_to_symbol(choice),
                 Mode::Line => self.go_to_line(&query),
+                Mode::Spelling => self.run_spelling_row(choice),
                 Mode::All | Mode::Favorites => {}
             }
             return;
@@ -1759,7 +1834,7 @@ impl Editor {
                 if !g.panel.contains(x, y) {
                     self.popup = None;
                 } else if let Some(line) = g.line_at(x, y)
-                    && let Some(Some(url)) = panel.links.get(panel.first + line)
+                    && let Some(Some(url)) = panel.links.get(self.panel_first(panel) + line)
                 {
                     ctx.open_url(url);
                 }
@@ -1780,8 +1855,9 @@ impl Editor {
             Some(Popup::Panel(panel)) => {
                 let page = self.panel_geometry(panel).lines;
                 let last = panel.lines.len().saturating_sub(page);
+                let current = self.panel_first(panel);
                 if let Some(Popup::Panel(panel)) = &mut self.popup {
-                    panel.first = panel.first.saturating_add_signed(steps).min(last);
+                    panel.first = current.saturating_add_signed(steps).min(last);
                 }
             }
             None => {}
@@ -1817,13 +1893,14 @@ impl Editor {
                 let (store, locks, has_path) = (&self.store, self.doc.locks, self.path.is_some());
                 let rows = visible.iter().map(|item| match item {
                     Item::Header(text) => PaletteRow::Header(text),
+                    Item::Separator => PaletteRow::Separator,
                     Item::Command { index, matched } => {
                         let def = &COMMANDS[*index];
                         PaletteRow::Command {
                             label: def.label,
                             matched: p.matched(matched),
                             keys: commands::key_hint(*index),
-                            starred: store.as_ref().is_some_and(|s| s.is_favorite(*index)),
+                            star: Some(store.as_ref().is_some_and(|s| s.is_favorite(*index))),
                             enabled: enabled(def, locks, has_path),
                         }
                     }
@@ -1831,7 +1908,7 @@ impl Editor {
                         label: &p.choices.labels[*index],
                         matched: p.matched(matched),
                         keys: &p.choices.hints[*index],
-                        starred: false,
+                        star: None,
                         enabled: true,
                     },
                 });
@@ -1841,6 +1918,7 @@ impl Editor {
                     Mode::Language => "Select a language",
                     Mode::Symbol => "Go to a symbol",
                     Mode::Line => "Line, line:column or -line from the end",
+                    Mode::Spelling => "Choose a suggestion or a spelling command",
                 };
                 let empty = match p.mode {
                     Mode::Favorites if p.query.as_str().is_empty() => {
@@ -1850,6 +1928,7 @@ impl Editor {
                     Mode::Symbol if self.symbols_pending => "Collecting symbols…",
                     Mode::Symbol if p.choices.labels.is_empty() => "No symbols found",
                     Mode::Symbol => "No matching symbols",
+                    Mode::Spelling => "No matching suggestions",
                     _ => "No matching commands",
                 };
                 let query = p.query.as_str();
@@ -1869,7 +1948,7 @@ impl Editor {
             }
             Some(Popup::Panel(panel)) => {
                 let g = self.panel_geometry(panel);
-                let first = panel.first.min(panel.lines.len());
+                let first = self.panel_first(panel);
                 let frame = PanelFrame {
                     cell,
                     theme,
@@ -2039,7 +2118,12 @@ impl Editor {
         let name = self.path.as_deref().map(display_name).unwrap_or_default();
         let left = match self.prompt {
             Some(Prompt::DirtyClose(_)) => {
-                format!("Save changes to {name}?   Enter: Save   D: Discard   Esc: Cancel")
+                let question = if self.save_refused {
+                    format!("{name} is read-only. Save changes?")
+                } else {
+                    format!("Save changes to {name}?")
+                };
+                format!("{question}   Enter: Save   D: Discard   Esc: Cancel")
             }
             Some(Prompt::Conflict(_)) => {
                 format!("{name} changed on disk.   O: Overwrite   Esc: Cancel")
@@ -2054,7 +2138,13 @@ impl Editor {
                 (None, LoadStatus::Ready) => match self.info {
                     Some(info) if info.new_file => "New file".to_owned(),
                     Some(info) if info.malformed => "Malformed UTF-16, read-only".to_owned(),
-                    _ => format!("{} lines", self.doc.snapshot.line_count()),
+                    Some(info) if info.cr_breaks => {
+                        "Line breaks are CR only: the text is shown as one line".to_owned()
+                    }
+                    _ => self.spelling_hint().unwrap_or_else(|| {
+                        let n = self.doc.snapshot.line_count();
+                        format!("{n} line{}", plural(n))
+                    }),
                 },
             },
         };
@@ -2240,10 +2330,12 @@ impl App for Editor {
                 self.drain_store();
                 self.drain_search();
                 self.drain_syntax();
+                self.drain_spelling();
                 self.exit_if_loaded(ctx);
             }
         }
         self.sync_syntax();
+        self.sync_spelling();
         let title = window_title(self.path.as_deref(), self.doc.is_dirty());
         if title != self.shown_title {
             ctx.set_title(&title);
@@ -2259,7 +2351,8 @@ impl App for Editor {
         if redraw {
             ctx.redraw();
         }
-        let busy = self.bench.is_some() && (self.search_busy() || self.symbols_pending);
+        let busy = self.bench.is_some()
+            && (self.search_busy() || self.symbols_pending || self.spelling_busy());
         // Scripts start once the file is loaded and, with syntax, highlighted.
         let full = self.bench.as_ref().is_some_and(bench::Driver::full);
         let ready = self.shown
@@ -2270,7 +2363,8 @@ impl App for Editor {
                 } else {
                     s.highlighted()
                 }
-            });
+            })
+            && (self.bench.is_none() || !self.spelling_busy());
         if ready && let Some(r) = self.bench.as_mut().and_then(bench::Driver::take_select) {
             let len = self.doc.snapshot.len();
             self.doc.select(Selections::single(Selection::new(
@@ -2293,7 +2387,11 @@ impl App for Editor {
         let cell = self.renderer.cell();
         let layout = self.layout();
         let (left, right) = self.status_text();
-        let title_mark = self.doc.is_dirty().then_some(self.theme.unsaved);
+        let title_mark = self.doc.is_dirty().then_some(if self.save_refused {
+            self.theme.warning
+        } else {
+            self.theme.unsaved
+        });
         let caret = if self.prompt.is_some() || self.no_file() {
             CaretStyle::Hidden
         } else if self.doc.options.overtype {
@@ -2314,6 +2412,10 @@ impl App for Editor {
         let syntax = match &mut self.syntax {
             Some(syntax) => syntax.spans(&self.doc.snapshot, &ranges),
             None => &[],
+        };
+        let spelling: &[std::ops::Range<u64>] = match &self.spell {
+            Some(spell) if self.spell_on => &spell.ranges,
+            _ => &[],
         };
         let frame = Frame {
             snapshot: &self.doc.snapshot,
@@ -2339,6 +2441,7 @@ impl App for Editor {
                     scope,
                     syntax,
                     brackets: &brackets,
+                    spelling,
                 }
             },
             empty: self.path.is_none().then_some(EMPTY_HINT),
@@ -2363,7 +2466,8 @@ impl App for Editor {
 
     fn presented(&mut self, ctx: &mut Ctx) {
         self.mark_highlights(ctx);
-        let busy = self.bench.is_some() && (self.search_busy() || self.symbols_pending);
+        let busy = self.bench.is_some()
+            && (self.search_busy() || self.symbols_pending || self.spelling_busy());
         let highlighted = self.syntax.as_ref().map(Syntax::highlighted);
         if let Some(bench) = &mut self.bench {
             bench.presented(busy, highlighted, ctx);
@@ -2543,6 +2647,9 @@ mod tests {
             syntax: None,
             syntax_max_mib: 32,
             injections: true,
+            spelling: false,
+            spelling_engine: crate::spelling::Engine::Builtin,
+            hunspell: PathBuf::new(),
             early_syntax: None,
             bench: None,
         }
@@ -2554,6 +2661,7 @@ mod tests {
             line_ending: LineEnding::Lf,
             indent_tabs: false,
             malformed: false,
+            cr_breaks: false,
             new_file: false,
         }
     }
@@ -2816,6 +2924,65 @@ mod tests {
         assert!(!editor.doc.is_dirty());
         assert_eq!(editor.notice.as_deref(), Some("Saved"));
         assert_eq!(editor.baseline, Some(files.baseline(&path())));
+    }
+
+    #[test]
+    fn status_line_counts_lines_and_flags_cr_breaks() {
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, b"abc", false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(Event::Wake, &mut ctx);
+        assert_eq!(editor.status_text().0, "1 line");
+        editor.event(key(VK_RETURN, false, false), &mut ctx);
+        editor.notice = None;
+        assert_eq!(editor.status_text().0, "2 lines");
+        editor.info.as_mut().unwrap().cr_breaks = true;
+        assert!(editor.status_text().0.contains("CR only"));
+    }
+
+    #[test]
+    fn read_only_file_save_is_refused_with_an_orange_dot() {
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, b"abc", false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        let dot = |editor: &mut Editor| {
+            let mut pixels = vec![0u32; 800 * 600];
+            editor.paint(&mut pixels, 800, 600);
+            let title = editor.layout().title;
+            editor
+                .list
+                .glyphs
+                .iter()
+                .find(|g| g.clip == title && g.ch == '\u{25CF}')
+                .map(|g| g.color)
+        };
+        *files.read_only.lock().unwrap() = true;
+        type_text(&mut editor, &mut ctx, "x");
+        assert_eq!(dot(&mut editor), Some(Theme::DARK.unsaved));
+        editor.event(key(VK_S, true, false), &mut ctx);
+        settle(&mut editor, &mut ctx);
+        assert_eq!(files.get(&path()).unwrap(), b"abc");
+        assert_eq!(files.names(), vec!["test.txt"]);
+        assert!(editor.doc.is_dirty());
+        assert!(editor.notice.as_deref().unwrap().contains("is read-only"));
+        assert_eq!(dot(&mut editor), Some(Theme::DARK.warning));
+        // Editing goes on; after the attribute is cleared the save succeeds.
+        type_text(&mut editor, &mut ctx, "y");
+        *files.read_only.lock().unwrap() = false;
+        editor.event(key(VK_S, true, false), &mut ctx);
+        settle(&mut editor, &mut ctx);
+        assert_eq!(files.get(&path()).unwrap(), b"xyabc");
+        assert_eq!(dot(&mut editor), None);
+        // Quitting with changes asks again after a refused save.
+        *files.read_only.lock().unwrap() = true;
+        type_text(&mut editor, &mut ctx, "z");
+        editor.event(Event::CloseRequested, &mut ctx);
+        assert!(matches!(editor.prompt, Some(Prompt::DirtyClose(_))));
+        editor.event(key(VK_S, false, false), &mut ctx);
+        settle(&mut editor, &mut ctx);
+        assert!(matches!(editor.prompt, Some(Prompt::DirtyClose(_))));
+        assert!(editor.status_text().0.starts_with("test.txt is read-only."));
+        assert!(!ctx.close_requested());
     }
 
     #[test]
@@ -3341,6 +3508,7 @@ mod tests {
             .iter()
             .map(|item| match item {
                 Item::Header(h) => h,
+                Item::Separator => "---",
                 Item::Command { index, .. } => COMMANDS[*index].label,
                 Item::Choice { index, .. } => p.choices.labels[*index].as_str(),
             })
@@ -4947,6 +5115,17 @@ mod tests {
         assert_eq!((editor.scroll.top_line, caret(&editor)), (0, 0));
         chord_k_ctrl(&mut editor, &mut ctx, VK_S);
         assert!(matches!(editor.popup, Some(Popup::Panel(_))));
+        // Scrolled to the end in a short window, then the window grows: a full last page.
+        let mut pixels = vec![0u32; 800 * 900];
+        editor.paint(&mut pixels, 800, 300);
+        editor.event(key(VK_END, false, false), &mut ctx);
+        editor.paint(&mut pixels, 800, 900);
+        let Some(Popup::Panel(panel)) = &editor.popup else {
+            panic!("panel closed");
+        };
+        let page = editor.panel_geometry(panel).lines;
+        assert!(panel.first > panel.lines.len() - page);
+        assert_eq!(editor.panel_first(panel), panel.lines.len() - page);
 
         let mut empty = empty_editor(false);
         empty.event(mods(VK_DOWN, false, false, true), &mut ctx);

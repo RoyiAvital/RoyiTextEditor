@@ -108,11 +108,23 @@ pub fn column_after(line: &[u8], from: (usize, u64), offset: usize, tab_width: u
 /// zero-width marks are skipped. Past the scanned bytes, one byte per
 /// column; callers clamp the result to the line length.
 pub fn offset_at_column(line: &[u8], col: u64, tab_width: u32) -> usize {
+    offset_column_from(line, (0, 0), col, tab_width).0
+}
+
+/// [`offset_at_column`] continued from `from` (offset, column), the result
+/// of an earlier call for a column at most `col`; also returns the column at
+/// the offset found. Increasing columns of one line cost one pass over it.
+pub(crate) fn offset_column_from(
+    line: &[u8],
+    from: (usize, u64),
+    col: u64,
+    tab_width: u32,
+) -> (usize, u64) {
     let mut target = col;
     let mut found = None;
     let (reached, end_col) = walk(
         line,
-        (0, 0),
+        from,
         COLUMN_SCAN_LIMIT,
         tab_width,
         |o, _, c, cells| {
@@ -120,12 +132,12 @@ pub fn offset_at_column(line: &[u8], col: u64, tab_width: u32) -> usize {
                 return true;
             }
             if target <= c {
-                found = Some(o);
+                found = Some((o, c));
                 return false;
             }
             if target < c + cells {
                 if (target - c) * 2 < cells {
-                    found = Some(o);
+                    found = Some((o, c));
                     return false;
                 }
                 target = c + cells;
@@ -134,5 +146,8 @@ pub fn offset_at_column(line: &[u8], col: u64, tab_width: u32) -> usize {
         },
     );
     let past = usize::try_from(target.saturating_sub(end_col)).unwrap_or(usize::MAX);
-    found.unwrap_or_else(|| reached.saturating_add(past))
+    found.unwrap_or_else(|| {
+        let offset = reached.saturating_add(past);
+        (offset, end_col.saturating_add(past as u64))
+    })
 }

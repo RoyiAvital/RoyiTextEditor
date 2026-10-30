@@ -148,6 +148,13 @@ impl Session {
         self.is_current() && self.full.is_none()
     }
 
+    /// The host tree is a current parse of the whole file (not a window).
+    pub fn host_is_whole(&self) -> bool {
+        self.host_fresh
+            && self.full.is_none()
+            && self.host.as_ref().is_some_and(|h| h.window.is_none())
+    }
+
     /// Bytes whose highlighting is final for the latest text: the whole file,
     /// or a window starting at the file start (a window starting later lacks
     /// the context before it: provisional), and only the interest range when

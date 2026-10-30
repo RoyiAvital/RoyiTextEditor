@@ -1,0 +1,12 @@
+[package]
+name = "rte_spell"
+description = "Spelling: words of prose, dictionary engines and suggestions."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+spellbook = "0.4"
+
+[lints]
+workspace = true

@@ -12,11 +12,17 @@
 //! syntax:
 //!   maxFileMiB: 32            # larger files are not highlighted, 1 to 1024
 //!   injections: true          # embedded languages (Markdown, HTML)
+//! spelling:
+//!   enabled: false            # mark misspelled words (plain text, Markdown)
+//!   engine: builtin           # builtin, hunspell or windows
+//!   hunspell: Dictionaries/en_US   # .aff/.dic base, relative to the executable
 //! ```
 
 use std::path::Path;
 
 use saphyr_parser::{Event, Parser};
+
+use crate::spelling::Engine;
 
 pub const FILE_NAME: &str = concat!(env!("RTE_FILE_NAME"), ".yaml");
 /// Largest `palette.recentCount`.
@@ -26,7 +32,10 @@ const CURSORS_PROBLEM: &str = "editor.multiCursorLimit must be a number from 1 t
 const REPLACE_PROBLEM: &str = "search.replaceAllMaxMiB must be a number from 1 to 4096";
 const SYNTAX_MAX_PROBLEM: &str = "syntax.maxFileMiB must be a number from 1 to 1024";
 const INJECTIONS_PROBLEM: &str = "syntax.injections must be true or false";
-const SECTIONS: &[&str] = &["palette", "editor", "search", "syntax"];
+const SPELLING_PROBLEM: &str = "spelling.enabled must be true or false";
+const ENGINE_PROBLEM: &str = "spelling.engine must be builtin, hunspell or windows";
+const HUNSPELL_PROBLEM: &str = "spelling.hunspell must be a relative path";
+const SECTIONS: &[&str] = &["palette", "editor", "search", "syntax", "spelling"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
@@ -35,6 +44,10 @@ pub struct Config {
     pub replace_all_max_mib: u64,
     pub syntax_max_mib: u64,
     pub injections: bool,
+    pub spelling: bool,
+    pub spelling_engine: Engine,
+    /// Base path of the Hunspell files, relative to the executable.
+    pub hunspell: String,
 }
 
 impl Default for Config {
@@ -45,6 +58,9 @@ impl Default for Config {
             replace_all_max_mib: 512,
             syntax_max_mib: 32,
             injections: true,
+            spelling: false,
+            spelling_engine: Engine::Builtin,
+            hunspell: "Dictionaries/en_US".to_owned(),
         }
     }
 }
@@ -113,6 +129,25 @@ pub fn parse(text: &str) -> (Config, Option<String>) {
                                 config.injections = s == "true";
                             }
                             _ => problems.push(INJECTIONS_PROBLEM.to_owned()),
+                        },
+                        ("spelling", "enabled") => match &value {
+                            Value::Scalar(s) if s == "true" || s == "false" => {
+                                config.spelling = s == "true";
+                            }
+                            _ => problems.push(SPELLING_PROBLEM.to_owned()),
+                        },
+                        ("spelling", "engine") => match &value {
+                            Value::Scalar(s) if Engine::parse(s).is_some() => {
+                                config.spelling_engine =
+                                    Engine::parse(s).unwrap_or(Engine::Builtin);
+                            }
+                            _ => problems.push(ENGINE_PROBLEM.to_owned()),
+                        },
+                        ("spelling", "hunspell") => match &value {
+                            Value::Scalar(s) if !s.is_empty() && Path::new(s).is_relative() => {
+                                config.hunspell = s.clone();
+                            }
+                            _ => problems.push(HUNSPELL_PROBLEM.to_owned()),
                         },
                         (section, name) if SECTIONS.contains(&section) => {
                             problems.push(format!("unknown setting {section}.{name}"));
@@ -243,6 +278,30 @@ mod tests {
         let (config, problem) = parse("syntax:\n  injections: yes\n");
         assert!(config.injections);
         assert!(problem.unwrap().contains("syntax.injections"));
+    }
+
+    #[test]
+    fn reads_the_spelling_settings() {
+        let (config, problem) = parse(
+            "spelling:\n  enabled: true\n  engine: hunspell\n  hunspell: Dictionaries/en_GB\n",
+        );
+        assert_eq!(problem, None);
+        assert!(config.spelling);
+        assert_eq!(config.spelling_engine, Engine::Hunspell);
+        assert_eq!(config.hunspell, "Dictionaries/en_GB");
+        assert!(!Config::default().spelling, "off by default");
+        let (config, problem) = parse("spelling:\n  engine: aspell\n");
+        assert_eq!(config.spelling_engine, Engine::Builtin);
+        assert!(problem.unwrap().contains("spelling.engine"));
+        let (config, problem) = parse("spelling:\n  hunspell: C:/Dictionaries/en_US\n");
+        assert_eq!(config.hunspell, "Dictionaries/en_US");
+        assert!(problem.unwrap().contains("spelling.hunspell"));
+        assert!(
+            parse("spelling:\n  enabled: 1\n")
+                .1
+                .unwrap()
+                .contains("spelling.enabled")
+        );
     }
 
     #[test]

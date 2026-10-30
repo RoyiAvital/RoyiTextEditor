@@ -38,6 +38,7 @@ impl Editor {
         self.notice = None;
         self.prompt = None;
         self.save_queued = false;
+        self.save_refused = false;
         self.closing = None;
         self.drag = None;
         *self.caret_column.get_mut() = None;
@@ -60,7 +61,7 @@ impl Editor {
         self.expansions.clear();
         self.expanded = None;
         self.symbol_offsets.clear();
-        self.marked = (false, false);
+        self.marked = (false, false, false);
         self.reset_search();
     }
 

@@ -699,8 +699,11 @@ impl Editor {
                 };
                 f.warning = match (complex, skipped) {
                     (0, 0) => None,
-                    (0, n) => Some(format!("{n} lines skipped: invalid UTF-8 or too long")),
-                    (n, _) => Some(format!("{n} lines skipped: too complex")),
+                    (0, n) => Some(format!(
+                        "{n} line{} skipped: invalid UTF-8 or too long",
+                        plural(n)
+                    )),
+                    (n, _) => Some(format!("{n} line{} skipped: too complex", plural(n))),
                 };
             }
             Outcome::Viewport { rows, matches } => {

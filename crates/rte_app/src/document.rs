@@ -58,6 +58,8 @@ pub struct Document {
     /// (syntax highlighting reads and clears it). Undo, redo and loads are
     /// not recorded.
     pub journal: Option<Vec<Journaled>>,
+    /// The same for spelling marks (read and cleared by spelling).
+    pub spell_journal: Option<Vec<Journaled>>,
 }
 
 /// A command's change: the snapshots before and after it.
@@ -78,6 +80,7 @@ impl Document {
             locks: Locks::default(),
             options,
             journal: None,
+            spell_journal: None,
         }
     }
 
@@ -119,6 +122,16 @@ impl Document {
             Err(e) => panic!("commands build valid transactions: {e}"),
         };
         let sels = selections.unwrap_or(sels);
+        if let Some(journal) = &mut self.spell_journal {
+            if journal.len() >= JOURNAL_MAX {
+                journal.clear();
+            }
+            journal.push(Journaled {
+                before: self.snapshot.clone(),
+                after: next.clone(),
+                changes: changes.clone(),
+            });
+        }
         if let Some(journal) = &mut self.journal {
             if journal.len() >= JOURNAL_MAX {
                 journal.clear();

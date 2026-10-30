@@ -10,8 +10,9 @@ use std::ptr::null;
 
 use windows_sys::Win32::Foundation::GetLastError;
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FileIdInfo, GetFileInformationByHandleEx, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    FILE_ATTRIBUTE_READONLY, FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FileIdInfo, GetFileAttributesW,
+    GetFileInformationByHandleEx, INVALID_FILE_ATTRIBUTES, MOVEFILE_WRITE_THROUGH, MoveFileExW,
     REPLACEFILE_IGNORE_MERGE_ERRORS, ReplaceFileW,
 };
 
@@ -71,6 +72,22 @@ pub fn stamp(path: &Path) -> io::Result<Option<FileStamp>> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),
     }
+}
+
+/// The read-only attribute of `path`; `false` when it does not exist.
+pub fn is_read_only(path: &Path) -> io::Result<bool> {
+    let path = wide(path);
+    // SAFETY: NUL-terminated path that outlives the call.
+    let attributes = unsafe { GetFileAttributesW(path.as_ptr()) };
+    if attributes == INVALID_FILE_ATTRIBUTES {
+        let e = io::Error::last_os_error();
+        return if e.kind() == io::ErrorKind::NotFound {
+            Ok(false)
+        } else {
+            Err(e)
+        };
+    }
+    Ok(attributes & FILE_ATTRIBUTE_READONLY != 0)
 }
 
 /// `ReplaceFileW(target, replacement, backup)`: the old target becomes
@@ -150,6 +167,22 @@ mod tests {
         let kept = stamp(&backup).unwrap().unwrap();
         assert_eq!((kept.size, kept.write_time), (old.size, old.write_time));
         assert!(replace(&dir.join("missing"), &target, &backup).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn read_only_attribute() {
+        let dir = temp_dir("read_only");
+        let path = dir.join("a.txt");
+        assert!(!is_read_only(&path).unwrap());
+        std::fs::write(&path, b"a").unwrap();
+        assert!(!is_read_only(&path).unwrap());
+        let original = std::fs::metadata(&path).unwrap().permissions();
+        let mut permissions = original.clone();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        assert!(is_read_only(&path).unwrap());
+        std::fs::set_permissions(&path, original).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

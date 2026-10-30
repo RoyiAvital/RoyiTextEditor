@@ -277,7 +277,7 @@ pub fn draw_find(g: &FindGeometry, f: &FindFrame<'_>, out: &mut Layer) {
 
     let border = match f.message {
         Some((_, Severity::Error)) => theme.error_border,
-        Some((_, Severity::Warning)) => theme.at_risk,
+        Some((_, Severity::Warning)) => theme.warning,
         None if f.find.focused => theme.popup_match,
         None => theme.popup_border,
     };
@@ -331,7 +331,7 @@ pub fn draw_find(g: &FindGeometry, f: &FindFrame<'_>, out: &mut Layer) {
     if let Some((text, severity)) = f.message {
         let (background, edge, color) = match severity {
             Severity::Error => (theme.error_background, theme.error_border, theme.error_text),
-            Severity::Warning => (theme.prompt_background, theme.at_risk, theme.prompt_text),
+            Severity::Warning => (theme.prompt_background, theme.warning, theme.prompt_text),
         };
         out.fill(g.message, edge);
         out.fill(inset(g.message), background);

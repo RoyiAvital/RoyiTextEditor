@@ -34,13 +34,15 @@ Requirements: Windows 11, x64 CPU with AVX2.
 ## Usage
 
 ```text
-RoyiTextEditor.exe [--read-only] [--syntax <id>] [file]
+RoyiTextEditor.exe [--read-only] [--syntax <id>] [--spelling <engine>] [file]
 ```
 
 `--syntax <id>` chooses the highlighting language (for example `--syntax json`
 for a `.ipynb` notebook); `--syntax none` or `--syntax off` (any case) turns
 highlighting off, as does `View: Toggle Syntax Highlighting` in the palette.
 An unknown id keeps the language of the file name and shows a notice.
+`--spelling off|builtin|hunspell|windows` turns spelling off or on with that
+engine for the session.
 
 | Keys                                                | Action                                                 |
 | --------------------------------------------------- | ------------------------------------------------------ |
@@ -76,7 +78,10 @@ An unknown id keeps the language of the file name and shows a notice.
 
 Unsaved changes show `●` in the title strip. Saving replaces the file
 atomically; when another program changed the file, the editor asks before
-overwriting it.
+overwriting it. A file with the Windows Read-only attribute is not saved: the
+`●` turns orange and the status line asks to clear the attribute and save
+again (the editor never changes attributes). A file whose lines end with a
+lone CR is shown as one line, and the status line says so.
 
 The slider at the right edge shows where the view is in the file: drag it,
 or press the strip to jump there (the caret stays). Lines longer than 64 KiB
@@ -130,7 +135,11 @@ its name and key; the arrow on the left shows or hides the replace field.
 - **Text** finds the typed text anywhere. **Glob**: `?` is one character, `*`
   the shortest text within a line, a trailing `*` the rest of the line.
   **RegEx** uses Rust regular expressions; look-around and backreferences use
-  a bounded engine that skips lines it cannot finish.
+  a bounded engine that skips lines it cannot finish. With them, write line
+  breaks as `\n` (`.` with `(?s)` or `\s` does not reach the next line), and
+  a pattern that backtracks heavily on a very long line keeps the search
+  busy until it finishes (`Esc` does not interrupt it).
+- **Whole Word** keeps accents (combining marks) with their word.
 - Replacements use the VS Code syntax: `$1`, `$<name>`, `$0`, `$$`, `\n`,
   `\t` and the case operators `\u`, `\l`, `\U`, `\L`.
 
@@ -190,10 +199,38 @@ opening bracket or quote is typed, and `Enter` after an opening bracket (or a
 Python or YAML `:`) indents the new line. The bracket pair at the caret is
 marked.
 
+### Spelling
+
+Off by default: set `spelling.enabled: true`, start with
+`--spelling builtin`, or run `View: Toggle Spelling`. US English words of
+plain text and Markdown prose are checked (Markdown code, links, HTML and
+front matter are skipped); misspelled words of the visible rows get a blue
+wavy underline, and with the caret on one the status line shows
+`Spelling: recieve (Ctrl+.)`. Code files are not checked.
+
+| Keys                 | Action                                                   |
+| -------------------- | -------------------------------------------------------- |
+| `Ctrl+.`             | Suggestions first, then Add to Dictionary, Ignore, F8    |
+| `F8` / `Shift+F8`    | Select the next / previous misspelled word (wraps)       |
+
+- `Ctrl+.`, `Enter` replaces the word with the best suggestion (one undo
+  step). `Spelling: Add to Dictionary` and `Spelling: Ignore Word` are also
+  palette commands.
+- Engines (`spelling.engine`): `builtin` (a US English word list in the
+  executable), `hunspell` (the `Dictionaries/en_US` files shipped beside it,
+  or another `.aff` / `.dic` pair set by `spelling.hunspell`) and `windows`
+  (the Windows spell checker, when US English is installed). An engine that
+  cannot start is reported and the built-in one is used.
+- Added words are kept in `UserSettings/Spelling/en_US.txt` (one per line,
+  at most 64 KiB and 10,000 words) for every engine; ignored words last for
+  the session.
+- Markdown is checked with syntax highlighting on (its structure comes from
+  the syntax thread); with `--syntax none` a Markdown file is plain text.
+
 ### Command Palette
 
 Commands are grouped in families: `Application:`, `File:`, `Edit:`,
-`Selection:`, `Search:`, `Go:` and `View:`. Type any part of a name (for
+`Selection:`, `Search:`, `Go:`, `Spelling:` and `View:`. Type any part of a name (for
 example `fsave`), move with `Up` / `Down` / `PgUp` / `PgDn`, run with `Enter`
 or a click, close with `Esc`. The search field supports the usual editing
 keys, `Ctrl+A` and `Ctrl+V`.
@@ -218,15 +255,23 @@ keep their defaults.
 
 ```yaml
 palette:
-  recentCount: 3          # recent commands listed by Ctrl+P, 0 to 20
+  recentCount: 3          # recent commands listed by Ctrl+P, 0 to 20 (0: none)
 editor:
-  multiCursorLimit: 10000 # most selections, 1 to 1,000,000
+  multiCursorLimit: 10000 # most selections, 1 to 1,000,000; more is refused
 search:
-  replaceAllMaxMiB: 512   # memory for one Replace All [MiB], 1 to 4096
+  replaceAllMaxMiB: 512   # memory for one Replace All [MiB], 1 to 4096; more is refused
 syntax:
   maxFileMiB: 32          # larger files are not highlighted, 1 to 1024
-  injections: true        # embedded languages (Markdown, HTML)
+  injections: true        # embedded languages (Markdown fences, HTML scripts and styles)
+spelling:
+  enabled: false          # mark misspelled words (plain text, Markdown prose)
+  engine: builtin         # builtin, hunspell or windows; a failing engine falls back to builtin
+  hunspell: Dictionaries/en_US  # .aff/.dic base, relative to the executable
 ```
+
+The settings are read once at startup; restart after a change. The
+[Configuration](https://RoyiAvital.github.io/RoyiTextEditor/configuration.html)
+page describes every setting.
 
 ## Features
 

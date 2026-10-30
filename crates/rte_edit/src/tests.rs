@@ -122,6 +122,45 @@ fn vertical_keeps_goal_column() {
 }
 
 #[test]
+fn line_walks_agree_with_single_lookups() {
+    // Tabs, wide characters, zero-width marks, CRLF, and a line past the scan limit.
+    let unit = "a\tb\u{4E2D}e\u{301} ";
+    let long = "x".repeat(COLUMN_SCAN_LIMIT + 100);
+    let text = format!("{}\r\n{}\n{long}\n\tq", unit.repeat(50), unit.repeat(30));
+    let s = Snapshot::from_bytes(text.as_bytes());
+    let positions: Vec<u64> = (0..=s.len())
+        .filter(|&p| snap_to_boundary(&s, p) == p)
+        .step_by(61)
+        .collect();
+    let mut walk = LineWalk::default();
+    for &p in &positions {
+        assert_eq!(walk.column(&s, p, 4), column_at(&s, p, 4), "column at {p}");
+    }
+    for line in 0..s.line_count() {
+        let mut walk = LineWalk::default();
+        let range = content_range(&s, line);
+        for col in (0..400).chain([COLUMN_SCAN_LIMIT as u64 + 50, u64::MAX]) {
+            let expected = offset_in_line(&s, range.clone(), col, 4);
+            assert_eq!(
+                walk.offset(&s, line, col, 4),
+                expected,
+                "line {line} col {col}"
+            );
+        }
+        // A smaller column restarts the walk.
+        assert_eq!(walk.offset(&s, line, 3, 4), offset_in_line(&s, range, 3, 4));
+    }
+    let mut v = Vertical::default();
+    for &p in &positions {
+        assert_eq!(
+            v.step(&s, p, None, 1, 4),
+            vertical(&s, p, None, 1, 4),
+            "{p}"
+        );
+    }
+}
+
+#[test]
 fn columns_follow_cell_rules() {
     let line = "a\tb中e\u{301}\u{1}".as_bytes();
     assert_eq!(column_of(line, 1, 4), 1);
@@ -469,12 +508,36 @@ fn history_retention_drops_oldest() {
         step(&mut history, &mut s, &mut sels, cmd, None);
     }
     assert_eq!(history.undo_len(), 3);
-    let mut history = History::with_limits(100, 10);
+    // Each step holds 5 bytes and two single-caret selection sets.
+    let per_step = 5 + 2 * size_of::<Selection>() as u64;
+    let mut history = History::with_limits(100, 2 * per_step);
     for _ in 0..3 {
         let cmd = insert(&s, &sels, b"12345", &opts);
         step(&mut history, &mut s, &mut sels, cmd, None);
     }
     assert_eq!(history.undo_len(), 2);
+}
+
+#[test]
+fn history_budget_counts_selections() {
+    let opts = lf();
+    let mut s = Snapshot::from_bytes(&b" ".repeat(1000));
+    let mut sels = Selections::new((0..1000).map(Selection::caret).collect(), 0);
+    // One step holds 2,000 selections: far over a 10 KiB budget, so only the last stays.
+    let mut history = History::with_limits(100, 10 * 1024);
+    for _ in 0..3 {
+        let cmd = insert(&s, &sels, b"x", &opts);
+        step(&mut history, &mut s, &mut sels, cmd, None);
+        history.seal();
+    }
+    assert_eq!(history.undo_len(), 1);
+    let mut history = History::with_limits(100, 1024 * 1024);
+    for _ in 0..3 {
+        let cmd = insert(&s, &sels, b"x", &opts);
+        step(&mut history, &mut s, &mut sels, cmd, None);
+        history.seal();
+    }
+    assert_eq!(history.undo_len(), 3);
 }
 
 #[derive(Clone, Debug)]
@@ -882,4 +945,13 @@ fn enter_indents_after_an_opening_bracket() {
     assert_eq!(enter("x = {'a':| 1}", true), "none: x = {'a':| 1}");
     // Replacing a multi-line body keeps the closing brace on its own line.
     assert_eq!(enter("{[\n  foo\n]}", false), "{\n    |\n}");
+    // Past the 64 KiB scan limit the opener is the text before the caret.
+    let long = "a".repeat(COLUMN_SCAN_LIMIT + 10);
+    let s = Snapshot::from_bytes(format!("{long}{{").as_bytes());
+    let sels = Selections::single(Selection::caret(s.len()));
+    assert!(newline_indent(&s, &sels, &opts, &|_| (brackets, false)).is_some());
+    let spaces = " ".repeat(COLUMN_SCAN_LIMIT + 10);
+    let s = Snapshot::from_bytes(format!("{{{spaces}x").as_bytes());
+    let sels = Selections::single(Selection::caret(s.len()));
+    assert!(newline_indent(&s, &sels, &opts, &|_| (brackets, false)).is_none());
 }

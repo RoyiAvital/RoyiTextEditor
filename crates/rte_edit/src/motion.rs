@@ -6,7 +6,9 @@ use std::ops::Range;
 
 use rte_text::Snapshot;
 
-use crate::columns::{COLUMN_SCAN_LIMIT, cell_width, column_of, offset_at_column};
+use crate::columns::{
+    COLUMN_SCAN_LIMIT, cell_width, column_after, column_of, offset_at_column, offset_column_from,
+};
 use crate::cursor::Bytes;
 
 /// Bytes one movement may scan.
@@ -158,18 +160,117 @@ pub fn vertical(
     lines: i64,
     tab_width: u32,
 ) -> (u64, u64) {
-    let goal = goal.unwrap_or_else(|| column_at(s, pos, tab_width));
-    let line = s.line_of(pos);
-    let last = s.line_count() - 1;
-    let target = line as i64 + lines;
-    if target < 0 {
-        return (0, goal);
+    Vertical::default().step(s, pos, goal, lines, tab_width)
+}
+
+/// Columns and caret offsets of many sorted positions in one snapshot (one
+/// command): each line's bytes are read once, as far as needed, and walked
+/// forward; an earlier position or column restarts the walk.
+#[derive(Default)]
+pub struct LineWalk {
+    line: Option<u64>,
+    range: Range<u64>,
+    bytes: Vec<u8>,
+    /// Column walk: the last offset and its column.
+    at: (usize, u64),
+    /// Offset walk: the last column asked, and the offset and column found.
+    found: (u64, (usize, u64)),
+}
+
+impl LineWalk {
+    fn load(&mut self, s: &Snapshot, line: u64) {
+        if self.line != Some(line) {
+            self.line = Some(line);
+            self.range = content_range(s, line);
+            self.bytes.clear();
+            self.at = (0, 0);
+            self.found = (0, (0, 0));
+        }
     }
-    if target as u64 > last {
-        return (s.len(), goal);
+
+    /// Reads the line up to `need` bytes (at most [`COLUMN_SCAN_LIMIT`]);
+    /// true when the whole scanned part is read.
+    fn read(&mut self, s: &Snapshot, need: u64) -> bool {
+        let full = (self.range.end - self.range.start).min(COLUMN_SCAN_LIMIT as u64);
+        let need = need.min(full);
+        let have = self.bytes.len() as u64;
+        if have < need {
+            for chunk in s.chunks(self.range.start + have..self.range.start + need) {
+                self.bytes.extend_from_slice(chunk);
+            }
+        }
+        self.bytes.len() as u64 == full
     }
-    let range = content_range(s, target as u64);
-    (offset_in_line(s, range, goal, tab_width), goal)
+
+    /// [`column_at`] of `pos`.
+    pub fn column(&mut self, s: &Snapshot, pos: u64, tab_width: u32) -> u64 {
+        self.load(s, s.line_of(pos));
+        let offset = (pos.clamp(self.range.start, self.range.end) - self.range.start) as usize;
+        self.read(s, offset as u64);
+        if offset < self.at.0 {
+            self.at = (0, 0);
+        }
+        self.at = (
+            offset,
+            column_after(&self.bytes, self.at, offset, tab_width),
+        );
+        self.at.1
+    }
+
+    /// [`offset_in_line`] of column `col` in `line`.
+    pub fn offset(&mut self, s: &Snapshot, line: u64, col: u64, tab_width: u32) -> u64 {
+        self.load(s, line);
+        if col < self.found.0 {
+            self.found = (0, (0, 0));
+        }
+        let mut window = col.saturating_mul(4).saturating_add(256);
+        loop {
+            let whole = self.read(s, window);
+            let (offset, at) = offset_column_from(&self.bytes, self.found.1, col, tab_width);
+            if offset < self.bytes.len() || whole {
+                if offset < self.bytes.len() {
+                    self.found = (col, (offset, at));
+                }
+                let pos = self
+                    .range
+                    .start
+                    .saturating_add(offset as u64)
+                    .min(self.range.end);
+                return snap_to_boundary(s, pos);
+            }
+            window = window.saturating_mul(4);
+        }
+    }
+}
+
+/// [`vertical`] for many sorted carets: source and target lines are read once.
+#[derive(Default)]
+pub struct Vertical {
+    source: LineWalk,
+    target: LineWalk,
+}
+
+impl Vertical {
+    pub fn step(
+        &mut self,
+        s: &Snapshot,
+        pos: u64,
+        goal: Option<u64>,
+        lines: i64,
+        tab_width: u32,
+    ) -> (u64, u64) {
+        let goal = goal.unwrap_or_else(|| self.source.column(s, pos, tab_width));
+        let line = s.line_of(pos);
+        let last = s.line_count() - 1;
+        let target = line as i64 + lines;
+        if target < 0 {
+            return (0, goal);
+        }
+        if target as u64 > last {
+            return (s.len(), goal);
+        }
+        (self.target.offset(s, target as u64, goal, tab_width), goal)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
