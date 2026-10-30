@@ -73,6 +73,19 @@
    While the application is optimized towards low memory footprint it
    is also designed to use available memory. Hence it loads large files
    into memory to keep them smooth. 
+ - Follow VS Code  
+   In general, we follow VS Code behavior.
+ - User Knows What He Does  
+   Don't protect misuse / "stupid user".
+ - Single User, Single Computer  
+   The use case of the application is within a single computer by a single user.  
+   No protection against user initiated operations that happen closer together than a person can act.
+ - Startup Time / Periodic Checks  
+   Don't do things at startup which can be done later.  
+   First strive to show the file to the user.  
+   Hence refrain from checks on startup or periodically.  
+   For instance, check for read only attribute of a file only before saving.
+
 
  
 See [Plan/Architecture.md](Plan/Architecture.md) for the full design.
