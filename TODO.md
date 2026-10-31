@@ -9,7 +9,8 @@
  - [x] Add _Tooltips_ to the icons in _Search Text_ (Both outside the box and within the box). 
  - [x] Make the Right / Down Arrow in _Search Text_ (Replace) larger.
  - [x] Add support for `ini` files with _syntax highlighting_.
- - [ ] Add support for Text Spelling with support for code skipping (Only remarks). Should be disabled by default.
+ - [x] Add support for Text Spelling with support for text and MarkDown. Should be disabled by default.
+ - [ ] Add support for Text Spelling for comments in code.
  - [ ] Add support for Code Spelling like VS Code extensions (Will mark `myVarieble` with support for `snake_case` and `camelCase`).
  - [ ] Add _Auto Indent_ for `C`.
  - [ ] Add _Auto Indent_ for `C++`.
