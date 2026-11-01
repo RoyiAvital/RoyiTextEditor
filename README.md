@@ -65,6 +65,7 @@ engine for the session.
 | `Ctrl+Z`, `Ctrl+Y` / `Ctrl+Shift+Z`                 | Undo, redo                                             |
 | `Ctrl+C` / `Ctrl+X` / `Ctrl+V`                      | Copy / cut / paste (whole line without a selection)    |
 | `Ctrl+S`                                            | Save                                                   |
+| `Ctrl+K P`                                          | Copy the full path of the file                         |
 | Click, double-click, triple-click, `Shift`+click    | Place the caret, select a word, a line, extend         |
 | Wheel, `Ctrl+Up` / `Ctrl+Down`                      | Scroll lines                                           |
 | `Alt+PgUp` / `Alt+PgDn`                             | Scroll a page (the caret stays)                        |
@@ -238,6 +239,8 @@ keys, `Ctrl+A` and `Ctrl+V`.
 - Click the star of a command, or press `Ctrl+Space`, to add or remove it from
   the favorites.
 - `Ctrl+P` lists the last commands run from the palette, then the favorites.
+- `File: Copy Path of Active File` (`Ctrl+K P`) copies the full path of the
+  file; `File: Copy Name of Active File` copies its name.
 - `Application: Keyboard Shortcuts` (`Ctrl+K Ctrl+S`) shows all keys;
   `Application: About` shows
   the version and links; `Application: Documentation` opens the online

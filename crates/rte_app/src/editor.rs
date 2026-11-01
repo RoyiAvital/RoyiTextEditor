@@ -1027,6 +1027,24 @@ impl Editor {
         self.run(cmd, None);
     }
 
+    /// The file's absolute path, or only its name, as plain text.
+    fn copy_file_path(&mut self, name_only: bool, ctx: &mut Ctx) {
+        let Some(path) = self.path.as_deref() else {
+            return;
+        };
+        let text = if name_only {
+            display_name(path)
+        } else {
+            std::path::absolute(path)
+                .unwrap_or_else(|_| path.to_owned())
+                .display()
+                .to_string()
+        };
+        if !ctx.set_clipboard(&text, clip::FORMAT, &[]) {
+            self.notice = Some("The clipboard is not available".to_owned());
+        }
+    }
+
     fn paste(&mut self, ctx: &mut Ctx) {
         let Some((text, data)) = ctx.clipboard(clip::FORMAT) else {
             return;
@@ -1255,6 +1273,8 @@ impl Editor {
                 let state = if self.doc.locks.user { "on" } else { "off" };
                 self.notice = Some(format!("Read-only {state}"));
             }
+            Action::CopyFilePath => self.copy_file_path(false, ctx),
+            Action::CopyFileName => self.copy_file_path(true, ctx),
             Action::Undo => self.undo_redo(false),
             Action::Redo => self.undo_redo(true),
             Action::Cut => self.copy(ctx, true),
@@ -4259,6 +4279,34 @@ mod tests {
         editor.event(key(VK_F1, false, false), &mut ctx);
         assert!(editor.event(alt(VK_F4), &mut ctx));
         assert!(ctx.close_requested(), "Quit works with the palette open");
+    }
+
+    #[test]
+    fn copy_path_and_name_of_the_active_file() {
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, b"text", true);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        let clipboard = |ctx: &mut Ctx| ctx.clipboard(clip::FORMAT).unwrap().0;
+        chord_k(&mut editor, &mut ctx, VK_P);
+        assert_eq!(clipboard(&mut ctx), r"C:\docs\test.txt");
+        editor.perform(Action::CopyFileName, &mut ctx);
+        assert_eq!(clipboard(&mut ctx), "test.txt", "also when read-only");
+        assert_eq!(text(&editor), "text");
+
+        // A relative command-line path is copied absolute and pastes as plain text.
+        let mut editor = editor_named("notes.md", b"");
+        editor.event(Event::Wake, &mut ctx);
+        editor.perform(Action::CopyFilePath, &mut ctx);
+        let absolute = std::env::current_dir().unwrap().join("notes.md");
+        assert_eq!(clipboard(&mut ctx), absolute.display().to_string());
+        editor.event(key(VK_V, true, false), &mut ctx);
+        assert_eq!(text(&editor), absolute.display().to_string());
+
+        let mut empty = empty_editor(false);
+        ctx.set_clipboard("kept", clip::FORMAT, &[]);
+        empty.perform(Action::CopyFilePath, &mut ctx);
+        assert_eq!(empty.notice.as_deref(), Some("No file is open"));
+        assert_eq!(clipboard(&mut ctx), "kept");
     }
 
     #[test]

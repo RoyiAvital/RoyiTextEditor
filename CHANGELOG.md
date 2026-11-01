@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-01
+
+### Added
+
+- `File: Copy Path of Active File` (`Ctrl+K P`, as in VS Code) copies the
+  full path of the file; `File: Copy Name of Active File` copies its name.
+
 ## [0.6.0] - 2026-10-30
 
 This release brings a _Spell Checker_ with a keyboard focused flow for correcting

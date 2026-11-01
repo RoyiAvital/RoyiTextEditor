@@ -73,6 +73,8 @@ pub enum Action {
     Save,
     Close,
     ToggleReadOnly,
+    CopyFilePath,
+    CopyFileName,
     Undo,
     Redo,
     Cut,
@@ -461,6 +463,19 @@ pub static COMMANDS: &[CommandDef] = &[
         &[ctrl(VK_W), ctrl(VK_F4)],
         false,
         Action::Close,
+    ),
+    command(
+        "royi.copyNameOfActiveFile",
+        "File: Copy Name of Active File",
+        &[],
+        false,
+        Action::CopyFileName,
+    ),
+    chord(
+        "workbench.action.files.copyPathOfActiveFile",
+        "File: Copy Path of Active File",
+        &[(ctrl(VK_K), plain(VK_P))],
+        Action::CopyFilePath,
     ),
     command(
         "workbench.action.files.save",
