@@ -40,6 +40,7 @@ use crate::save::{self, Baseline, FileOps, SaveOutcome, SaveRequest};
 use crate::search::SearchThread;
 use crate::syntax::{EarlySyntax, Syntax};
 use crate::trace::Trace;
+use crate::watcher::Watcher;
 
 use cursors::Column;
 use find::{FindBox, PendingOp};
@@ -75,6 +76,17 @@ struct PendingOpen {
     load: Load,
     /// Shown once the file is open.
     notice: Option<String>,
+    /// A reload (`R`): opens despite unsaved changes, then restores the
+    /// scroll and the caret.
+    restore: Option<(Scroll, u64)>,
+}
+
+/// The watcher of the open file, started once it is loaded and shown.
+enum Watching {
+    Idle,
+    Running(Watcher),
+    /// No notifications, or a failed wait: started again after a save.
+    Ended,
 }
 
 enum LoadStatus {
@@ -143,7 +155,7 @@ enum Prompt {
     /// Unsaved changes, then what to do once they are saved or dropped.
     DirtyClose(Exit),
     /// The file changed on disk; `Baseline` is the version found there.
-    Conflict(Baseline),
+    Changed(Baseline),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -279,6 +291,14 @@ pub struct Editor {
     spell_on: bool,
     /// Changes when the drawn spelling marks change.
     spell_rev: u64,
+    watching: Watching,
+    /// The file on disk as last reported or written (`Some(None)`: absent);
+    /// `None` before the first report.
+    disk: Option<Option<rte_platform::files::FileStamp>>,
+    /// The deletion notice was shown for the current disappearance.
+    deletion_shown: bool,
+    /// Scroll and caret restored when a reload is loaded.
+    restore: Option<(Scroll, u64)>,
 }
 
 /// What a frame shows; a repaint is requested only when it changes.
@@ -450,6 +470,10 @@ impl Editor {
             spell: None,
             spell_on,
             spell_rev: 0,
+            watching: Watching::Idle,
+            disk: None,
+            deletion_shown: false,
+            restore: None,
         };
         // `--syntax` belongs to the command-line file; without one it is unused.
         if editor.path.is_some() {
@@ -735,8 +759,15 @@ impl Editor {
                 self.status = LoadStatus::Ready;
                 self.detect_language();
                 self.restart_syntax();
+                if let Some((scroll, caret)) = self.restore.take() {
+                    let s = &self.doc.snapshot;
+                    let caret = edit::snap_to_boundary(s, caret.min(s.len()));
+                    self.doc.select(Selections::single(Selection::caret(caret)));
+                    self.scroll = scroll;
+                }
             }
             LoadEvent::Failed { snapshot, error } => {
+                self.restore = None;
                 self.doc.load(snapshot);
                 self.doc.locks.load_error = true;
                 self.status = LoadStatus::Failed(error);
@@ -1109,6 +1140,7 @@ impl Editor {
                 self.doc.saved = snapshot;
                 self.doc.history.seal();
                 self.baseline = baseline;
+                self.wrote_file();
                 if let Some(info) = self.info.as_mut() {
                     info.new_file = false;
                 }
@@ -1116,7 +1148,7 @@ impl Editor {
             }
             SaveOutcome::Conflict { disk } => {
                 self.save_queued = false;
-                self.prompt = Some(Prompt::Conflict(disk));
+                self.prompt = Some(Prompt::Changed(disk));
             }
             SaveOutcome::ReadOnly => {
                 self.save_queued = false;
@@ -1149,7 +1181,7 @@ impl Editor {
     /// Quit (`Alt+F4`, `Ctrl+Shift+W`, the window close request), asking
     /// first about unsaved changes; waits for a running save.
     fn request_close(&mut self, ctx: &mut Ctx) {
-        self.pending = None;
+        self.cancel_pending();
         if self.saving.is_some() {
             self.closing = Some(Exit::Quit);
         } else if self.doc.is_dirty() {
@@ -1162,7 +1194,7 @@ impl Editor {
     fn prompt_key(&mut self, prompt: Prompt, key: Key, ctx: &mut Ctx) {
         let plain = !key.ctrl && !key.alt;
         match (prompt, key.vk) {
-            (_, VK_ESCAPE) => {
+            (Prompt::DirtyClose(_), VK_ESCAPE) => {
                 self.prompt = None;
                 self.closing = None;
             }
@@ -1178,12 +1210,105 @@ impl Editor {
                 self.prompt = None;
                 self.finish_exit(exit, ctx);
             }
-            (Prompt::Conflict(disk), VK_O) if plain => {
+            (Prompt::Changed(disk), VK_S) if plain && self.doc.locks.save_refusal().is_none() => {
                 self.prompt = None;
                 self.start_save(Some(disk));
             }
+            (Prompt::Changed(_), VK_R) if plain => {
+                self.prompt = None;
+                self.closing = None;
+                self.reload();
+            }
             _ => {}
         }
+    }
+
+    /// After an own save: the file holds the new baseline. Older reports
+    /// are dropped and a fresh one is asked for; an ended watcher restarts.
+    fn wrote_file(&mut self) {
+        self.disk = Some(self.baseline.map(|b| b.stamp));
+        match &self.watching {
+            Watching::Running(watcher) => watcher.refresh(),
+            Watching::Ended => self.watching = Watching::Idle,
+            Watching::Idle => {}
+        }
+    }
+
+    /// Starts the watcher once the file is loaded and on screen.
+    fn sync_watcher(&mut self) {
+        if !matches!(self.watching, Watching::Idle)
+            || !self.shown
+            || self.pending.is_some()
+            || !matches!(self.status, LoadStatus::Ready)
+        {
+            return;
+        }
+        let Some(path) = self.path.as_deref() else {
+            return;
+        };
+        self.watching = match Watcher::spawn(path, self.files.clone(), self.wake.clone()) {
+            Ok(watcher) => Watching::Running(watcher),
+            Err(_) => Watching::Ended,
+        };
+    }
+
+    fn drain_watcher(&mut self) {
+        let Watching::Running(watcher) = &self.watching else {
+            return;
+        };
+        let polled = watcher.poll();
+        if let Some(stamp) = polled.latest {
+            self.disk = Some(stamp);
+        }
+        if polled.ended {
+            self.watching = Watching::Ended;
+        }
+    }
+
+    /// Asks Reload or Save Current when the file on disk is not the version
+    /// last loaded or saved (a notice when it is gone); waits while a save,
+    /// a load, a close or another prompt runs.
+    fn check_disk(&mut self) {
+        let Some(disk) = self.disk else {
+            return;
+        };
+        if self.prompt.is_some()
+            || self.saving.is_some()
+            || self.closing.is_some()
+            || self.pending.is_some()
+            || !matches!(self.status, LoadStatus::Ready)
+            || self.no_file()
+        {
+            return;
+        }
+        if disk == self.baseline.map(|b| b.stamp) {
+            self.deletion_shown = false;
+            return;
+        }
+        match disk {
+            Some(stamp) => {
+                self.deletion_shown = false;
+                self.prompt = Some(Prompt::Changed(Baseline { stamp, hash: None }));
+            }
+            None if !self.deletion_shown => {
+                self.deletion_shown = true;
+                let name = self.path.as_deref().map(display_name).unwrap_or_default();
+                self.notice = Some(format!("{name} was deleted on disk; saving recreates it"));
+            }
+            None => {}
+        }
+    }
+
+    /// `R`: opens the file again as a drop does, dropping unsaved changes
+    /// and the history; the scroll and the caret come back once loaded.
+    fn reload(&mut self) {
+        let Some(path) = self.path.clone() else {
+            return;
+        };
+        let restore = (self.scroll, self.doc.selections.primary().head);
+        let name = display_name(&path);
+        self.start_open(path, None, Some(restore));
+        self.notice = Some(format!("Reloading {name}\u{2026}"));
     }
 
     fn key(&mut self, key: Key, ctx: &mut Ctx) -> bool {
@@ -2145,9 +2270,12 @@ impl Editor {
                 };
                 format!("{question}   Enter: Save   D: Discard   Esc: Cancel")
             }
-            Some(Prompt::Conflict(_)) => {
-                format!("{name} changed on disk.   O: Overwrite   Esc: Cancel")
-            }
+            Some(Prompt::Changed(_)) => match self.doc.locks.save_refusal() {
+                None => format!("{name} changed on disk.   R: Reload   S: Save Current"),
+                Some(reason) => {
+                    format!("{name} changed on disk.   R: Reload   (cannot save: {reason})")
+                }
+            },
             None if self.saving.is_some() => "Saving\u{2026}".to_owned(),
             None => match (&self.notice, &self.status) {
                 (Some(notice), _) => notice.clone(),
@@ -2347,6 +2475,7 @@ impl App for Editor {
                 self.drain_pending();
                 self.drain_loads();
                 self.drain_saves(ctx);
+                self.drain_watcher();
                 self.drain_store();
                 self.drain_search();
                 self.drain_syntax();
@@ -2356,6 +2485,8 @@ impl App for Editor {
         }
         self.sync_syntax();
         self.sync_spelling();
+        self.sync_watcher();
+        self.check_disk();
         let title = window_title(self.path.as_deref(), self.doc.is_dirty());
         if title != self.shown_title {
             ctx.set_title(&title);
@@ -3097,12 +3228,261 @@ mod tests {
         type_text(&mut editor, &mut ctx, "x");
         editor.event(key(VK_S, true, false), &mut ctx);
         settle(&mut editor, &mut ctx);
-        assert!(matches!(editor.prompt, Some(Prompt::Conflict(_))));
+        assert!(matches!(editor.prompt, Some(Prompt::Changed(_))));
         assert_eq!(files.get(&path()).unwrap(), b"changed elsewhere");
+        // Only R and S answer.
+        editor.event(key(VK_ESCAPE, false, false), &mut ctx);
         editor.event(key(VK_O, false, false), &mut ctx);
+        assert!(matches!(editor.prompt, Some(Prompt::Changed(_))));
+        editor.event(key(VK_S, false, false), &mut ctx);
         settle(&mut editor, &mut ctx);
         assert_eq!(files.get(&path()).unwrap(), b"xold");
         assert!(!editor.doc.is_dirty());
+    }
+
+    /// A watcher that reports what the test sends.
+    fn fake_watcher(editor: &mut Editor) -> mpsc::Sender<crate::watcher::Report> {
+        let (tx, watcher) = Watcher::fake();
+        editor.watching = Watching::Running(watcher);
+        tx
+    }
+
+    /// Sends the file's state at `path` as read in the watcher's current epoch.
+    fn report(editor: &mut Editor, ctx: &mut Ctx, tx: &mpsc::Sender<crate::watcher::Report>) {
+        let Watching::Running(watcher) = &editor.watching else {
+            panic!("no watcher");
+        };
+        let stamp = editor.files.stamp(editor.path.as_deref().unwrap()).unwrap();
+        tx.send(crate::watcher::Report {
+            epoch: watcher.epoch(),
+            stamp,
+        })
+        .unwrap();
+        editor.event(Event::Wake, ctx);
+    }
+
+    #[test]
+    fn disk_change_prompts_reload_or_save_mine() {
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, b"mine", false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        let tx = fake_watcher(&mut editor);
+        // The loaded version: nothing to ask.
+        report(&mut editor, &mut ctx, &tx);
+        assert_eq!(editor.prompt, None);
+        files.put(&path(), b"theirs");
+        report(&mut editor, &mut ctx, &tx);
+        assert!(matches!(editor.prompt, Some(Prompt::Changed(_))));
+        assert_eq!(
+            editor.status_text().0,
+            "test.txt changed on disk.   R: Reload   S: Save Current"
+        );
+        // Only R and S answer: not Escape, typing or Alt+F4.
+        editor.event(key(VK_ESCAPE, false, false), &mut ctx);
+        type_text(&mut editor, &mut ctx, "x");
+        let alt_f4 = Key {
+            vk: VK_F4,
+            ctrl: false,
+            shift: false,
+            alt: true,
+        };
+        editor.event(Event::Key(alt_f4), &mut ctx);
+        assert!(matches!(editor.prompt, Some(Prompt::Changed(_))));
+        assert!(!ctx.close_requested());
+        assert_eq!(text(&editor), "mine");
+        editor.event(key(VK_S, false, false), &mut ctx);
+        settle(&mut editor, &mut ctx);
+        assert_eq!(files.get(&path()).unwrap(), b"mine");
+        assert_eq!(editor.prompt, None);
+        // The own save is not an outside change.
+        report(&mut editor, &mut ctx, &tx);
+        assert_eq!(editor.prompt, None);
+        // Deleted: one notice; back again: the prompt.
+        files.delete(&path()).unwrap();
+        report(&mut editor, &mut ctx, &tx);
+        assert_eq!(
+            editor.notice.as_deref(),
+            Some("test.txt was deleted on disk; saving recreates it")
+        );
+        editor.notice = None;
+        report(&mut editor, &mut ctx, &tx);
+        assert_eq!(editor.notice, None, "once");
+        files.put(&path(), b"back");
+        report(&mut editor, &mut ctx, &tx);
+        assert!(matches!(editor.prompt, Some(Prompt::Changed(_))));
+        // Malformed UTF-16 cannot be saved: only R answers.
+        editor.doc.locks.encoding = true;
+        assert!(
+            editor
+                .status_text()
+                .0
+                .ends_with("(cannot save: malformed UTF-16)")
+        );
+        editor.event(key(VK_S, false, false), &mut ctx);
+        assert!(matches!(editor.prompt, Some(Prompt::Changed(_))));
+        assert!(editor.saving.is_none());
+    }
+
+    #[test]
+    fn disk_change_reports_older_than_an_own_save_are_dropped() {
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, b"", false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        let tx = fake_watcher(&mut editor);
+        let (open, gate) = mpsc::channel();
+        *files.gate.lock().unwrap() = Some(gate);
+        type_text(&mut editor, &mut ctx, "a");
+        editor.event(key(VK_S, true, false), &mut ctx);
+        // Read while saving (the temporary file's change): waits for the save.
+        let stale = |stamp| crate::watcher::Report { epoch: 0, stamp };
+        tx.send(stale(Some(files.baseline(&path()).stamp))).unwrap();
+        tx.send(stale(None)).unwrap();
+        editor.event(Event::Wake, &mut ctx);
+        assert_eq!(editor.prompt, None);
+        open.send(()).unwrap();
+        settle(&mut editor, &mut ctx);
+        assert_eq!(files.get(&path()).unwrap(), b"a");
+        // Delivered after the save finished: older than it, dropped.
+        tx.send(stale(None)).unwrap();
+        editor.event(Event::Wake, &mut ctx);
+        assert_eq!(
+            (editor.prompt, editor.notice.as_deref()),
+            (None, Some("Saved"))
+        );
+        // Another program's write after the commit is reported.
+        files.put(&path(), b"theirs");
+        report(&mut editor, &mut ctx, &tx);
+        assert!(matches!(editor.prompt, Some(Prompt::Changed(_))));
+    }
+
+    #[test]
+    fn disk_change_prompt_and_closing() {
+        let files = Arc::new(FakeFiles::default());
+        // A close request from Windows runs the quit flow.
+        let mut editor = editor_on(&files, b"mine", false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        let tx = fake_watcher(&mut editor);
+        type_text(&mut editor, &mut ctx, "x");
+        files.put(&path(), b"theirs");
+        report(&mut editor, &mut ctx, &tx);
+        editor.event(Event::CloseRequested, &mut ctx);
+        assert_eq!(editor.prompt, Some(Prompt::DirtyClose(Exit::Quit)));
+        // Saving at the close finds the change: S saves and quits.
+        editor.event(key(VK_RETURN, false, false), &mut ctx);
+        settle(&mut editor, &mut ctx);
+        assert!(matches!(editor.prompt, Some(Prompt::Changed(_))));
+        editor.event(key(VK_S, false, false), &mut ctx);
+        settle(&mut editor, &mut ctx);
+        assert!(ctx.close_requested());
+        assert_eq!(files.get(&path()).unwrap(), b"xmine");
+
+        // R cancels the close (the file is gone, so nothing reloads).
+        let mut editor = editor_on(&files, b"mine", false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        type_text(&mut editor, &mut ctx, "y");
+        files.put(&path(), b"theirs");
+        editor.event(key(VK_W, true, false), &mut ctx);
+        editor.event(key(VK_RETURN, false, false), &mut ctx);
+        settle(&mut editor, &mut ctx);
+        assert!(matches!(editor.prompt, Some(Prompt::Changed(_))));
+        editor.event(key(VK_R, false, false), &mut ctx);
+        assert_eq!((editor.prompt, editor.closing), (None, None));
+        settle_open(&mut editor, &mut ctx);
+        assert!(!editor.no_file(), "the close was cancelled");
+        assert!(!ctx.close_requested());
+    }
+
+    #[test]
+    fn reload_starts_fresh_and_keeps_the_place() {
+        let file = TempFile::new("reload.txt", b"abc\n");
+        let mut editor = empty_editor(false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        drop_file(&mut editor, &mut ctx, &file.0, 0);
+        settle_open(&mut editor, &mut ctx);
+        let tx = fake_watcher(&mut editor);
+        // Unsaved edits and history; the caret then before `c`.
+        editor.select_single(Selection::caret(4));
+        type_text(&mut editor, &mut ctx, "Z");
+        editor.select_single(Selection::caret(2));
+        assert!(editor.doc.is_dirty());
+        // The new text has a two-byte character where the caret was.
+        std::fs::write(&file.0, "a\u{e9}\n").unwrap();
+        let Watching::Running(watcher) = &editor.watching else {
+            panic!("no watcher");
+        };
+        let stamp = rte_platform::files::stamp(&file.0).unwrap();
+        let epoch = watcher.epoch();
+        tx.send(crate::watcher::Report { epoch, stamp }).unwrap();
+        editor.event(Event::Wake, &mut ctx);
+        assert!(matches!(editor.prompt, Some(Prompt::Changed(_))));
+        editor.event(key(VK_R, false, false), &mut ctx);
+        assert!(
+            editor
+                .notice
+                .as_deref()
+                .unwrap()
+                .starts_with("Reloading reload.txt")
+        );
+        settle_open(&mut editor, &mut ctx);
+        assert_eq!(text(&editor), "a\u{e9}\n");
+        assert!(!editor.doc.is_dirty());
+        assert_eq!(editor.doc.history.undo_len(), 0);
+        // The caret is on the character boundary before it.
+        assert_eq!(editor.doc.selections.primary(), Selection::caret(1));
+        type_text(&mut editor, &mut ctx, "x");
+        assert_eq!(text(&editor), "ax\u{e9}\n");
+        assert!(matches!(editor.watching, Watching::Idle), "a new watcher");
+    }
+
+    /// The disk version of `file` as the Changed prompt.
+    fn changed_prompt(editor: &mut Editor, file: &TempFile) {
+        let stamp = rte_platform::files::stamp(&file.0).unwrap().unwrap();
+        editor.prompt = Some(Prompt::Changed(Baseline { stamp, hash: None }));
+    }
+
+    #[test]
+    fn reload_keeps_the_text_read_only_until_it_is_replaced() {
+        let file = TempFile::new("pending.txt", b"mine\n");
+        let mut editor = empty_editor(false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        drop_file(&mut editor, &mut ctx, &file.0, 0);
+        settle_open(&mut editor, &mut ctx);
+        type_text(&mut editor, &mut ctx, "x");
+        std::fs::write(&file.0, b"theirs\n").unwrap();
+        changed_prompt(&mut editor, &file);
+        // The loader's answer applies only at the next wake-up: edits made
+        // before it are refused, not dropped with the old text.
+        ctx.set_clipboard("pasted", clip::FORMAT, &[]);
+        editor.event(key(VK_R, false, false), &mut ctx);
+        type_text(&mut editor, &mut ctx, "y");
+        editor.event(key(VK_V, true, false), &mut ctx);
+        editor.event(key(VK_Z, true, false), &mut ctx);
+        assert_eq!(text(&editor), "xmine\n");
+        settle_open(&mut editor, &mut ctx);
+        assert_eq!(text(&editor), "theirs\n");
+        assert_eq!(editor.doc.history.undo_len(), 0);
+
+        // A reload that finds no file gives the editing back.
+        type_text(&mut editor, &mut ctx, "a");
+        changed_prompt(&mut editor, &file);
+        std::fs::remove_file(&file.0).unwrap();
+        editor.event(key(VK_R, false, false), &mut ctx);
+        settle_open(&mut editor, &mut ctx);
+        assert_eq!(editor.notice.as_deref(), Some("pending.txt was not found"));
+        // The caret came back after `x`: one byte into the text.
+        type_text(&mut editor, &mut ctx, "b");
+        assert_eq!(text(&editor), "tabheirs\n");
+
+        // Closing while a reload waits stops it; saving is not refused.
+        std::fs::write(&file.0, b"again\n").unwrap();
+        changed_prompt(&mut editor, &file);
+        editor.event(key(VK_R, false, false), &mut ctx);
+        editor.event(key(VK_W, true, false), &mut ctx);
+        assert!(editor.pending.is_none());
+        assert_eq!(editor.prompt, Some(Prompt::DirtyClose(Exit::CloseFile)));
+        editor.event(key(VK_RETURN, false, false), &mut ctx);
+        settle(&mut editor, &mut ctx);
+        assert!(editor.no_file());
     }
 
     #[test]

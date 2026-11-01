@@ -10,12 +10,22 @@ replaces the original in one step and checks the result. A failed save
 never leaves the file half written.
 
 - **Unsaved changes** show `●` in the title strip.
-- **Changed by another program:** before replacing the file, the editor
-  checks that it is still the version it loaded. If not, the status line
-  shows `<name> changed on disk.   O: Overwrite   Esc: Cancel`.
+- **Changed by another program** (an agent, a formatter, `git checkout`):
+  the editor notices it at once, also while you edit, and the status line
+  asks `<name> changed on disk.   R: Reload   S: Save Current`. Only these
+  two keys answer.
+  - `R` shows the disk version. Unsaved changes and the undo history are
+    dropped; the caret and the scroll position stay.
+  - `S` saves your text over the disk version.
+
+  Saving checks again: if the file changed since the editor last loaded or
+  saved it, the same question appears and nothing is written. The editor's
+  own saves never ask. On some network shares a change is noticed only
+  when saving.
+- **Deleted by another program:** the status line says so; the next save
+  creates the file again.
 - **Changed during the save:** the other program's version is kept next to
   the file, and the status line names it.
-- **Deleted meanwhile:** the save creates the file again.
 - **New file:** a path from the command line that does not exist opens an
   empty document (`New file` on the status line); the first save creates
   it. If a file appears there meanwhile, the editor asks before

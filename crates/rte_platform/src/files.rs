@@ -8,12 +8,19 @@ use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 use std::ptr::null;
 
-use windows_sys::Win32::Foundation::GetLastError;
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+};
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_READONLY, FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, FileIdInfo, GetFileAttributesW,
+    FILE_ATTRIBUTE_READONLY, FILE_ID_INFO, FILE_NOTIFY_CHANGE_FILE_NAME,
+    FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE, FILE_READ_ATTRIBUTES,
+    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileIdInfo, FindCloseChangeNotification,
+    FindFirstChangeNotificationW, FindNextChangeNotification, GetFileAttributesW,
     GetFileInformationByHandleEx, INVALID_FILE_ATTRIBUTES, MOVEFILE_WRITE_THROUGH, MoveFileExW,
     REPLACEFILE_IGNORE_MERGE_ERRORS, ReplaceFileW,
+};
+use windows_sys::Win32::System::Threading::{
+    CreateEventW, INFINITE, SetEvent, WaitForMultipleObjects,
 };
 
 /// Identity and version of a file: volume serial and 128-bit file ID
@@ -126,6 +133,93 @@ pub fn move_new(from: &Path, to: &Path) -> io::Result<()> {
     }
 }
 
+/// An auto-reset event that ends a [`FolderWatch::wait`]; closed on drop.
+/// Shared by its owners, so it outlives every wait and every poke.
+pub struct Poke(HANDLE);
+
+// SAFETY: an event handle may be set and waited on from any thread.
+unsafe impl Send for Poke {}
+// SAFETY: as above; `poke` only calls `SetEvent`.
+unsafe impl Sync for Poke {}
+
+impl Poke {
+    pub fn new() -> io::Result<Poke> {
+        // SAFETY: default security, auto-reset, not signaled, unnamed.
+        let event = unsafe { CreateEventW(null(), 0, 0, null()) };
+        if event.is_null() {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(Poke(event))
+        }
+    }
+
+    /// Wakes the current or the next wait.
+    pub fn poke(&self) {
+        // SAFETY: the event is open while `self` lives.
+        unsafe { SetEvent(self.0) };
+    }
+}
+
+impl Drop for Poke {
+    fn drop(&mut self) {
+        // SAFETY: owned handle, closed once.
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
+/// What ended a [`FolderWatch::wait`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Signal {
+    /// A file name, size or last-write time changed in the folder.
+    Changed,
+    Poked,
+}
+
+/// Change notifications of one folder, not of its subfolders: file names,
+/// sizes and last-write times. Closed on drop; used by one thread.
+pub struct FolderWatch(HANDLE);
+
+impl FolderWatch {
+    pub fn new(folder: &Path) -> io::Result<FolderWatch> {
+        let folder = wide(folder);
+        let filter =
+            FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE;
+        // SAFETY: NUL-terminated path that outlives the call.
+        let watch = unsafe { FindFirstChangeNotificationW(folder.as_ptr(), 0, filter) };
+        if watch == INVALID_HANDLE_VALUE {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(FolderWatch(watch))
+        }
+    }
+
+    /// Blocks until the folder changes or `poke` is set. A change re-arms
+    /// the watch before returning, so later changes signal again.
+    pub fn wait(&mut self, poke: &Poke) -> io::Result<Signal> {
+        let handles = [self.0, poke.0];
+        // SAFETY: both handles are open for the call: `self` and `poke` are borrowed.
+        let result = unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, INFINITE) };
+        match result {
+            WAIT_OBJECT_0 => {
+                // SAFETY: the watch handle is open.
+                if unsafe { FindNextChangeNotification(self.0) } == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(Signal::Changed)
+            }
+            r if r == WAIT_OBJECT_0 + 1 => Ok(Signal::Poked),
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
+}
+
+impl Drop for FolderWatch {
+    fn drop(&mut self) {
+        // SAFETY: owned handle, closed once.
+        unsafe { FindCloseChangeNotification(self.0) };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,6 +291,50 @@ mod tests {
         std::fs::remove_file(&b).unwrap();
         move_new(&a, &b).unwrap();
         assert_eq!(std::fs::read(&b).unwrap(), b"a");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn folder_watch_signals_changes_and_pokes() {
+        let dir = temp_dir("watch");
+        let poke = Poke::new().unwrap();
+        let mut watch = FolderWatch::new(&dir).unwrap();
+        // A poke set before the wait is kept by the event.
+        poke.poke();
+        assert_eq!(watch.wait(&poke).unwrap(), Signal::Poked);
+        std::fs::write(dir.join("a.txt"), b"one").unwrap();
+        assert_eq!(watch.wait(&poke).unwrap(), Signal::Changed);
+        std::fs::write(dir.join("b.tmp"), b"two").unwrap();
+        std::fs::rename(dir.join("b.tmp"), dir.join("a.txt")).unwrap();
+        assert_eq!(watch.wait(&poke).unwrap(), Signal::Changed);
+        assert!(FolderWatch::new(&dir.join("missing")).is_err());
+        drop(watch);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn watches_and_pokes_close_their_handles() {
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
+        let count = || {
+            let mut n = 0;
+            // SAFETY: pseudo handle of this process; `n` is a live out-parameter.
+            unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut n) };
+            n
+        };
+        let dir = temp_dir("handles");
+        let cycle = || {
+            let poke = Poke::new().unwrap();
+            let mut watch = FolderWatch::new(&dir).unwrap();
+            poke.poke();
+            assert_eq!(watch.wait(&poke).unwrap(), Signal::Poked);
+        };
+        cycle();
+        let before = count();
+        for _ in 0..100 {
+            cycle();
+        }
+        // A leak would add 200; tests running in parallel (windows) add a few dozen.
+        assert!(count() < before + 100, "{before} -> {}", count());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

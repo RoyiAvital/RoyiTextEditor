@@ -20,6 +20,7 @@ mod search;
 mod spelling;
 mod syntax;
 mod trace;
+mod watcher;
 
 use std::borrow::Cow;
 use std::ffi::OsString;

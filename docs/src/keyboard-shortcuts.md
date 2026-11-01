@@ -44,7 +44,7 @@ binding exactly. For example, `Ctrl+Shift+S` is not Save.
 
 Mouse clicks place the caret. `Shift`+click extends the current selection.
 Commands without a shortcut are available by name in the Command Palette, for
-example `File: Copy Name of Active File`, which copies the file name.
+example `File: Copy File Name`, which copies the file name.
 
 ## Search and Replace
 

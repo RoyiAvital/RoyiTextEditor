@@ -63,6 +63,11 @@ impl Editor {
         self.symbol_offsets.clear();
         self.marked = (false, false, false);
         self.reset_search();
+        // Dropping the watcher stops its thread.
+        self.watching = Watching::Idle;
+        self.disk = None;
+        self.deletion_shown = false;
+        self.restore = None;
     }
 
     /// Why the current file may not be replaced by `dropped` now.
@@ -98,21 +103,54 @@ impl Editor {
             self.notice = Some(reason);
             return;
         }
+        let notice =
+            (others > 0).then(|| format!("Only one file opens at a time; {others} more ignored"));
+        let name = display_name(&path);
+        self.start_open(path, notice, None);
+        self.notice = Some(format!("Opening {name}\u{2026}"));
+    }
+
+    /// Starts loading `path`; it replaces the current file at the loader's
+    /// first answer. A newer open replaces (and stops) a pending one.
+    pub(super) fn start_open(
+        &mut self,
+        path: PathBuf,
+        notice: Option<String>,
+        restore: Option<(Scroll, u64)>,
+    ) {
         if self.highlighting
             && let Some(lang) = rte_syntax::detect(&path, b"")
         {
             rte_syntax::warm(lang.grammar);
         }
+        self.cancel_pending();
         let wake = self.wake.clone();
         let load = loader::spawn(path.clone(), move || wake(), None, false);
-        self.notice = Some(format!("Opening {}\u{2026}", display_name(&path)));
-        // A newer drop replaces (and stops) a pending one.
+        // A reload keeps the text read-only until it is replaced, so no edit
+        // made meanwhile is dropped with it.
+        if restore.is_some() {
+            self.doc.locks.loading = true;
+        }
         self.pending = Some(PendingOpen {
-            notice: (others > 0)
-                .then(|| format!("Only one file opens at a time; {others} more ignored")),
+            notice,
             path,
             load,
+            restore,
         });
+    }
+
+    /// Drops the pending open (stopping its loader).
+    pub(super) fn cancel_pending(&mut self) {
+        if let Some(pending) = self.pending.take() {
+            self.end_reload(&pending);
+        }
+    }
+
+    /// A reload that did not replace the text gives the editing back.
+    fn end_reload(&mut self, pending: &PendingOpen) {
+        if pending.restore.is_some() {
+            self.doc.locks.loading = matches!(self.status, LoadStatus::Loading { .. });
+        }
     }
 
     /// The first answer of a pending open's loader: a folder or missing
@@ -127,21 +165,26 @@ impl Editor {
             Err(TryRecvError::Empty) => return,
             Err(TryRecvError::Disconnected) => {
                 let name = display_name(&pending.path);
-                self.pending = None;
+                self.cancel_pending();
                 self.notice = Some(format!("{name} could not be opened"));
                 return;
             }
         };
         let pending = self.pending.take().expect("checked above");
         if let LoadEvent::Rejected(reason) = first {
+            self.end_reload(&pending);
             self.notice = Some(reason);
             return;
         }
-        if let Some(reason) = self.open_refusal(&pending.path) {
+        // A reload opens despite unsaved changes: the user chose it.
+        if pending.restore.is_none()
+            && let Some(reason) = self.open_refusal(&pending.path)
+        {
             self.notice = Some(reason);
             return;
         }
         self.reset_document(Some(pending.path));
+        self.restore = pending.restore;
         self.doc.locks.loading = true;
         self.status = LoadStatus::Loading {
             loaded: 0,
@@ -159,11 +202,11 @@ impl Editor {
     /// changes; waits for a running save.
     pub(super) fn close_file(&mut self) {
         if self.no_file() {
-            self.pending = None;
+            self.cancel_pending();
             self.notice = Some("No file is open; Alt+F4 quits".to_owned());
             return;
         }
-        self.pending = None;
+        self.cancel_pending();
         if self.saving.is_some() {
             self.closing = Some(Exit::CloseFile);
         } else if self.doc.is_dirty() {

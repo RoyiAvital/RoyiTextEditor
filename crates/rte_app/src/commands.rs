@@ -466,14 +466,14 @@ pub static COMMANDS: &[CommandDef] = &[
     ),
     command(
         "royi.copyNameOfActiveFile",
-        "File: Copy Name of Active File",
+        "File: Copy File Name",
         &[],
         false,
         Action::CopyFileName,
     ),
     chord(
         "workbench.action.files.copyPathOfActiveFile",
-        "File: Copy Path of Active File",
+        "File: Copy File Path",
         &[(ctrl(VK_K), plain(VK_P))],
         Action::CopyFilePath,
     ),

@@ -4,7 +4,6 @@
 
 - [Architecture](Plan/Architecture.md)
 - [Data Safety 001](Plan/DataSafety001.md)
-- [File System 001](Plan/FileSystem001.md)
 - [Minimap](Plan/Minimap.md)
 
 ## Completed
@@ -19,3 +18,4 @@
 - [M7 Polish](Done/M7Polish.md)
 - [Spelling 001](Done/Spelling001.md)
 - [Code Review 001](Done/CodeReview001.md)
+- [File System 001](Done/FileSystem001.md)

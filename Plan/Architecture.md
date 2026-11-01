@@ -145,6 +145,10 @@ Workspace layout: `crates/<name>/`, `assets/fonts/`, `benches/`, `xtask/`
 - **One-off threads.** File load runs on the loader thread. Saves run on one
   save thread at a time (see [Saving](#saving)), so a long save never delays
   highlighting or search.
+- **Watcher thread.** One per open file, started after the first frame once
+  the file is loaded: it waits for change notifications of the file's
+  folder and reports the file's stamp when it changes (see
+  [Saving](#saving), External changes).
 - **Smoothness rules.** The UI never waits for the worker or the search thread,
   except the bounded startup highlight deadline. Worker jobs yield at every
   chunk (~1 ms), so a newly queued parse starts within ~1 ms. A parse aborts
@@ -668,8 +672,8 @@ tests can inject each outcome.
      (`FlushFileBuffers`). Only the layer that created it removes it after
      a write failure; a name taken by another file is never deleted.
   2. **Pre-check:** open `P`, compare with the baseline (identity, size,
-     time; hash when ≤ 64 MiB). Mismatch → conflict prompt (Overwrite / Cancel);
-     the temporary file is kept until the prompt resolves.
+     time; hash when ≤ 64 MiB). Mismatch → nothing is replaced; the
+     Reload / Save Current prompt of External changes (below).
   3. `ReplaceFileW(P, tmp, backup = P.~rte-<pid>.bak)`.
   4. **Post-check:** the backup is the file actually replaced. Compare it with
      the baseline (identity, size, time; hash when ≤ 64 MiB). Match → delete
@@ -708,8 +712,17 @@ tests can inject each outcome.
 - **Close during a save:** input is disabled and "Saving…" is shown until the
   save finishes. Clean afterwards → exit (Quit) or the empty state (Close).
   Failed or dirty → the dirty-close prompt.
-- **External changes** are also checked on `WM_ACTIVATE` (identity, size and
-  time; no hashing on activation).
+- **External changes** ([FileSystem001](../Done/FileSystem001.md)): the
+  watcher thread waits on `FindFirstChangeNotificationW` for the file's
+  folder (no polling) and reports the file's stamp (identity, size, time;
+  no hashing). A stamp that differs from the baseline shows
+  `<name> changed on disk.   R: Reload   S: Save Current`, as does a save
+  pre-check mismatch. `R` opens the file again as a drop does (fresh
+  history; the caret and the scroll come back); `S` saves over the version
+  just seen. A deleted file gives a notice; the next save recreates it.
+  Own saves never prompt: reports read before a save finished are dropped.
+  Not covered: folders without notifications, the target of a file
+  symlink elsewhere, moving the file's folder; the pre-check remains.
 
 ### Startup
 
@@ -954,8 +967,9 @@ also build with GNU. Linking uses Rust's bundled MinGW runtime
   bounds them to about 1–4 GiB.
 - **I/O:** configuration read once at startup and never written. File read
   once; save streams to a temporary sibling file with a backup during replace.
-  Recovery files are written only on panic. No file watchers; external changes
-  checked on activation.
+  Recovery files are written only on panic. External changes: one watcher
+  thread per open file, blocked until the folder changes; one stamp read
+  per change.
 - **Threads:** UI thread, two startup threads, one worker, one search thread
   (on first search), one save thread at a time. Syntax adds short-lived
   threads: the query compile at startup and the whole-file parse of a file

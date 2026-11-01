@@ -14,7 +14,7 @@
  - [ ] Add support for Code Spelling like VS Code extensions (Will mark `myVarieble` with support for `snake_case` and `camelCase`).
  - [x] Add "Copy File Name" which copies the file name to clipboard.
  - [x] Add "Copy File Path" which copies the file path to clipboard.
- - [ ] Add awareness of 3rd party changes to file and offer to reload.
+ - [x] Add awareness of 3rd party changes to file and offer to reload.
  - [ ] Add option to do a 3 way merge in case of a 3rd party changes to file (With _Auto_ option in settings).
  - [ ] Add _Auto Indent_ for `C`.
  - [ ] Add _Auto Indent_ for `C++`.

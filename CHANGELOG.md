@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-11-02
+
+This version brings awareness of 3rd party changes to the file loaded in the editor.  
+In case of a change, the editor asks the user whether to _Reload_ the new file and
+discard the current state, or to _Save Current_ and overwrite the file with the current
+state.
+
+### Added
+
+- Changes by other programs are noticed at once, also while editing (one
+  thread waits for change notifications of the file's folder; no polling).
+  The status line asks `<name> changed on disk.   R: Reload   S: Save Current`:
+  `R` shows the disk version with a fresh undo history, keeping the caret
+  and the scroll position; `S` saves your text over it. A deleted file gives
+  a notice, and the next save recreates it.
+
+### Changed
+
+- Renamed the file-copy commands to `File: Copy File Name` and
+  `File: Copy File Path`; command IDs and shortcuts are unchanged.
+- A save that finds the file changed on disk asks `R: Reload   S: Save Current`
+  (was `O: Overwrite   Esc: Cancel`).
+
 ## [0.6.1] - 2026-11-01
 
 ### Added

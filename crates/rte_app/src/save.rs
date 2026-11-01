@@ -15,6 +15,7 @@ use rte_text::{Encoding, Snapshot, Utf16Encoder};
 use xxhash_rust::xxh3::Xxh3;
 
 use crate::loader::WakeOnDrop;
+use crate::watcher::Watch;
 
 /// Files up to this size are compared by content hash as well.
 pub const HASH_LIMIT: u64 = 64 * 1024 * 1024;
@@ -47,6 +48,8 @@ pub trait FileOps: Send + Sync {
     /// Move without replacing an existing destination.
     fn move_new(&self, from: &Path, to: &Path) -> io::Result<()>;
     fn delete(&self, path: &Path) -> io::Result<()>;
+    /// Change notifications of `folder`; used by the watcher thread only.
+    fn watch(&self, folder: &Path) -> io::Result<Box<dyn Watch>>;
 }
 
 /// The real file system.
@@ -104,6 +107,10 @@ impl FileOps for SystemFiles {
 
     fn delete(&self, path: &Path) -> io::Result<()> {
         std::fs::remove_file(path)
+    }
+
+    fn watch(&self, folder: &Path) -> io::Result<Box<dyn Watch>> {
+        Ok(Box::new(files::FolderWatch::new(folder)?))
     }
 }
 
@@ -656,6 +663,11 @@ pub mod fake {
                 .remove(path)
                 .map(|_| ())
                 .ok_or_else(not_found)
+        }
+
+        /// No notifications: editor tests inject the watcher's reports.
+        fn watch(&self, _: &Path) -> io::Result<Box<dyn Watch>> {
+            Err(io::Error::from(io::ErrorKind::Unsupported))
         }
     }
 }
