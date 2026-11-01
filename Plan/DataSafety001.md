@@ -11,6 +11,10 @@ Inspired by [Dan](https://github.com/dfallman/dan) (atomic saves, swap files,
 live 3-way merge), adapted to this editor: an edit journal instead of periodic
 full swap files, and event-driven change detection instead of polling.
 
+First step: [File System 001](FileSystem001.md) detects external changes and
+offers only Reload or Save mine; this task later replaces that prompt with
+the merge.
+
 ## Scope
 
 ### Included

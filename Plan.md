@@ -4,6 +4,7 @@
 
 - [Architecture](Plan/Architecture.md)
 - [Data Safety 001](Plan/DataSafety001.md)
+- [File System 001](Plan/FileSystem001.md)
 - [Minimap](Plan/Minimap.md)
 
 ## Completed

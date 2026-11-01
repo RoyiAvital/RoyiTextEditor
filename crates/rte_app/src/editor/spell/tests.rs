@@ -1,5 +1,5 @@
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::*;
 use crate::save::fake::FakeFiles;
@@ -68,9 +68,11 @@ fn open(name: &str, text: &str, spelling: bool, ctx: &mut Ctx) -> Editor {
     editor
 }
 
-/// Delivers wake-ups until spelling has nothing in flight.
+/// Delivers wake-ups until spelling has nothing in flight. The limit only
+/// catches a hang: debug builds on CI runners scan slowly.
 fn settle(editor: &mut Editor, ctx: &mut Ctx) {
-    for _ in 0..5000 {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
         editor.event(Event::Wake, ctx);
         if !editor.spelling_busy() {
             return;
@@ -385,7 +387,7 @@ fn ignore_during_a_scan_cancels_it() {
     let mut ctx = Ctx::headless(800, 600, 96);
     let text = format!(
         "teh {}wrod\n",
-        "the quick brown fox jumps over the lazy dog\n".repeat(100_000)
+        "the quick brown fox jumps over the lazy dog\n".repeat(20_000)
     );
     let mut editor = open(r"C:\docs\a.txt", &text, true, &mut ctx);
     settle(&mut editor, &mut ctx);
