@@ -61,7 +61,7 @@ Startup and the feel of typing and scrolling must not change.
 - No startup work, no new thread, no new DLL import, no new setting.
 - No change to the syntax thread's parsing or interest; the minimap only
   asks for spans of text it already parses.
-- Single session ([Architecture](Architecture.md), Principle 8).
+- Single session ([Architecture](../Done/Architecture001.md), Principle 8).
 
 ## Design
 

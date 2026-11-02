@@ -88,7 +88,7 @@
 
 
  
-See [Plan/Architecture.md](Plan/Architecture.md) for the full design.
+See [Done/Architecture001.md](Done/Architecture001.md) for the full design.
 
 ### Alternatives
 
@@ -325,4 +325,4 @@ versions under the same conditions. Benchmarks run only locally; no workflow
 runs them.
 
 `tools/SyntaxProbe` measures tree-sitter parse time and syntax-tree memory; it
-produced the size-limit table in [Plan/Architecture.md](Plan/Architecture.md).
+produced the size-limit table in [Done/Architecture001.md](Done/Architecture001.md).

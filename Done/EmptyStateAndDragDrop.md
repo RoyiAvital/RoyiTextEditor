@@ -74,10 +74,10 @@ returns to the empty state; `Alt+F4` quits. Startup time must not grow.
 - A path on the command line that does not exist still opens an empty
   document that the first save creates.
 - Command IDs, the command line and the configuration file are unchanged.
-- Single session ([Architecture](../Plan/Architecture.md), Principle 8): opening,
+- Single session ([Architecture](Architecture001.md), Principle 8): opening,
   replacing and closing files happen inside this session; nothing launches,
   closes or contacts another session.
-- Supersedes in [Architecture](../Plan/Architecture.md): "One document per process
+- Supersedes in [Architecture](Architecture001.md): "One document per process
   lifetime; no in-place reload of another file", the untitled document
   under Saving (New files) and Dirty close, the `Ctrl+N` untitled instance,
   and the Process and New files rows of the decisions table. These are

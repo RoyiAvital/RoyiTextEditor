@@ -59,7 +59,7 @@ checks and backup handling.
 Workers should receive owned or immutable data. Keep window and view state on
 the UI thread, reject stale asynchronous results, and wake the window only
 when there is new work to present. These boundaries are also described in the
-[architecture plan](https://github.com/RoyiAvital/RoyiTextEditor/blob/main/Plan/Architecture.md).
+[architecture plan](https://github.com/RoyiAvital/RoyiTextEditor/blob/main/Done/Architecture001.md).
 
 ## One File per Session
 
@@ -183,6 +183,6 @@ suite or performance suite unless requested; see [AGENTS.md](https://github.com/
 | Package a release ZIP            | `cargo xtask package`                      |
 
 The workspace and shipped behavior are documented in
-[Plan/Architecture.md](https://github.com/RoyiAvital/RoyiTextEditor/blob/main/Plan/Architecture.md),
+[Done/Architecture001.md](https://github.com/RoyiAvital/RoyiTextEditor/blob/main/Done/Architecture001.md),
 [DEVELOPMENT.md](https://github.com/RoyiAvital/RoyiTextEditor/blob/main/DEVELOPMENT.md),
 and [AGENTS.md](https://github.com/RoyiAvital/RoyiTextEditor/blob/main/AGENTS.md).

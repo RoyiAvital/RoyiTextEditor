@@ -2,7 +2,7 @@
 
 ## Task
 
-Milestone M2 of [Architecture](../Plan/Architecture.md): the first running
+Milestone M2 of [Architecture](Architecture001.md): the first running
 application. A frameless window shows a file read-only with line numbers,
 scrolls, and measures startup. The gate decides whether the CPU renderer is
 fast enough or a Direct3D 11 presenter is needed.

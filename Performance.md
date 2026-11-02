@@ -847,7 +847,7 @@ default suite.
   refresh period (from DWM, 16.7 ms at 60 Hz). Smooth means no missed
   refresh. S02 also reports the time from a `Ctrl+End` or `Ctrl+Home` jump to
   the first highlighted frame (viewport-first highlighting, see
-  [Plan/Architecture.md](Plan/Architecture.md)); with highlighting, each key
+  [Done/Architecture001.md](Done/Architecture001.md)); with highlighting, each key
   waits for its highlighted frame (at most 1 s) before the next refresh
   starts the next key. S03 is above
   `syntax.maxFileMiB` and scrolls plain text.
@@ -900,7 +900,7 @@ default suite.
 Generated deterministically by the harness into `target/perf/v1/`, kept between
 runs. Sizes: small 64 KiB, medium 8 MiB, large 128 MiB (Markdown) and 256 MiB
 (text). Small and medium code fixtures are below `syntax.maxFileMiB` (32 MiB,
-see [Plan/Architecture.md](Plan/Architecture.md)) and are highlighted;
+see [Done/Architecture001.md](Done/Architecture001.md)) and are highlighted;
 `large.md` is above it and shows plain text. The
 single-line fixtures test long lines: rendering, caret movement and editing
 must not depend on the line length.

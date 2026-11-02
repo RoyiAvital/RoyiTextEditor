@@ -1,6 +1,6 @@
 //! Text engine of RoyiTextEditor: a persistent piece tree over immutable
 //! buffers, with cheap snapshots, line queries, transactions and position
-//! mapping. See `Plan/Architecture.md`.
+//! mapping. See `Done/Architecture001.md`.
 
 mod builder;
 mod change;

@@ -5,7 +5,7 @@
 Highlight code with built-in, open-source tree-sitter grammars and queries,
 fast enough for every keystroke and without any cost at startup, and add the
 code-aware commands of the
-[Architecture](../Plan/Architecture.md#syntax-and-code-awareness-rte_syntax):
+[Architecture](Architecture001.md#syntax-and-code-awareness-rte_syntax):
 comments, brackets, auto-closing pairs, auto-indent, expand and shrink
 selection, Go to Symbol and Change Language Mode.
 

@@ -141,7 +141,7 @@ Behavior:
 - Existing keys keep their commands; the new keys are unbound today.
 - `rte_text::Edit` changes shape (internal crates only); E01, E02 and M05
   guard the typing path.
-- Single session ([Architecture](../Plan/Architecture.md), Principle 8).
+- Single session ([Architecture](Architecture001.md), Principle 8).
 
 ## Design
 

@@ -4,7 +4,7 @@
 
 Find and replace inside the open file, with VS Code keys and behavior, and the
 VS Code multi-cursor and column-selection commands, as specified in the
-[Architecture](../Plan/Architecture.md#search-rte_search). Search must stay responsive
+[Architecture](Architecture001.md#search-rte_search). Search must stay responsive
 on files of any size and must not slow down startup.
 
 Mockup: [SearchMockup.png](../Design/SearchMockup.png) (source

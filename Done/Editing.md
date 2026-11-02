@@ -4,7 +4,7 @@
 
 Turn the read-only viewer into an editor: carets, selections, typing,
 undo/redo, clipboard, edit-permission locks and safe saving, as specified in
-the [Architecture](../Plan/Architecture.md) (Editing, App, Saving, Platform).
+the [Architecture](Architecture001.md) (Editing, App, Saving, Platform).
 
 ## Scope
 
@@ -27,7 +27,7 @@ the [Architecture](../Plan/Architecture.md) (Editing, App, Saving, Platform).
   Pasted line breaks follow the document style.
 - Locks `user`, `loading`, `encoding`, `load_error`; `RO` and reason in the
   status line. The toggle command comes with the command registry (M4).
-- Saving per [Saving](../Plan/Architecture.md#saving) with `FileOps` fault injection;
+- Saving per [Saving](Architecture001.md#saving) with `FileOps` fault injection;
   conflict strip (Overwrite / Cancel); dirty-close strip (Save / Don't Save /
   Cancel; untitled: Discard / Cancel); close during a save.
 - Unsaved marker `●` in the title strip: accent color, warning color for

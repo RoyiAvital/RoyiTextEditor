@@ -1,5 +1,5 @@
 //! Measures tree-sitter parse time and syntax-tree memory on generated files
-//! (the size-limit table in Plan/Architecture.md). Not part of the build.
+//! (the size-limit table in Done/Architecture001.md). Not part of the build.
 //!
 //! cargo run --release --manifest-path tools/SyntaxProbe/Cargo.toml -- <kind> <MiB>
 //!

@@ -45,7 +45,7 @@ A simple first step before the 3-way merge of
 
 - Nothing before the first frame; no periodic work (DEVELOPMENT.md, Design
   Choices).
-- The save sequence of [Architecture](../Plan/Architecture.md#saving) is unchanged;
+- The save sequence of [Architecture](Architecture001.md#saving) is unchanged;
   only its conflict prompt changes keys (`O` becomes `S`, `R` is added,
   `Esc` is removed).
 - No new dependency. One compile-time `windows-sys` feature,

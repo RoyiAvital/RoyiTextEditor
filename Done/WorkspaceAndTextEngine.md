@@ -2,7 +2,7 @@
 
 ## Task
 
-First iteration of [Architecture](../Plan/Architecture.md): milestones M0 (Cargo
+First iteration of [Architecture](Architecture001.md): milestones M0 (Cargo
 workspace, toolchain, lints, CI) and M1 (`rte_text`, the persistent piece tree
 text engine). Every later milestone builds on this engine, so it must be
 correct, fast and fully tested before any UI exists.
@@ -180,7 +180,7 @@ yet, so no startup or memory measurements.
 - Effort: High
 - Context Window: 872K
 - Outcome: Fixed review findings I1-I3 (see the GPT-6.1 Sol implementation
-  review in [Architecture](../Plan/Architecture.md)). The `PROPTEST_CASES=5000`
+  review in [Architecture](Architecture001.md)). The `PROPTEST_CASES=5000`
   row above ran only 256 cases; corrected evidence below.
 
 Corrected validation (code generation now `x86-64-v3`):

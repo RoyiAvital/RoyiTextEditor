@@ -2,12 +2,13 @@
 
 ## Pending
 
-- [Architecture](Plan/Architecture.md)
 - [Data Safety 001](Plan/DataSafety001.md)
 - [Minimap](Plan/Minimap.md)
+- [Road Map 001](Plan/RoadMap001.md)
 
 ## Completed
 
+- [Architecture 001](Done/Architecture001.md)
 - [Workspace and Text Engine](Done/WorkspaceAndTextEngine.md)
 - [Window and Rendering](Done/WindowAndRendering.md)
 - [Editing](Done/Editing.md)

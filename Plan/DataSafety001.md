@@ -44,11 +44,11 @@ the merge.
 ### Compatibility Constraints
 
 - Journals live under `UserSettings/Recovery/`; no Registry writes.
-- The atomic save sequence of the [Architecture](Architecture.md#saving) is
+- The atomic save sequence of the [Architecture](../Done/Architecture001.md#saving) is
   kept unchanged, except that a pre-check mismatch merges instead of offering
   Overwrite.
 - Journals contain document text and are as sensitive as the documents.
-- Supersedes in [Architecture](Architecture.md): Crash recovery (panic-only
+- Supersedes in [Architecture](../Done/Architecture001.md): Crash recovery (panic-only
   snapshots), "No file watchers", the save conflict prompt, the Recovery row
   of the decisions table and the recovery test. These sections are updated
   when this task is approved.

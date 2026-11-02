@@ -1,5 +1,8 @@
 # Architecture
 
+Status: Done (2026_11_02). M0-M7 are built; what is not built is in
+[Road Map 001](../Plan/RoadMap001.md).
+
 ## Task
 
 Define the architecture of `RoyiTextEditor`: a single-file, keyboard-driven,
@@ -712,7 +715,7 @@ tests can inject each outcome.
 - **Close during a save:** input is disabled and "Saving…" is shown until the
   save finishes. Clean afterwards → exit (Quit) or the empty state (Close).
   Failed or dirty → the dirty-close prompt.
-- **External changes** ([FileSystem001](../Done/FileSystem001.md)): the
+- **External changes** ([FileSystem001](FileSystem001.md)): the
   watcher thread waits on `FindFirstChangeNotificationW` for the file's
   folder (no polling) and reports the file's stamp (identity, size, time;
   no hashing). A stamp that differs from the baseline shows
@@ -823,16 +826,16 @@ Basic Editing:
 
 Navigation:
 
-| Keys                     | Command                   | Status                       |
-| ------------------------ | ------------------------- | ---------------------------- |
-| `Ctrl+T`                 | Show all symbols          | Dropped: LSP/workspace       |
-| `Ctrl+G`                 | Go to line                | Kept                         |
-| `Ctrl+P`                 | Go to file                | Adapted: see General         |
-| `Ctrl+Shift+O`           | Go to symbol              | Kept: tree-sitter `tags.scm` |
-| `Ctrl+Shift+M`           | Show Problems panel       | Dropped: LSP                 |
-| `F8` / `Shift+F8`        | Go to next/previous error | Dropped: LSP                 |
-| `Ctrl+Shift+Tab`         | Editor group history      | Dropped: single file         |
-| `Alt+Left` / `Alt+Right` | Go back/forward           | Dropped: owner's decision    |
+| Keys                     | Command                   | Status                         |
+| ------------------------ | ------------------------- | ------------------------------ |
+| `Ctrl+T`                 | Show all symbols          | Dropped: LSP/workspace         |
+| `Ctrl+G`                 | Go to line                | Kept                           |
+| `Ctrl+P`                 | Go to file                | Adapted: see General           |
+| `Ctrl+Shift+O`           | Go to symbol              | Kept: tree-sitter `tags.scm`   |
+| `Ctrl+Shift+M`           | Show Problems panel       | Dropped: LSP                   |
+| `F8` / `Shift+F8`        | Go to next/previous error | Dropped: LSP                   |
+| `Ctrl+Shift+Tab`         | Editor group history      | Dropped: single file           |
+| `Alt+Left` / `Alt+Right` | Go back/forward           | Dropped: owner's decision      |
 | `Ctrl+M`                 | Toggle Tab moves focus    | Dropped: no focusable controls |
 
 Search and Replace:
@@ -887,7 +890,7 @@ Toggle Read-Only (palette; no default key, as VS Code).
 | Codegen   | `-C target-cpu=x86-64-v3` (AVX2, BMI2, FMA); no older CPUs          |
 | Fonts     | JetBrains Mono (default), Cascadia Mono, Fira Mono, Iosevka, Lilex  |
 | Config    | One `RoyiTextEditor.yaml` next to the executable; never written     |
-| Process   | Single session per process; never launches or knows other sessions |
+| Process   | Single session per process; never launches or knows other sessions  |
 | Caret     | Steady in v1; blinking later                                        |
 | Scrolling | Mode setting; v1 ships the immediate mode only                      |
 | Syntax    | Injections in v1, on: HTML script/style, Markdown inline/fences     |
@@ -898,7 +901,7 @@ Toggle Read-Only (palette; no default key, as VS Code).
 | Workers   | One worker (syntax, indexing); search thread; load/save threads     |
 | Themes    | Two built-in (dark, light); no theme files                          |
 | Chrome    | Drag strip only; no caption buttons; all edges and corners resize   |
-| Placement | From configuration; no automatic memory (no history)                |
+| Placement | Default size where Windows places it; nothing remembered            |
 | Input     | LTR only; IME deferred                                              |
 | Platform  | Windows 11 x64, tested only there; Windows 11 DWM calls optional    |
 | Settings  | Read once at startup; the application never writes it               |
@@ -1067,21 +1070,30 @@ Each milestone gets its own task document.
 4. **M3 Editing** (done): carets, selections, undo, clipboard, edit-permission locks,
    `--read-only`, saving with `FileOps` fault injection, application manifest
    (segment heap measured before adoption).
-5. **M4 Commands:** registry, keymap and chords, palette, configuration file.
-6. **M5 Search and multi-cursor:** search thread, both regex engines, find
-   widget, replace, occurrence commands, box selection.
-7. **M6 Syntax:** tree-sitter, trimmed queries, highlighting, HTML and
-   Markdown injections, comments, brackets, indent, expand selection, symbols.
-   **Gate:** grammar packaging versus startup.
-8. **M7 Polish** ([M7Polish](../Done/M7Polish.md)): the Basic Editing commands,
+5. **M4 Commands** (done; palette review in this document): registry,
+   keymap and chords, palette, configuration file. The `keybindings:`
+   section was not built.
+6. **M5 Search and multi-cursor** (done;
+   [SearchAndMultiCursor](SearchAndMultiCursor.md)): search thread, both
+   regex engines, find widget, replace, occurrence commands, box selection.
+7. **M6 Syntax** (done; [SyntaxHighlighting](SyntaxHighlighting.md),
+   [SyntaxPerformance](SyntaxPerformance.md)): tree-sitter, trimmed
+   queries, highlighting, HTML and Markdown injections, comments, brackets,
+   indent after an opening bracket, expand selection, symbols. Per-language
+   indent rules (`indents.scm`) were not built.
+   **Gate:** grammar packaging versus startup (passed: grammars link
+   statically).
+8. **M7 Polish** (done; [M7Polish](M7Polish.md)): the Basic Editing commands,
    Go to Line, long-line display, full screen (`F11`), a scroll indicator.
-   Navigation history is dropped.
-   External change detection and crash recovery belong to
-   [DataSafety001](DataSafety001.md); large-file mode is dropped; themes
-   are deferred.
+   Navigation history is dropped. External change detection was built in
+   [FileSystem001](FileSystem001.md); the edit journal, crash recovery and
+   merging stay in [DataSafety001](../Plan/DataSafety001.md); large-file
+   mode is dropped; themes are deferred.
 
-After v1: word wrap, folding, smooth scrolling mode, caret blinking, shaping
-mode, IME, CSV/TSV Table Mode.
+Also built: the empty state and drag and drop
+([EmptyStateAndDragDrop](EmptyStateAndDragDrop.md)) and spelling
+([Spelling001](Spelling001.md)). Everything not built, after v1 included,
+is listed in [Road Map 001](../Plan/RoadMap001.md).
 
 ## Acceptance Criteria
 
@@ -2083,7 +2095,7 @@ cargo test -p rte_app -p rte_view -p rte_render -p rte_platform
 - Context Window: 872K
 - Outcome: M7 gains a scroll indicator (reserved 6 px slider strip, no
   marks) at the owner's request; the minimap is its own task
-  ([Minimap](Minimap.md)).
+  ([Minimap](../Plan/Minimap.md)).
 
 ### 2026_10_25 - Claude Opus 5.5
 
@@ -2097,3 +2109,33 @@ cargo test -p rte_app -p rte_view -p rte_render -p rte_platform
   opens at the default size where Windows places it, nothing remembered
   (no state file per Response A8; placement configuration dropped with
   customization). Replaced the configuration-based placement rule.
+
+## Implementer
+
+### 2026_11_02 - Claude Opus 5.5
+
+- Role: Implementer
+- Activity: Implementation
+- Agent: GitHub Copilot
+- Model: Claude Opus 5.5
+- Effort: Medium
+- Context Window: 872K
+- Outcome: Marked done at the owner's request. M0-M7 were built through
+  their task documents (Implementation Steps); the empty state, spelling
+  and external change detection followed. Updated the milestone states, the
+  placement decision and the M7 note on external changes. Planned but not
+  built items, the after-v1 list and the measurement-gated options moved to
+  [Road Map 001](../Plan/RoadMap001.md) for the owner's decisions.
+
+## Validation Results
+
+- Each milestone's tests, benchmarks and gates are recorded in its task
+  document: [WorkspaceAndTextEngine](WorkspaceAndTextEngine.md),
+  [WindowAndRendering](WindowAndRendering.md), [Editing](Editing.md), the
+  palette review above, [SearchAndMultiCursor](SearchAndMultiCursor.md),
+  [SyntaxHighlighting](SyntaxHighlighting.md),
+  [SyntaxPerformance](SyntaxPerformance.md), [M7Polish](M7Polish.md);
+  results per version in [Performance.md](../Performance.md).
+- This update changes documents only: the not-built items were checked
+  against the source (configuration keys, commands, platform calls).
+  Links to and from this document were updated for its move to `Done/`.
