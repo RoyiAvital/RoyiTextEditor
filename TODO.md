@@ -11,6 +11,7 @@
  - [x] Add support for `ini` files with _syntax highlighting_.
  - [x] Add support for Text Spelling with support for text and MarkDown. Should be disabled by default.
  - [ ] Add support for Text Spelling for comments in code.
+ - [ ] Add support for `qmd` (Quarto MarkDown) files with _syntax highlighting_.
  - [ ] Add support for Code Spelling like VS Code extensions (Will mark `myVarieble` with support for `snake_case` and `camelCase`).
  - [x] Add "Copy File Name" which copies the file name to clipboard.
  - [x] Add "Copy File Path" which copies the file path to clipboard.
