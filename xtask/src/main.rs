@@ -548,10 +548,9 @@ foreach ($obsolete in @('DocsIndex', 'SyncSummary', 'SummaryJob', 'SummaryBackup
 foreach ($required in @(
     "src\SUMMARY.md",
     'Remove-Item $GeneratedImagesDir -Recurse -Force',
-    'Copy-Item $ImageCache $SourceImage -Force',
-    'Copy-Item $SearchImageCache $SourceSearchImage -Force',
-    'Copy-Item $SyntaxImageCache $SourceSyntaxImage -Force',
-    'Copy-Item $LanguageImageCache $SourceLanguageImage -Force'
+    'foreach ($Screenshot in $Screenshots)',
+    '& $CaptureScript @Capture',
+    'Copy-Item $ImageCache $SourceImage -Force'
 )) {
     if (-not $source.Contains($required)) { throw "Missing docs build behavior: $required" }
 }
@@ -582,7 +581,11 @@ $CreatedAssetsDir = $false
 $MermaidStage = Join-Path $folder 'mermaid-stage'
 $null = [IO.Directory]::CreateDirectory($MermaidStage)
 $PreviousSiteUrl = [Environment]::GetEnvironmentVariable('MDBOOK_OUTPUT__HTML__SITE_URL', 'Process')
+$PreviousTitle = [Environment]::GetEnvironmentVariable('MDBOOK_BOOK__TITLE', 'Process')
+$PreviousPath = [Environment]::GetEnvironmentVariable('PATH', 'Process')
 [Environment]::SetEnvironmentVariable('MDBOOK_OUTPUT__HTML__SITE_URL', 'temporary-test', 'Process')
+[Environment]::SetEnvironmentVariable('MDBOOK_BOOK__TITLE', 'temporary-test', 'Process')
+[Environment]::SetEnvironmentVariable('PATH', "temporary-test;$PreviousPath", 'Process')
 try {
     & $cleanup
     if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($existing)) -ne
@@ -592,9 +595,17 @@ try {
     if ([Environment]::GetEnvironmentVariable('MDBOOK_OUTPUT__HTML__SITE_URL', 'Process') -ne $PreviousSiteUrl) {
         throw 'The previous mdBook site URL was not restored.'
     }
+    if ([Environment]::GetEnvironmentVariable('MDBOOK_BOOK__TITLE', 'Process') -ne $PreviousTitle) {
+        throw 'The previous mdBook title was not restored.'
+    }
+    if ([Environment]::GetEnvironmentVariable('PATH', 'Process') -ne $PreviousPath) {
+        throw 'The previous PATH was not restored.'
+    }
 }
 finally {
     [Environment]::SetEnvironmentVariable('MDBOOK_OUTPUT__HTML__SITE_URL', $PreviousSiteUrl, 'Process')
+    [Environment]::SetEnvironmentVariable('MDBOOK_BOOK__TITLE', $PreviousTitle, 'Process')
+    [Environment]::SetEnvironmentVariable('PATH', $PreviousPath, 'Process')
     Remove-Item -LiteralPath $folder -Recurse -Force
 }
 "##;

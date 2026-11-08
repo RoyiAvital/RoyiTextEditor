@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- The Performance page of the book shows the results of 0.6.0 (was 0.2.0).
+- The book's sidebar heading is the book title (from `Meta/AppMeta.json`).
+- The book's search box: on wide windows it stays in the header and widens
+  while searching; Esc, a click elsewhere or Tab closes it (without
+  reopening on reload); Up and Down select results and the selection is
+  visible; opening it keeps the reading position; the clear button clears
+  the results; on narrow windows the open box no longer shows the title
+  through it.
+- The book's header shows its logo (it was missing).
+
 ## [0.6.2] - 2026-11-02
 
 This version brings awareness of 3rd party changes to the file loaded in the editor.  

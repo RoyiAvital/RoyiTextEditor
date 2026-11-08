@@ -5,11 +5,12 @@ Builds the mdBook documentation site into target/book.
 .DESCRIPTION
 Downloads pinned mdBook, mdbook-pagetoc, and mdbook-mermaid binaries into
 target/docs-tools when missing or outdated, verifies their SHA-256 hashes,
-captures the editor fixture, then builds docs/.
+captures the documentation screenshots, then builds docs/.
 The screenshot build requires the GNU Rust toolchain and MinGW-w64 windres.
 mdBook reads navigation directly from docs/src/SUMMARY.md. Screenshot assets
 are regenerated for each build, staged only for mdBook, and restored afterwards.
-Warnings and errors reported by mdBook fail the build.
+Warnings and errors reported by mdBook fail the build. The caller's PATH and
+environment are restored afterwards.
 
 .PARAMETER Serve
 Serve the documentation locally with auto-reload instead of building.
@@ -34,6 +35,17 @@ $ToolsDir = Join-Path $Root 'target\docs-tools'
 $DocsDir = Join-Path $Root 'docs'
 $BookDir = Join-Path $Root 'target\book'
 $DocsSummary = Join-Path $DocsDir 'src\SUMMARY.md'
+
+# Screenshots: the arguments of Capture-DocsScreenshot.ps1 and the asset each
+# capture becomes under docs/src/assets.
+$Screenshots = @(
+    @{ Image = 'editor-screenshot.png'; Capture = @{} },
+    @{ Image = 'search-panel.png'; Capture = @{ SearchPanel = $true } },
+    @{ Image = 'syntax-highlighted-code.png'; Capture = @{ SyntaxCode = $true } },
+    @{ Image = 'syntax-language-picker.png'; Capture = @{ SyntaxLanguages = $true } },
+    @{ Image = 'spelling.png'; Capture = @{ Spelling = $true } },
+    @{ Image = 'read-only-save.png'; Capture = @{ ReadOnlySave = $true } }
+)
 
 # Pinned versions and SHA-256 hashes from the official GitHub releases
 $MdBook = @{
@@ -104,18 +116,22 @@ foreach ($Tool in $Tools) {
     Write-Host "$($Tool.Exe) v$($Tool.Version) installed"
 }
 
-$env:PATH = "$ToolsDir;$env:PATH"
-
 $AppMeta = Get-Content (Join-Path $Root 'Meta\AppMeta.json') -Raw | ConvertFrom-Json
-$env:MDBOOK_BOOK__TITLE = $AppMeta.name
 
 $StagedFiles = New-Object System.Collections.Generic.List[string]
 $CreatedAssetsDir = $false
 $SourceAssetsDir = Join-Path $DocsDir 'src\assets'
 $SourceAssetBackups = @{}
 $MermaidStage = Join-Path $ToolsDir "mermaid-stage-$PID"
+# The script runs in the caller's session: its environment is restored afterwards.
+$PreviousPath = [Environment]::GetEnvironmentVariable('PATH', 'Process')
+$PreviousTitle = [Environment]::GetEnvironmentVariable('MDBOOK_BOOK__TITLE', 'Process')
 $PreviousSiteUrl = [Environment]::GetEnvironmentVariable('MDBOOK_OUTPUT__HTML__SITE_URL', 'Process')
 try {
+    # mdBook finds its preprocessors on PATH.
+    $env:PATH = "$ToolsDir;$PreviousPath"
+    $env:MDBOOK_BOOK__TITLE = $AppMeta.name
+
     if (-not (Test-Path $DocsSummary -PathType Leaf)) {
         throw "mdBook navigation file not found: $DocsSummary"
     }
@@ -125,83 +141,25 @@ try {
         Remove-Item $GeneratedImagesDir -Recurse -Force
     }
 
-    $CaptureScript = Join-Path $PSScriptRoot 'Capture-DocsScreenshot.ps1'
-    $ImageCache = & $CaptureScript | Select-Object -Last 1
-    if (-not $ImageCache -or -not (Test-Path $ImageCache)) {
-        throw 'Screenshot helper did not produce an image.'
-    }
-
     if (-not (Test-Path $SourceAssetsDir)) {
         New-Item -ItemType Directory -Path $SourceAssetsDir | Out-Null
         $CreatedAssetsDir = $true
     }
-    $SourceImage = Join-Path $SourceAssetsDir 'editor-screenshot.png'
-    if (Test-Path $SourceImage) {
-        $SourceAssetBackups[$SourceImage] = [IO.File]::ReadAllBytes($SourceImage)
-    } else {
-        $StagedFiles.Add($SourceImage)
+    $CaptureScript = Join-Path $PSScriptRoot 'Capture-DocsScreenshot.ps1'
+    foreach ($Screenshot in $Screenshots) {
+        $Capture = $Screenshot.Capture
+        $ImageCache = & $CaptureScript @Capture | Select-Object -Last 1
+        if (-not $ImageCache -or -not (Test-Path $ImageCache)) {
+            throw "Screenshot helper did not produce $($Screenshot.Image)."
+        }
+        $SourceImage = Join-Path $SourceAssetsDir $Screenshot.Image
+        if (Test-Path $SourceImage) {
+            $SourceAssetBackups[$SourceImage] = [IO.File]::ReadAllBytes($SourceImage)
+        } else {
+            $StagedFiles.Add($SourceImage)
+        }
+        Copy-Item $ImageCache $SourceImage -Force
     }
-    Copy-Item $ImageCache $SourceImage -Force
-
-    $SearchImageCache = & $CaptureScript -SearchPanel | Select-Object -Last 1
-    if (-not $SearchImageCache -or -not (Test-Path $SearchImageCache)) {
-        throw 'Search panel screenshot helper did not produce an image.'
-    }
-    $SourceSearchImage = Join-Path $SourceAssetsDir 'search-panel.png'
-    if (Test-Path $SourceSearchImage) {
-        $SourceAssetBackups[$SourceSearchImage] = [IO.File]::ReadAllBytes($SourceSearchImage)
-    } else {
-        $StagedFiles.Add($SourceSearchImage)
-    }
-    Copy-Item $SearchImageCache $SourceSearchImage -Force
-
-    $SyntaxImageCache = & $CaptureScript -SyntaxCode | Select-Object -Last 1
-    if (-not $SyntaxImageCache -or -not (Test-Path $SyntaxImageCache)) {
-        throw 'Syntax screenshot helper did not produce an image.'
-    }
-    $SourceSyntaxImage = Join-Path $SourceAssetsDir 'syntax-highlighted-code.png'
-    if (Test-Path $SourceSyntaxImage) {
-        $SourceAssetBackups[$SourceSyntaxImage] = [IO.File]::ReadAllBytes($SourceSyntaxImage)
-    } else {
-        $StagedFiles.Add($SourceSyntaxImage)
-    }
-    Copy-Item $SyntaxImageCache $SourceSyntaxImage -Force
-
-    $LanguageImageCache = & $CaptureScript -SyntaxLanguages | Select-Object -Last 1
-    if (-not $LanguageImageCache -or -not (Test-Path $LanguageImageCache)) {
-        throw 'Syntax language picker screenshot helper did not produce an image.'
-    }
-    $SourceLanguageImage = Join-Path $SourceAssetsDir 'syntax-language-picker.png'
-    if (Test-Path $SourceLanguageImage) {
-        $SourceAssetBackups[$SourceLanguageImage] = [IO.File]::ReadAllBytes($SourceLanguageImage)
-    } else {
-        $StagedFiles.Add($SourceLanguageImage)
-    }
-    Copy-Item $LanguageImageCache $SourceLanguageImage -Force
-
-    $SpellingImageCache = & $CaptureScript -Spelling | Select-Object -Last 1
-    if (-not $SpellingImageCache -or -not (Test-Path $SpellingImageCache)) {
-        throw 'Spelling screenshot helper did not produce an image.'
-    }
-    $SourceSpellingImage = Join-Path $SourceAssetsDir 'spelling.png'
-    if (Test-Path $SourceSpellingImage) {
-        $SourceAssetBackups[$SourceSpellingImage] = [IO.File]::ReadAllBytes($SourceSpellingImage)
-    } else {
-        $StagedFiles.Add($SourceSpellingImage)
-    }
-    Copy-Item $SpellingImageCache $SourceSpellingImage -Force
-
-    $ReadOnlyImageCache = & $CaptureScript -ReadOnlySave | Select-Object -Last 1
-    if (-not $ReadOnlyImageCache -or -not (Test-Path $ReadOnlyImageCache)) {
-        throw 'Read-only save screenshot helper did not produce an image.'
-    }
-    $SourceReadOnlyImage = Join-Path $SourceAssetsDir 'read-only-save.png'
-    if (Test-Path $SourceReadOnlyImage) {
-        $SourceAssetBackups[$SourceReadOnlyImage] = [IO.File]::ReadAllBytes($SourceReadOnlyImage)
-    } else {
-        $StagedFiles.Add($SourceReadOnlyImage)
-    }
-    Copy-Item $ReadOnlyImageCache $SourceReadOnlyImage -Force
 
     New-Item -ItemType Directory -Path $MermaidStage | Out-Null
     [IO.File]::WriteAllText(
@@ -256,19 +214,13 @@ try {
         if ($Problems.Count -gt 0) {
             throw "mdbook reported $($Problems.Count) warning(s) or error(s)"
         }
-        foreach ($OutputFile in @(
-            (Join-Path $BookDir 'index.html'),
-            (Join-Path $BookDir 'syntax-highlighting.html'),
-            (Join-Path $BookDir 'assets\editor-screenshot.png'),
-            (Join-Path $BookDir 'assets\search-panel.png'),
-            (Join-Path $BookDir 'assets\syntax-highlighted-code.png'),
-            (Join-Path $BookDir 'assets\syntax-language-picker.png'),
-            (Join-Path $BookDir 'spelling.html'),
-            (Join-Path $BookDir 'assets\spelling.png'),
-            (Join-Path $BookDir 'files-and-saving.html'),
-            (Join-Path $BookDir 'assets\read-only-save.png')
-        )) {
-            if (-not (Test-Path $OutputFile)) {
+        # Every page of docs/src and every screenshot is in the book.
+        $Pages = @(Get-ChildItem -Path (Join-Path $DocsDir 'src') -Filter '*.md' -File |
+            Where-Object { $_.Name -ne 'SUMMARY.md' } |
+            ForEach-Object { "$($_.BaseName).html" })
+        $Images = @($Screenshots | ForEach-Object { "assets\$($_.Image)" })
+        foreach ($OutputFile in @('index.html') + $Pages + $Images) {
+            if (-not (Test-Path (Join-Path $BookDir $OutputFile))) {
                 throw "mdbook did not create $OutputFile"
             }
         }
@@ -294,4 +246,6 @@ finally {
         Remove-Item $MermaidStage -Recurse -Force
     }
     [Environment]::SetEnvironmentVariable('MDBOOK_OUTPUT__HTML__SITE_URL', $PreviousSiteUrl, 'Process')
+    [Environment]::SetEnvironmentVariable('MDBOOK_BOOK__TITLE', $PreviousTitle, 'Process')
+    [Environment]::SetEnvironmentVariable('PATH', $PreviousPath, 'Process')
 }

@@ -69,7 +69,7 @@
     --searchbar-shadow-color: transparent;
     --searchresults-header-fg: var(--rfm-muted);
     --searchresults-border-color: var(--rfm-border);
-    --searchresults-li-bg: var(--rfm-surface);
+    --searchresults-li-bg: var(--rfm-surface-raised);
     --search-mark-bg: var(--rfm-orange);
 
     --blockquote-note-color: var(--rfm-blue);
@@ -95,7 +95,8 @@
     height: 1.6rem;
     margin-inline-end: 0.6rem;
     vertical-align: middle;
-    background: url("../assets/icon.svg") center / contain no-repeat;
+    /* The favicon, set by royi.js. */
+    background: var(--logo, none) center / contain no-repeat;
 }
 
 @media only screen and (max-width: 76.234375em) {
@@ -199,9 +200,24 @@
     width: 100%;
 }
 
-#mdbook-search-wrapper.hidden #mdbook-searchresults-outer,
-#mdbook-search-wrapper:not(:focus-within) #mdbook-searchresults-outer {
+#mdbook-search-wrapper.hidden #mdbook-searchresults-outer {
     display: none;
+}
+
+ul#mdbook-searchresults li {
+    padding: 0.25rem 0.5rem;
+}
+
+ul#mdbook-searchresults li:hover {
+    background-color: var(--searchresults-li-bg);
+}
+
+ul#mdbook-searchresults li.focus {
+    box-shadow: inset 2px 0 var(--rfm-orange);
+}
+
+#mdbook-searchresults li > a:focus {
+    outline: none;
 }
 
 /* Typography and content column. */
@@ -267,7 +283,8 @@ body {
 }
 
 .sidebar .sidebar-scrollbox::before {
-    content: "Royi Text Editor";
+    /* The book title, set by royi.js. */
+    content: attr(data-title);
     color: var(--rfm-muted);
     display: block;
     font-size: inherit;
@@ -349,15 +366,21 @@ body {
         display: none;
     }
 
-    #mdbook-search-wrapper:focus-within {
+    /* The closed search box stays in the header (mdBook hides it); open, it
+       widens. Its toggle and the other left buttons are not needed. */
+    #mdbook-search-wrapper.hidden {
+        display: block !important;
+    }
+
+    #mdbook-search-wrapper {
+        transition: flex-basis 0.25s cubic-bezier(0.1, 0.7, 0.1, 1);
+    }
+
+    #mdbook-search-wrapper:not(.hidden) {
         flex-basis: 43rem;
     }
 
     .left-buttons {
-        display: flex;
-    }
-
-    .left-buttons:has(#mdbook-search-toggle[aria-expanded="true"]) {
         display: none;
     }
 
@@ -403,6 +426,8 @@ body {
 
 @media only screen and (max-width: 76.234375em) {
     #mdbook-search-wrapper {
+        /* Opaque: the open search box covers the title. */
+        background-color: var(--rfm-surface);
         inset: 0.375rem 0.5rem auto 3.25rem;
         position: fixed;
         z-index: 110;
@@ -698,5 +723,11 @@ body {
     .chapter-footer,
     .sidebar-overlay {
         display: none;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    #mdbook-search-wrapper {
+        transition: none;
     }
 }
