@@ -23,7 +23,8 @@ use rte_text::{Encoding, LineEnding, Snapshot};
 use rte_view::{
     CaretStyle, Cell, Chrome, DisplayList, Frame, Highlights, Layout, Options, PALETTE_ROWS,
     PaletteFrame, PaletteGeometry, PaletteRow, PanelFrame, PanelGeometry, PanelLine,
-    ROW_SCAN_LIMIT, Scroll, Theme, Tone, ViewBuilder, draw_palette, draw_panel, hit_test,
+    ROW_SCAN_LIMIT, STATUS_SEPARATOR, Scroll, Theme, Tone, ViewBuilder, draw_palette, draw_panel,
+    hit_test,
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -2248,17 +2249,17 @@ impl Editor {
         self.reveal();
     }
 
-    fn status_text(&self) -> (String, String) {
+    /// Left and right status text, and the read-only flag drawn after the
+    /// right text in the warning color (only for the `user` lock).
+    fn status_text(&self) -> (String, String, String) {
         if self.no_file() {
             let left = self.notice.clone().unwrap_or_default();
             let mut right = Vec::new();
-            if self.doc.locks.user {
-                right.push("Read-only");
-            }
             if !self.highlighting {
                 right.push("Syntax off");
             }
-            return (left, right.join("  \u{00B7}  "));
+            let flag = if self.doc.locks.user { "Read-only" } else { "" };
+            return (left, right.join(STATUS_SEPARATOR), flag.to_owned());
         }
         let name = self.path.as_deref().map(display_name).unwrap_or_default();
         let left = match self.prompt {
@@ -2346,12 +2347,25 @@ impl Editor {
         } else if let Some(lang) = self.language {
             right.push(lang.name.to_owned());
         }
+        let mut flag = String::new();
         if !self.doc.locks.loading
             && let Some(reason) = self.doc.locks.edit_refusal()
         {
-            right.push(format!("RO: {reason}"));
+            let segment = format!("RO: {reason}");
+            if self.read_only() {
+                flag = segment;
+            } else {
+                right.push(segment);
+            }
         }
-        (left, right.join("  \u{00B7}  "))
+        (left, right.join(STATUS_SEPARATOR), flag)
+    }
+
+    /// The user's read-only state (`--read-only`, Toggle Read-Only) of a
+    /// loaded file: shown in the warning color.
+    fn read_only(&self) -> bool {
+        let locks = self.doc.locks;
+        locks.user && locks.save_refusal().is_none()
     }
 }
 
@@ -2537,7 +2551,8 @@ impl App for Editor {
         self.size = (width, height);
         let cell = self.renderer.cell();
         let layout = self.layout();
-        let (left, right) = self.status_text();
+        let (left, right, flag) = self.status_text();
+        let read_only = self.read_only();
         let title_mark = self.doc.is_dirty().then_some(if self.save_refused {
             self.theme.warning
         } else {
@@ -2577,9 +2592,11 @@ impl App for Editor {
             chrome: Chrome {
                 title: &self.title,
                 title_mark,
+                read_only,
                 app_name: APP_NAME,
                 status_left: &left,
                 status_right: &right,
+                status_flag: &flag,
                 prompt: self.prompt.is_some(),
             },
             options: &self.options,
@@ -3000,9 +3017,52 @@ mod tests {
         editor.event(key(VK_DELETE, false, false), &mut ctx);
         assert_eq!(text(&editor), "abc");
         assert_eq!(editor.notice.as_deref(), Some("Not editable: read-only"));
-        assert!(editor.status_text().1.contains("RO: read-only"));
+        assert_eq!(editor.status_text().2, "RO: read-only");
         editor.event(key(VK_RIGHT, false, true), &mut ctx);
         assert_eq!(editor.doc.selections.primary(), Selection::new(0, 1));
+    }
+
+    #[test]
+    fn only_the_read_only_state_is_drawn_in_the_warning_color() {
+        let files = Arc::new(FakeFiles::default());
+        let mut editor = editor_on(&files, b"abc", true);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        // Text drawn in the warning color.
+        let orange = |editor: &mut Editor| -> String {
+            let mut pixels = vec![0u32; 800 * 600];
+            editor.paint(&mut pixels, 800, 600);
+            let warning = editor.theme.warning;
+            editor
+                .list
+                .glyphs
+                .iter()
+                .filter(|g| g.color == warning)
+                .map(|g| g.ch)
+                .collect()
+        };
+        let title: String = editor
+            .title
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert_eq!(orange(&mut editor), format!("{title}RO:read-only"));
+        assert!(!editor.status_text().1.contains("RO"));
+
+        editor.perform(Action::ToggleReadOnly, &mut ctx);
+        assert_eq!(orange(&mut editor), "");
+        assert_eq!(editor.status_text().2, "");
+
+        // Other locks keep the plain `RO: <reason>`, also with the user lock.
+        editor.doc.locks.encoding = true;
+        assert_eq!(orange(&mut editor), "");
+        assert!(editor.status_text().1.ends_with("RO: malformed UTF-16"));
+        editor.perform(Action::ToggleReadOnly, &mut ctx);
+        assert_eq!(orange(&mut editor), "");
+        assert!(editor.status_text().1.ends_with("RO: malformed UTF-16"));
+
+        let mut editor = empty_editor(true);
+        assert_eq!(editor.status_text().2, "Read-only");
+        assert_eq!(orange(&mut editor), "Read-only");
     }
 
     #[test]
@@ -3051,7 +3111,7 @@ mod tests {
                 def.label
             );
         }
-        let (left, right) = editor.status_text();
+        let (left, right, _) = editor.status_text();
         assert!(left.contains("Alt+F4"), "the notice: {left}");
         assert_eq!(right, "", "no position, encoding or language");
         // Quit needs no answer.

@@ -38,7 +38,8 @@
 
 ## Changes
 
- - [ ] Hint files which are in read only mode (Maybe write the path in orange).
+ - [x] Hint files which are in read only mode (Maybe write the path in orange).
+ - [x] Embed metadata into the `exe`: File Version, Product Version, Product Name, File Description.
 
 ## Bugs
 

@@ -70,9 +70,11 @@ fn frames(bencher: Bencher, snapshot: &Snapshot, width: u32, height: u32, px: f3
             chrome: Chrome {
                 title: "C:\\Projects\\sample.rs",
                 title_mark: Some(Theme::DARK.unsaved),
+                read_only: false,
                 app_name: "RoyiTextEditor",
                 status_left: "5000 lines",
                 status_right: "UTF-8 · CRLF",
+                status_flag: "",
                 prompt: false,
             },
             options: &options,

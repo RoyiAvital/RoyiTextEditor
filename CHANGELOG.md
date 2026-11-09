@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The executable carries version information from `Meta/AppMeta.json`, shown
+  in its Properties (Details): File Version, Product Version, Product Name,
+  File Description and Original Filename.
+
+### Changed
+
+- Read-only mode (`--read-only` or `File: Toggle Read-Only`) shows the path in
+  the title strip and `RO: read-only` on the status line in orange (`Read-only`
+  in the empty state). Files read-only for other reasons (malformed UTF-16, a
+  read error) are shown as before.
+
 ### Documentation
 
 - The Performance page of the book shows the results of 0.6.0 (was 0.2.0).

@@ -28,6 +28,9 @@ pub type Color = u32;
 /// Bytes scanned per visible row and frame; longer lines are cut off.
 pub const ROW_SCAN_LIMIT: usize = 64 * 1024;
 
+/// Between the segments of the status line.
+pub const STATUS_SEPARATOR: &str = "  \u{00B7}  ";
+
 /// Zero-width marks drawn on one cell; further marks are skipped (not removed).
 pub const MAX_MARKS_PER_CELL: u32 = 4;
 
@@ -317,10 +320,15 @@ pub struct Chrome<'a> {
     pub title: &'a str,
     /// Color of the unsaved marker after the title, when shown.
     pub title_mark: Option<Color>,
+    /// Edits are refused: the title is drawn in the warning color.
+    pub read_only: bool,
     /// Right-aligned in the title strip; hidden when the title would reach it.
     pub app_name: &'a str,
     pub status_left: &'a str,
     pub status_right: &'a str,
+    /// Last segment of the status line, after `status_right`, drawn in the
+    /// warning color (the read-only state); empty for none.
+    pub status_flag: &'a str,
     /// The status line shows a question awaiting an answer.
     pub prompt: bool,
 }
@@ -486,7 +494,11 @@ impl ViewBuilder {
             cell.width as i32,
             title_y,
             cell,
-            theme.title_text,
+            if chrome.read_only {
+                theme.warning
+            } else {
+                theme.title_text
+            },
             layout.title,
         );
         if let Some(color) = chrome.title_mark {
@@ -538,17 +550,39 @@ impl ViewBuilder {
             status_text,
             layout.status,
         );
-        let right_w = chrome.status_right.chars().count() as i32 * cell.width as i32;
-        let right_x = layout.status.w as i32 - right_w - cell.width as i32;
-        text_run(
-            &mut out.glyphs,
-            chrome.status_right,
-            right_x,
-            status_y,
-            cell,
-            status_text,
-            layout.status,
-        );
+        // Right part: `status_right`, the separator, then the flag.
+        let separator = if chrome.status_right.is_empty() || chrome.status_flag.is_empty() {
+            ""
+        } else {
+            STATUS_SEPARATOR
+        };
+        let right_cols = [chrome.status_right, separator, chrome.status_flag]
+            .iter()
+            .map(|s| s.chars().count() as i32)
+            .sum::<i32>();
+        let mut right_x = layout.status.w as i32 - (right_cols + 1) * cell.width as i32;
+        // Orange on the prompt's background reads poorly.
+        let flag_color = if chrome.prompt {
+            status_text
+        } else {
+            theme.warning
+        };
+        for (text, color) in [
+            (chrome.status_right, status_text),
+            (separator, status_text),
+            (chrome.status_flag, flag_color),
+        ] {
+            text_run(
+                &mut out.glyphs,
+                text,
+                right_x,
+                status_y,
+                cell,
+                color,
+                layout.status,
+            );
+            right_x += text.chars().count() as i32 * cell.width as i32;
+        }
 
         if let Some(hint) = empty {
             let text = layout.text;
@@ -1379,6 +1413,32 @@ mod tests {
         caret: CaretStyle,
         highlights: Highlights<'_>,
     ) -> (Layout, DisplayList) {
+        let chrome = Chrome {
+            title: "title",
+            title_mark: Some(Theme::DARK.unsaved),
+            read_only: false,
+            app_name: "App",
+            status_left: "left",
+            status_right: "right",
+            status_flag: "",
+            prompt: false,
+        };
+        build_chrome(
+            bytes, width, height, scroll, selections, caret, highlights, chrome,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_chrome(
+        bytes: &[u8],
+        width: u32,
+        height: u32,
+        scroll: Scroll,
+        selections: &[Selection],
+        caret: CaretStyle,
+        highlights: Highlights<'_>,
+        chrome: Chrome<'_>,
+    ) -> (Layout, DisplayList) {
         let snapshot = Snapshot::from_bytes(bytes);
         let cell = Cell {
             width: 10,
@@ -1394,14 +1454,7 @@ mod tests {
                 scroll,
                 cell,
                 theme: &Theme::DARK,
-                chrome: Chrome {
-                    title: "title",
-                    title_mark: Some(Theme::DARK.unsaved),
-                    app_name: "App",
-                    status_left: "left",
-                    status_right: "right",
-                    prompt: false,
-                },
+                chrome,
                 options: &options,
                 selections,
                 caret,
@@ -1912,6 +1965,83 @@ mod tests {
         assert_eq!(mark.color, Theme::DARK.unsaved);
         assert_eq!(mark.x, 70);
         assert_eq!(mark.clip, layout.title);
+    }
+
+    #[test]
+    fn read_only_draws_the_title_and_the_flag_in_the_warning_color() {
+        let chrome = |read_only, flag, prompt| Chrome {
+            title: "title",
+            title_mark: None,
+            read_only,
+            app_name: "App",
+            status_left: "left",
+            status_right: "right",
+            status_flag: flag,
+            prompt,
+        };
+        // (text, x, color) of the glyphs in `clip`.
+        let glyphs = |chrome| {
+            let (layout, list) = build_chrome(
+                b"",
+                400,
+                200,
+                Scroll::default(),
+                &[],
+                CaretStyle::Hidden,
+                Highlights::default(),
+                chrome,
+            );
+            let pick = |clip: Rect| -> Vec<(char, i32, Color)> {
+                list.glyphs
+                    .iter()
+                    .filter(|g| g.clip == clip)
+                    .map(|g| (g.ch, g.x, g.color))
+                    .collect()
+            };
+            (pick(layout.title), pick(layout.status))
+        };
+        let grey = Theme::DARK.status_text;
+        let orange = Theme::DARK.warning;
+
+        let (title, status) = glyphs(chrome(false, "", false));
+        assert!(title.iter().take(5).all(|g| g.2 == Theme::DARK.title_text));
+        // "right" ends one cell before the edge (400 px, 10 px cells).
+        let right: Vec<_> = status.iter().filter(|g| g.1 >= 340).collect();
+        assert_eq!(right.first().map(|g| (g.0, g.1)), Some(('r', 340)));
+        assert!(right.iter().all(|g| g.2 == grey));
+
+        let (title, status) = glyphs(chrome(true, "RO: read-only", false));
+        assert!(title.iter().take(5).all(|g| g.2 == orange));
+        // "right  ·  RO: read-only" ends one cell before the edge.
+        let start = 400 - 10 * (5 + 5 + 13 + 1);
+        let right: String = status
+            .iter()
+            .filter(|g| g.1 >= start && g.2 == grey)
+            .map(|g| g.0)
+            .collect();
+        let flag: String = status
+            .iter()
+            .filter(|g| g.2 == orange)
+            .map(|g| g.0)
+            .collect();
+        assert_eq!(right, "right\u{00B7}");
+        assert_eq!(flag, "RO:read-only");
+        assert_eq!(status.iter().find(|g| g.1 == start).map(|g| g.0), Some('r'));
+
+        // A prompt keeps one text color on its background.
+        let (_, status) = glyphs(chrome(true, "RO: read-only", true));
+        assert!(status.iter().all(|g| g.2 == Theme::DARK.prompt_text));
+
+        // Without a right text there is no separator.
+        let (_, status) = glyphs(Chrome {
+            status_right: "",
+            ..chrome(true, "Read-only", false)
+        });
+        assert!(!status.iter().any(|g| g.0 == '\u{00B7}'));
+        assert_eq!(
+            status.iter().find(|g| g.0 == 'R').map(|g| (g.1, g.2)),
+            Some((400 - 10 * 10, orange))
+        );
     }
 
     #[test]

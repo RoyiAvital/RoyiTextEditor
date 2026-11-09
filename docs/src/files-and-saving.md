@@ -47,7 +47,8 @@ attribute is checked only when saving, so opening a file stays fast.
 Quitting with changes asks `<name> is read-only. Save changes?`.
 
 To open a file without allowing edits, start the editor with
-`--read-only`; the status line then shows `RO: read-only`.
+`--read-only` or run `File: Toggle Read-Only`; the path in the title strip
+and `RO: read-only` on the status line turn orange.
 
 ## Text Encoding and Line Breaks
 

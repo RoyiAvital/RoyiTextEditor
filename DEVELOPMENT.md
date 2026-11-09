@@ -129,7 +129,10 @@ release archive), the version and the repository and documentation links. The
 `rte_app` build script fails when its version differs from `[workspace.package]`
 in `Cargo.toml` or its `file name` differs from the `[[bin]]` name. It also
 renders `Meta/Icon.svg` (64 px and up) and
-`Meta/IconSmall.svg` (48 px and below) into the executable's icon.
+`Meta/IconSmall.svg` (48 px and below) into the executable's icon, and embeds
+the version information from `Meta/AppMeta.json` (File and Product Version
+from `version`, Product Name and File Description from `name`, Original
+Filename from `file name`), shown in the file's Properties.
 
 Auxiliary tools that are not part of the build live in `tools/`; usage is at the
 top of each file.

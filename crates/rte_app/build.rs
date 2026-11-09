@@ -1,7 +1,9 @@
-//! Embeds the application manifest and icon into the executable: MinGW
-//! `windres` compiles a resource script into a COFF object linked into the
-//! binary. The icon is rendered from `Meta/Icon.svg` (64 px and up) and
-//! `Meta/IconSmall.svg` (48 px and below, where the names become bars).
+//! Embeds the application manifest, icon and version information into the
+//! executable: MinGW `windres` compiles a resource script into a COFF object
+//! linked into the binary. The icon is rendered from `Meta/Icon.svg` (64 px
+//! and up) and `Meta/IconSmall.svg` (48 px and below, where the names become
+//! bars). The version information (file and product version, product name,
+//! file description, original file name) comes from `Meta/AppMeta.json`.
 //! Fails when `Meta/AppMeta.json` and the Cargo package version differ, or when
 //! its `file name` is not the name of the `[[bin]]` target.
 //!
@@ -31,7 +33,7 @@ fn main() {
     println!("cargo:rerun-if-changed={ICON_SMALL}");
     println!("cargo:rerun-if-env-changed=RTE_SEGMENT_HEAP");
     println!("cargo:rerun-if-env-changed=WINDRES");
-    read_meta();
+    let meta = read_meta();
     let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
     std::fs::write(out.join("about_icon.bin"), about_icon()).expect("write about_icon.bin");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
@@ -51,10 +53,14 @@ fn main() {
     )
     .expect("write manifest");
     std::fs::write(out.join("app.ico"), icon()).expect("write app.ico");
-    // Resource 1 of type RT_MANIFEST (24) and icon group 1 (the executable icon).
+    // Resource 1 of type RT_MANIFEST (24), icon group 1 (the executable icon)
+    // and the version information. The script is UTF-8 (`--codepage=65001`).
     std::fs::write(
         out.join("resources.rc"),
-        "1 24 \"app.manifest\"\n1 ICON \"app.ico\"\n",
+        format!(
+            "1 24 \"app.manifest\"\n1 ICON \"app.ico\"\n{}",
+            version_info(&meta)
+        ),
     )
     .expect("write resources.rc");
 
@@ -62,6 +68,7 @@ fn main() {
     let status = Command::new(&windres)
         .current_dir(&out)
         .args([
+            "--codepage=65001",
             "--input",
             "resources.rc",
             "--output",
@@ -82,10 +89,17 @@ fn main() {
     );
 }
 
+/// The fields of `AppMeta.json` the resources use.
+struct Meta {
+    name: String,
+    file_name: String,
+    version: String,
+}
+
 /// Checks `AppMeta.json` against Cargo and exports the display name, file name
 /// and links as `RTE_APP_NAME`, `RTE_FILE_NAME`, `RTE_REPOSITORY_URL` and
 /// `RTE_DOCUMENTATION_URL`.
-fn read_meta() {
+fn read_meta() -> Meta {
     let text = std::fs::read_to_string(APP_META).expect("read AppMeta.json");
     let info: serde_json::Value = serde_json::from_str(&text).expect("AppMeta.json is JSON");
     let name = info["name"].as_str().expect("AppMeta.json has a name");
@@ -120,6 +134,74 @@ fn read_meta() {
         version, cargo,
         "AppMeta.json and the workspace version in Cargo.toml differ"
     );
+    Meta {
+        name: name.to_owned(),
+        file_name: file_name.to_owned(),
+        version: version.to_owned(),
+    }
+}
+
+/// `VERSIONINFO` resource (shown in the file's Properties, Details tab).
+/// The numeric versions take the numbers before a pre-release suffix
+/// (`1.0.0-rc.1` → `1,0,0,0`); the string versions keep the whole version.
+fn version_info(meta: &Meta) -> String {
+    let core = meta.version.split(['-', '+']).next().unwrap_or_default();
+    let mut numbers: Vec<u16> = core
+        .split('.')
+        .map(|n| {
+            n.parse().unwrap_or_else(|_| {
+                panic!("AppMeta.json version {:?} is not numeric", meta.version)
+            })
+        })
+        .collect();
+    assert!(
+        numbers.len() <= 4,
+        "AppMeta.json version {:?} has more than 4 numbers",
+        meta.version
+    );
+    numbers.resize(4, 0);
+    let numeric = numbers
+        .iter()
+        .map(u16::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let quoted = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
+    let strings = [
+        ("FileDescription", meta.name.clone()),
+        ("FileVersion", meta.version.clone()),
+        ("InternalName", meta.file_name.clone()),
+        ("OriginalFilename", format!("{}.exe", meta.file_name)),
+        ("ProductName", meta.name.clone()),
+        ("ProductVersion", meta.version.clone()),
+    ]
+    .iter()
+    .map(|(key, value)| format!("      VALUE {}, {}\n", quoted(key), quoted(value)))
+    .collect::<String>();
+    // Language 0x0409 (US English), code page 1200 (UTF-16); FILEOS
+    // VOS_NT_WINDOWS32, FILETYPE VFT_APP.
+    format!(
+        r#"1 VERSIONINFO
+FILEVERSION {numeric}
+PRODUCTVERSION {numeric}
+FILEFLAGSMASK 0x3F
+FILEFLAGS 0
+FILEOS 0x40004
+FILETYPE 1
+FILESUBTYPE 0
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+{strings}    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END
+"#
+    )
 }
 
 /// `name` of the `[[bin]]` target in this package's `Cargo.toml`.
