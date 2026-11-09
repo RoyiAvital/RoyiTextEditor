@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the results; on narrow windows the open box no longer shows the title
   through it.
 - The book's header shows its logo (it was missing).
+- The Configuration page says that invalid YAML ignores the whole file; an
+  invalid setting keeps only its own default.
 
 ## [0.6.2] - 2026-11-02
 

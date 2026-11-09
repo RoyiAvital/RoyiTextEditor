@@ -6,9 +6,11 @@ executable.
 - It is read once at startup; restart the editor after changing it.
 - The editor never writes it.
 - A missing file gives the defaults.
-- A problem (an unknown key, a value out of range, invalid YAML) is shown
-  on the status line; the setting keeps its default and the other settings
-  still apply.
+- Problems are shown on the status line:
+  - An invalid setting (an unknown key, a value out of range) keeps its
+    default; the other settings still apply.
+  - Invalid YAML (a syntax error, an anchor, tag or alias) ignores the whole
+    file: every setting keeps its default.
 - Plain YAML only: maps, lists and values, one document, no anchors, tags
   or aliases.
 
