@@ -71,6 +71,18 @@ $MdBookMermaid = @{
 
 $Tools = @($MdBook, $MdBookPagetoc, $MdBookMermaid)
 
+# A failed download writes its cause to the output and is tried once more.
+function Invoke-Download([string] $Url, [string] $OutFile) {
+    try {
+        Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing
+    }
+    catch {
+        Write-Host "Download of $Url failed: $($_.Exception.Message) Retrying in 3 s."
+        Start-Sleep -Seconds 3
+        Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing
+    }
+}
+
 if (-not (Test-Path $ToolsDir)) {
     New-Item -ItemType Directory -Path $ToolsDir -Force | Out-Null
 }
@@ -88,7 +100,7 @@ foreach ($Tool in $Tools) {
     Write-Host "Downloading $($Tool.Exe) v$($Tool.Version)"
     $TempZip = Join-Path $ToolsDir "$($Tool.Exe).zip"
     try {
-        Invoke-WebRequest -Uri $Tool.Url -OutFile $TempZip -ErrorAction Stop
+        Invoke-Download $Tool.Url $TempZip
     }
     catch {
         Remove-Item $TempZip -ErrorAction SilentlyContinue

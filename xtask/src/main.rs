@@ -686,6 +686,67 @@ finally {
     }
 
     #[test]
+    fn failed_downloads_are_reported_and_retried_once() {
+        let script = r#"
+$ErrorActionPreference = 'Stop'
+foreach ($file in $env:RTE_DOWNLOAD_SCRIPTS -split ';') {
+    $tokens = $null
+    $parseErrors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$parseErrors)
+    if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
+    $definition = $ast.Find({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-Download'
+    }, $true)
+    if (-not $definition) { throw "Invoke-Download not found in $file" }
+    $inside = [regex]::Matches($definition.Extent.Text, 'Invoke-WebRequest').Count
+    if ([regex]::Matches([IO.File]::ReadAllText($file), 'Invoke-WebRequest').Count -ne $inside) {
+        throw "$file downloads outside Invoke-Download"
+    }
+    . ([scriptblock]::Create($definition.Extent.Text))
+    function Start-Sleep([int] $Seconds) { $script:waits += $Seconds }
+    function Write-Host([string] $Object) { $script:written += $Object }
+    foreach ($case in @(
+        @{ Name = 'success'; Failures = 0; Calls = 1; Fails = $false; Waits = '' },
+        @{ Name = 'one failure'; Failures = 1; Calls = 2; Fails = $false; Waits = '3' },
+        @{ Name = 'two failures'; Failures = 2; Calls = 2; Fails = $true; Waits = '3' }
+    )) {
+        $script:calls = 0
+        $script:waits = @()
+        $script:written = @()
+        $script:failures = $case.Failures
+        function Invoke-WebRequest {
+            $script:calls++
+            if ($script:calls -le $script:failures) { throw '504 Gateway Time-out' }
+        }
+        $failed = $false
+        try { Invoke-Download 'https://example.invalid/file.zip' 'file.zip' } catch { $failed = $true }
+        if ($script:calls -ne $case.Calls -or $failed -ne $case.Fails -or ($script:waits -join ',') -ne $case.Waits) {
+            throw "$file, $($case.Name): $($script:calls) calls, failed $failed, waits $($script:waits -join ',')"
+        }
+        $reported = @($script:written | Where-Object { $_ -like '*https://example.invalid/file.zip*504 Gateway Time-out*' }).Count
+        if ($reported -ne [Math]::Min($case.Failures, 1)) {
+            throw "$file, $($case.Name): the cause was not written: $($script:written -join ' | ')"
+        }
+    }
+}
+"#;
+        let scripts = ["tools/Build-Docs.ps1"]
+            .map(|s| root().join(s).display().to_string())
+            .join(";");
+        let output = Command::new("powershell.exe")
+            .env_remove("PSModulePath")
+            .env("RTE_DOWNLOAD_SCRIPTS", scripts)
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .output()
+            .expect("run the download retry regression");
+        assert!(
+            output.status.success(),
+            "Download retries failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    #[test]
     fn pages_installs_screenshot_toolchain_before_building_documentation() {
         let workflow = include_str!("../../.github/workflows/pages.yml");
         let toolchain = include_str!("../../rust-toolchain.toml");

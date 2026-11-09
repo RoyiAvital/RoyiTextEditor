@@ -38,6 +38,8 @@
 
 ## Changes
 
+ - [ ] Hint files which are in read only mode (Maybe write the path in orange).
+
 ## Bugs
 
  - [x] `Untitled` file can not be saved. Yet on close it asks for approval to discard.
