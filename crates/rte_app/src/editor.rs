@@ -21,7 +21,7 @@ use rte_render::{Renderer, Target};
 use rte_syntax::Lang;
 use rte_text::{Encoding, LineEnding, Snapshot};
 use rte_view::{
-    CaretStyle, Cell, Chrome, DisplayList, Frame, Highlights, Layout, Options, PALETTE_ROWS,
+    CaretStyle, Cell, Chrome, DisplayList, Fill, Frame, Highlights, Layout, Options, PALETTE_ROWS,
     PaletteFrame, PaletteGeometry, PaletteRow, PanelFrame, PanelGeometry, PanelLine,
     ROW_SCAN_LIMIT, STATUS_SEPARATOR, Scroll, Theme, Tone, ViewBuilder, draw_palette, draw_panel,
     hit_test,
@@ -184,6 +184,8 @@ enum DragMode {
     Column((u64, u64)),
     /// The scroll slider, held `grab` pixels below its top.
     Slider { grab: i32 },
+    /// The horizontal slider, held `grab` pixels right of its left edge.
+    HSlider { grab: i32 },
 }
 
 /// Snapshot, caret, syntax generation and the bracket pair found there.
@@ -300,6 +302,9 @@ pub struct Editor {
     deletion_shown: bool,
     /// Scroll and caret restored when a reload is loaded.
     restore: Option<(Scroll, u64)>,
+    /// Columns of the widest row drawn since the file was loaded (the
+    /// horizontal scroll range).
+    widest: u64,
 }
 
 /// What a frame shows; a repaint is requested only when it changes.
@@ -324,6 +329,7 @@ struct Visible {
     popup: u64,
     full_screen: bool,
     slider_active: bool,
+    hslider_active: bool,
     /// Revision of the spelling marks.
     spelling: u64,
 }
@@ -347,6 +353,7 @@ impl Visible {
             && self.popup == other.popup
             && self.full_screen == other.full_screen
             && self.slider_active == other.slider_active
+            && self.hslider_active == other.hslider_active
             && self.spelling == other.spelling
     }
 }
@@ -475,6 +482,7 @@ impl Editor {
             disk: None,
             deletion_shown: false,
             restore: None,
+            widest: 0,
         };
         // `--syntax` belongs to the command-line file; without one it is unused.
         if editor.path.is_some() {
@@ -758,6 +766,7 @@ impl Editor {
                 self.info = Some(info);
                 self.baseline = baseline;
                 self.status = LoadStatus::Ready;
+                self.widest = 0;
                 self.detect_language();
                 self.restart_syntax();
                 if let Some((scroll, caret)) = self.restore.take() {
@@ -889,6 +898,53 @@ impl Editor {
         self.clamp_scroll();
     }
 
+    /// Columns the horizontal slider spans: the widest drawn row and room
+    /// for the caret after it, or more when the view is scrolled further.
+    fn hscroll_total(&self, cols: u64) -> u64 {
+        (self.widest + REVEAL_MARGIN).max(self.scroll.first_col + cols)
+    }
+
+    /// The horizontal slider, shown once the file is loaded and a drawn row
+    /// is wider than the view, or the view is scrolled right.
+    fn hslider(&self) -> Option<rte_view::Rect> {
+        let layout = self.layout();
+        let cols = u64::from(layout.cols);
+        let loading = matches!(self.status, LoadStatus::Loading { .. });
+        if loading || (self.widest <= cols && self.scroll.first_col == 0) {
+            return None;
+        }
+        let total = self.hscroll_total(cols);
+        let min = self.renderer.cell().height;
+        rte_view::hslider(&layout, total, self.scroll.first_col, min)
+    }
+
+    fn hslider_active(&self) -> bool {
+        matches!(
+            self.drag,
+            Some(Drag {
+                mode: DragMode::HSlider { .. },
+                ..
+            })
+        )
+    }
+
+    /// Scrolls so the horizontal slider's left edge is at `x` (window
+    /// pixels), as far as its track allows.
+    fn drag_hslider(&mut self, x: i32) {
+        let layout = self.layout();
+        let (Some(slider), Some(track)) = (self.hslider(), rte_view::htrack(&layout)) else {
+            return;
+        };
+        let travel = i64::from(track.w - slider.w);
+        if travel <= 0 {
+            return;
+        }
+        let left = i64::from(x - track.x).clamp(0, travel);
+        let cols = u64::from(layout.cols);
+        let last = (self.hscroll_total(cols) - cols) as i64;
+        self.scroll.first_col = ((left * last + travel / 2) / travel) as u64;
+    }
+
     fn toggle_full_screen(&mut self, ctx: &mut Ctx) {
         ctx.set_full_screen(!self.full_screen);
     }
@@ -987,6 +1043,7 @@ impl Editor {
             popup: self.popup_view(),
             full_screen: self.full_screen,
             slider_active: self.slider_active(),
+            hslider_active: self.hslider_active(),
             spelling: self.spell_rev,
         }
     }
@@ -2163,6 +2220,22 @@ impl Editor {
             }
             return;
         }
+        if let (Some(slider), Some(track)) = (self.hslider(), rte_view::htrack(&layout))
+            && track.contains(x, y)
+        {
+            let grab = if slider.contains(x, y) {
+                x - slider.x
+            } else {
+                slider.w as i32 / 2
+            };
+            self.drag = Some(Drag {
+                unit: Unit::Char,
+                origin: (0, 0),
+                mode: DragMode::HSlider { grab },
+            });
+            self.drag_hslider(x - grab);
+            return;
+        }
         let body = layout.text.contains(x, y) || layout.gutter.contains(x, y);
         if !body {
             return;
@@ -2215,6 +2288,7 @@ impl Editor {
                 self.place_column(anchor, head, false);
             }
             Some(DragMode::Slider { grab }) => self.drag_slider(y - grab),
+            Some(DragMode::HSlider { grab }) => self.drag_hslider(x - grab),
             Some(_) => {
                 let pos = self.hit(x, y);
                 self.drag_to(pos);
@@ -2567,6 +2641,8 @@ impl App for Editor {
         };
         self.sync_syntax();
         let slider_active = self.slider_active();
+        // Row widths are measured once the file is loaded.
+        let measure = !matches!(self.status, LoadStatus::Loading { .. });
         let brackets: Vec<u64> = self
             .bracket_pair()
             .map(|(a, b)| vec![a.min(b), a.max(b)])
@@ -2614,8 +2690,27 @@ impl App for Editor {
             },
             empty: self.path.is_none().then_some(EMPTY_HINT),
             slider_active,
+            measure,
         };
         self.view.build(&frame, &mut self.list);
+        // With every line drawn, the widest row is known exactly.
+        let all =
+            self.scroll.top_line == 0 && self.doc.snapshot.line_count() <= u64::from(layout.rows);
+        if measure {
+            self.widest = if all {
+                self.list.widest
+            } else {
+                self.widest.max(self.list.widest)
+            };
+        }
+        if let Some(rect) = self.hslider() {
+            let color = if self.hslider_active() {
+                self.theme.scroll_slider_active
+            } else {
+                self.theme.scroll_slider
+            };
+            self.list.overlays.push(Fill { rect, color });
+        }
         self.draw_popup();
         let mut target = Target {
             pixels,
@@ -2649,10 +2744,18 @@ impl App for Editor {
     fn is_text(&self, x: i32, y: i32) -> bool {
         !self.no_file()
             && self.layout().text.contains(x, y)
+            && !self.is_scroll_bar(x, y)
             && !self.popup_area().is_some_and(|r| r.contains(x, y))
             && !self
                 .find_geometry()
                 .is_some_and(|g| g.panel.contains(x, y) || g.message.contains(x, y))
+    }
+
+    fn is_scroll_bar(&self, x: i32, y: i32) -> bool {
+        let layout = self.layout();
+        layout.scrollbar.contains(x, y)
+            || self.hslider().is_some()
+                && rte_view::htrack(&layout).is_some_and(|t| t.contains(x, y))
     }
 }
 
@@ -5780,6 +5883,108 @@ mod tests {
         let s = editor.slider().unwrap();
         assert!((s.y + s.h as i32 / 2 - middle).abs() <= 2, "{s:?}");
         assert_eq!(caret(&editor), 4);
+    }
+
+    /// A drawn row wider than the view shows a slider over the bottom of the
+    /// text; dragging it scrolls without moving the caret, up to the end of
+    /// a row of wide characters. Both scroll bars take the mouse inside the
+    /// window's resize border.
+    #[test]
+    fn the_horizontal_slider_drags_without_moving_the_caret() {
+        let files = Arc::new(FakeFiles::default());
+        let row = "\u{6f22}".repeat(500);
+        let text = format!("short\n{row}\nend");
+        let mut editor = editor_on(&files, text.as_bytes(), false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(Event::Wake, &mut ctx);
+        let mut pixels = vec![0u32; 800 * 600];
+        assert!(editor.hslider().is_none(), "no row drawn yet");
+        editor.paint(&mut pixels, 800, 600);
+        assert_eq!(editor.widest, 1000);
+        let slider = editor.hslider().unwrap();
+        let track = rte_view::htrack(&editor.layout()).unwrap();
+        assert_eq!((slider.x, slider.y), (track.x, track.y));
+        assert!(editor.list.overlays.iter().any(|f| f.rect == slider));
+        assert!(editor.is_scroll_bar(slider.x + 1, slider.y + 1));
+        assert!(!editor.is_text(slider.x + 1, slider.y + 1));
+        let strip = editor.layout().scrollbar;
+        assert!(editor.is_scroll_bar(strip.x + 1, strip.y + 5));
+        assert!(!editor.is_scroll_bar(track.x + 5, track.y - 5), "the text");
+        let press = |x| Event::MouseDown {
+            x,
+            y: track.y + 2,
+            clicks: 1,
+            shift: false,
+            ctrl: false,
+            alt: false,
+            middle: false,
+        };
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(press(slider.x + 2), &mut ctx);
+        assert!(ctx.redraw_requested(), "the slider's color");
+        let right = track.x + track.w as i32 + 50;
+        editor.event(Event::MouseMove { x: right, y: 0 }, &mut ctx);
+        let cols = u64::from(editor.layout().cols);
+        assert_eq!(editor.scroll.first_col, 1000 + REVEAL_MARGIN - cols);
+        editor.paint(&mut pixels, 800, 600);
+        assert_eq!(editor.widest, 1000, "the row's end is drawn");
+        editor.event(Event::MouseUp, &mut ctx);
+        // A press on the track centers the slider there.
+        let middle = track.x + track.w as i32 / 2;
+        editor.event(press(middle), &mut ctx);
+        editor.event(Event::MouseUp, &mut ctx);
+        let s = editor.hslider().unwrap();
+        assert!((s.x + s.w as i32 / 2 - middle).abs() <= 2, "{s:?}");
+        assert_eq!(caret(&editor), 0);
+
+        // Every line drawn: the width is exact, so the slider goes with the row.
+        editor.select_single(Selection::new(6, 6 + row.len() as u64));
+        editor.event(Event::Char('y'), &mut ctx);
+        editor.paint(&mut pixels, 800, 600);
+        assert_eq!((editor.widest, editor.scroll.first_col), (5, 0));
+        assert!(editor.hslider().is_none());
+        assert!(!editor.is_scroll_bar(track.x + 5, track.y + 2));
+        assert!(editor.is_text(track.x + 5, track.y + 2));
+        editor.widest = 1000;
+        editor.event(key(VK_W, true, false), &mut ctx);
+        editor.event(key(VK_D, false, false), &mut ctx);
+        assert!(editor.no_file());
+        assert_eq!(editor.widest, 0, "closing forgets the width");
+    }
+
+    /// Rows are measured once the file is loaded: no horizontal slider while
+    /// loading, even scrolled right.
+    #[test]
+    fn the_horizontal_slider_waits_for_the_load() {
+        let wide = "x".repeat(1000);
+        let (tx, rx) = mpsc::channel();
+        tx.send(LoadEvent::Progress {
+            snapshot: Snapshot::from_bytes(wide.as_bytes()),
+            loaded: 1000,
+            total: 2000,
+        })
+        .unwrap();
+        let first = rx.recv().ok();
+        let mut editor = loading_editor(first, rx);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        let mut pixels = vec![0u32; 800 * 600];
+        editor.paint(&mut pixels, 800, 600);
+        let shift_wheel = Event::Wheel {
+            delta: -120,
+            horizontal: false,
+            shift: true,
+            ctrl: false,
+        };
+        editor.event(shift_wheel, &mut ctx);
+        editor.paint(&mut pixels, 800, 600);
+        assert!(editor.scroll.first_col > 0);
+        assert_eq!(editor.widest, 0, "not measured");
+        assert!(editor.hslider().is_none());
+        tx.send(done(wide.as_bytes())).unwrap();
+        editor.event(Event::Wake, &mut ctx);
+        editor.paint(&mut pixels, 800, 600);
+        assert_eq!(editor.widest, 1000);
+        assert!(editor.hslider().is_some());
     }
 
     #[test]

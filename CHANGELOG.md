@@ -7,8 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+The release polishes the scroll bar experience.
+
 ### Added
 
+- A horizontal slider over the bottom of the text once the file is loaded
+  and a row wider than the view is drawn: drag it, or press its track to
+  jump there (the caret stays). It spans the widest row drawn since the file
+  was opened, as in VS Code; rows going past the view are bounded without
+  laying them out, so dragging always reaches their end.
 - The executable carries version information from `Meta/AppMeta.json`, shown
   in its Properties (Details): File Version, Product Version, Product Name,
   File Description and Original Filename.
@@ -19,6 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the title strip and `RO: read-only` on the status line in orange (`Read-only`
   in the empty state). Files read-only for other reasons (malformed UTF-16, a
   read error) are shown as before.
+
+### Fixed
+
+- The scroll slider can be dragged when the window is not maximized: the
+  resize border at the right edge took the mouse. Beside the slider, the
+  right edge resizes over the title strip and the status line; the corners
+  resize as before.
 
 ### Documentation
 

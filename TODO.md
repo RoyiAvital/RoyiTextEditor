@@ -9,10 +9,10 @@
  - [x] Add _Tooltips_ to the icons in _Search Text_ (Both outside the box and within the box). 
  - [x] Make the Right / Down Arrow in _Search Text_ (Replace) larger.
  - [x] Add support for `ini` files with _syntax highlighting_.
+ - [ ] Add support for `qmd` (Quarto MarkDown) files with _syntax highlighting_.
  - [x] Add support for Text Spelling with support for text and MarkDown. Should be disabled by default.
  - [ ] Add support for Text Spelling for comments in code.
- - [ ] Add support for `qmd` (Quarto MarkDown) files with _syntax highlighting_.
- - [ ] Add support for Code Spelling like VS Code extensions (Will mark `myVarieble` with support for `snake_case` and `camelCase`).
+ - [ ] Add support for Code Spelling like VS Code extensions (Will mark `my_varieble` / `myVarieble` with support for `snake_case` and `camelCase`).
  - [x] Add "Copy File Name" which copies the file name to clipboard.
  - [x] Add "Copy File Path" which copies the file path to clipboard.
  - [x] Add awareness of 3rd party changes to file and offer to reload.
@@ -40,12 +40,13 @@
 
  - [x] Hint files which are in read only mode (Maybe write the path in orange).
  - [x] Embed metadata into the `exe`: File Version, Product Version, Product Name, File Description.
- - [ ] Add horizontal scrol bar in case of long lines (Defer after loading).
+ - [x] Add horizontal scroll bar in case of long lines (Defer after loading).
 
 ## Bugs
 
  - [x] `Untitled` file can not be saved. Yet on close it asks for approval to discard.
  - [x] On documents longer than the screen the scroll bar does not appear when the mouse is scrolling all the way up.
+ - [x] Mouse dragging for scroll bars is overridden by the resize arrow.
 
 ## Performance
 

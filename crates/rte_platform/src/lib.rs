@@ -402,6 +402,12 @@ pub trait App {
     fn is_text(&self, _x: i32, _y: i32) -> bool {
         false
     }
+
+    /// True when the client point is on a scroll bar: it takes the mouse
+    /// even inside the resize border.
+    fn is_scroll_bar(&self, _x: i32, _y: i32) -> bool {
+        false
+    }
 }
 
 /// Wakes the window thread from any thread; it receives [`Event::Wake`].
@@ -1412,33 +1418,50 @@ unsafe fn hit_test(hwnd: HWND, lparam: LPARAM) -> LRESULT {
         let Some(state) = state(hwnd) else {
             return HTCLIENT as LRESULT;
         };
-        let (w, h) = (state.width as i32, state.height as i32);
-        if IsZoomed(hwnd) == 0 && state.full_screen.is_none() {
-            let (bx, by) = resize_border(state.dpi);
-            let left = point.x < bx;
-            let right = point.x >= w - bx;
-            let top = point.y < by;
-            let bottom = point.y >= h - by;
-            let hit = match (left, right, top, bottom) {
-                (true, _, true, _) => Some(HTTOPLEFT),
-                (_, true, true, _) => Some(HTTOPRIGHT),
-                (true, _, _, true) => Some(HTBOTTOMLEFT),
-                (_, true, _, true) => Some(HTBOTTOMRIGHT),
-                (true, ..) => Some(HTLEFT),
-                (_, true, ..) => Some(HTRIGHT),
-                (_, _, true, _) => Some(HTTOP),
-                (.., true) => Some(HTBOTTOM),
-                _ => None,
-            };
-            if let Some(hit) = hit {
-                return hit as LRESULT;
-            }
+        let size = (state.width as i32, state.height as i32);
+        let border =
+            (IsZoomed(hwnd) == 0 && state.full_screen.is_none()).then(|| resize_border(state.dpi));
+        hit_code(point.x, point.y, size, border, state.app.as_deref()) as LRESULT
+    }
+}
+
+/// Hit-test code of a client point of a `size` window: the resize border
+/// (`None` when maximized or full screen) unless the point is on one of the
+/// application's scroll bars, then the caption or the client area.
+fn hit_code(
+    x: i32,
+    y: i32,
+    size: (i32, i32),
+    border: Option<(i32, i32)>,
+    app: Option<&dyn App>,
+) -> u32 {
+    if let Some((bx, by)) = border
+        && !app.is_some_and(|app| app.is_scroll_bar(x, y))
+    {
+        let (w, h) = size;
+        let left = x < bx;
+        let right = x >= w - bx;
+        let top = y < by;
+        let bottom = y >= h - by;
+        let hit = match (left, right, top, bottom) {
+            (true, _, true, _) => Some(HTTOPLEFT),
+            (_, true, true, _) => Some(HTTOPRIGHT),
+            (true, _, _, true) => Some(HTBOTTOMLEFT),
+            (_, true, _, true) => Some(HTBOTTOMRIGHT),
+            (true, ..) => Some(HTLEFT),
+            (_, true, ..) => Some(HTRIGHT),
+            (_, _, true, _) => Some(HTTOP),
+            (.., true) => Some(HTBOTTOM),
+            _ => None,
+        };
+        if let Some(hit) = hit {
+            return hit;
         }
-        let caption = state
-            .app
-            .as_ref()
-            .is_some_and(|app| app.is_caption(point.x, point.y));
-        (if caption { HTCAPTION } else { HTCLIENT }) as LRESULT
+    }
+    if app.is_some_and(|app| app.is_caption(x, y)) {
+        HTCAPTION
+    } else {
+        HTCLIENT
     }
 }
 
@@ -1481,6 +1504,34 @@ unsafe fn paint(hwnd: HWND) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Scroll bars at the window edge take the mouse inside the resize
+    /// border; the rest of the border still resizes.
+    #[test]
+    fn scroll_bars_take_the_mouse_inside_the_resize_border() {
+        struct Bars;
+        impl App for Bars {
+            fn event(&mut self, _: Event, _: &mut Ctx) -> bool {
+                false
+            }
+            fn paint(&mut self, _: &mut [u32], _: u32, _: u32) {}
+            fn is_caption(&self, _x: i32, y: i32) -> bool {
+                y < 30
+            }
+            fn is_scroll_bar(&self, x: i32, y: i32) -> bool {
+                x >= 394 && (30..270).contains(&y)
+            }
+        }
+        let app: Option<&dyn App> = Some(&Bars);
+        let (size, border) = ((400, 300), Some((8, 8)));
+        assert_eq!(hit_code(396, 100, size, border, app), HTCLIENT, "the strip");
+        assert_eq!(hit_code(396, 100, size, border, None), HTRIGHT);
+        assert_eq!(hit_code(393, 100, size, border, app), HTRIGHT, "beside it");
+        assert_eq!(hit_code(396, 20, size, border, app), HTRIGHT, "title");
+        assert_eq!(hit_code(396, 296, size, border, app), HTBOTTOMRIGHT);
+        assert_eq!(hit_code(200, 20, size, border, app), HTCAPTION);
+        assert_eq!(hit_code(396, 20, size, None, app), HTCAPTION, "maximized");
+    }
 
     #[test]
     fn scripted_keys_keep_their_modifiers() {
