@@ -184,8 +184,13 @@ enum DragMode {
     Column((u64, u64)),
     /// The scroll slider, held `grab` pixels below its top.
     Slider { grab: i32 },
-    /// The horizontal slider, held `grab` pixels right of its left edge.
-    HSlider { grab: i32 },
+    /// The horizontal slider, held `grab` pixels right of its left edge;
+    /// `widest` and `first_col` at the press keep its range during the drag.
+    HSlider {
+        grab: i32,
+        widest: u64,
+        first_col: u64,
+    },
 }
 
 /// Snapshot, caret, syntax generation and the bracket pair found there.
@@ -898,10 +903,22 @@ impl Editor {
         self.clamp_scroll();
     }
 
+    /// Widest row and first column the horizontal range follows: those at
+    /// the press while its slider is dragged, otherwise the current ones.
+    fn hscroll_basis(&self) -> (u64, u64) {
+        match self.drag.map(|d| d.mode) {
+            Some(DragMode::HSlider {
+                widest, first_col, ..
+            }) => (widest, first_col),
+            _ => (self.widest, self.scroll.first_col),
+        }
+    }
+
     /// Columns the horizontal slider spans: the widest drawn row and room
     /// for the caret after it, or more when the view is scrolled further.
     fn hscroll_total(&self, cols: u64) -> u64 {
-        (self.widest + REVEAL_MARGIN).max(self.scroll.first_col + cols)
+        let (widest, first_col) = self.hscroll_basis();
+        (widest + REVEAL_MARGIN).max(first_col + cols)
     }
 
     /// The horizontal slider, shown once the file is loaded and a drawn row
@@ -910,7 +927,8 @@ impl Editor {
         let layout = self.layout();
         let cols = u64::from(layout.cols);
         let loading = matches!(self.status, LoadStatus::Loading { .. });
-        if loading || (self.widest <= cols && self.scroll.first_col == 0) {
+        let (widest, first_col) = self.hscroll_basis();
+        if loading || (widest <= cols && first_col == 0) {
             return None;
         }
         let total = self.hscroll_total(cols);
@@ -949,10 +967,12 @@ impl Editor {
         ctx.set_full_screen(!self.full_screen);
     }
 
-    /// Fully visible text rows (at least one).
+    /// Fully visible text rows (at least one), above the horizontal slider.
     fn page(&self) -> u64 {
         let cell = self.renderer.cell();
-        u64::from((self.layout().text.h / cell.height.max(1)).max(1))
+        let slider = self.hslider().map_or(0, |s| s.h);
+        let h = self.layout().text.h.saturating_sub(slider);
+        u64::from((h / cell.height.max(1)).max(1))
     }
 
     fn scroll_lines(&mut self, delta: i64) {
@@ -2231,7 +2251,11 @@ impl Editor {
             self.drag = Some(Drag {
                 unit: Unit::Char,
                 origin: (0, 0),
-                mode: DragMode::HSlider { grab },
+                mode: DragMode::HSlider {
+                    grab,
+                    widest: self.widest,
+                    first_col: self.scroll.first_col,
+                },
             });
             self.drag_hslider(x - grab);
             return;
@@ -2288,7 +2312,7 @@ impl Editor {
                 self.place_column(anchor, head, false);
             }
             Some(DragMode::Slider { grab }) => self.drag_slider(y - grab),
-            Some(DragMode::HSlider { grab }) => self.drag_hslider(x - grab),
+            Some(DragMode::HSlider { grab, .. }) => self.drag_hslider(x - grab),
             Some(_) => {
                 let pos = self.hit(x, y);
                 self.drag_to(pos);
@@ -5985,6 +6009,81 @@ mod tests {
         editor.paint(&mut pixels, 800, 600);
         assert_eq!(editor.widest, 1000);
         assert!(editor.hslider().is_some());
+    }
+
+    /// Moving and paging down keep the caret's row above the horizontal
+    /// slider, which covers the bottom of the text.
+    #[test]
+    fn the_caret_is_revealed_above_the_horizontal_slider() {
+        let files = Arc::new(FakeFiles::default());
+        let text = "\u{6f22}".repeat(500) + &"\nx".repeat(300);
+        let mut editor = editor_on(&files, text.as_bytes(), false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(Event::Wake, &mut ctx);
+        let mut pixels = vec![0u32; 800 * 600];
+        editor.paint(&mut pixels, 800, 600);
+        assert!(editor.hslider().is_some());
+        let cell = editor.renderer.cell();
+        let downs = editor.layout().text.h / cell.height - 1;
+        let keys = std::iter::repeat_n(VK_DOWN, downs as usize).chain([VK_NEXT; 3]);
+        for (i, vk) in keys.enumerate() {
+            editor.event(key(vk, false, false), &mut ctx);
+            editor.paint(&mut pixels, 800, 600);
+            let line = editor.doc.snapshot.line_of(caret(&editor));
+            let row = (line - editor.scroll.top_line + 1) as u32;
+            let bottom = editor.layout().text.y + (row * cell.height) as i32;
+            let slider = editor.hslider().unwrap();
+            assert!(
+                bottom <= slider.y,
+                "key {i}: row bottom {bottom}, slider {slider:?}"
+            );
+        }
+    }
+
+    /// After scrolling past the widest row, a drag keeps the range it started
+    /// with, so the slider stays under the pointer down to column 0.
+    #[test]
+    fn the_horizontal_slider_follows_the_pointer_after_overscrolling() {
+        let files = Arc::new(FakeFiles::default());
+        let text = "\u{6f22}".repeat(500);
+        let mut editor = editor_on(&files, text.as_bytes(), false);
+        let mut ctx = Ctx::headless(800, 600, 96);
+        editor.event(Event::Wake, &mut ctx);
+        let mut pixels = vec![0u32; 800 * 600];
+        editor.paint(&mut pixels, 800, 600);
+        let shift_wheel = Event::Wheel {
+            delta: -120 * 400,
+            horizontal: false,
+            shift: true,
+            ctrl: false,
+        };
+        editor.event(shift_wheel, &mut ctx);
+        editor.paint(&mut pixels, 800, 600);
+        assert_eq!((editor.scroll.first_col, editor.widest), (2400, 1000));
+        let slider = editor.hslider().unwrap();
+        let track = rte_view::htrack(&editor.layout()).unwrap();
+        let travel = (track.w - slider.w) as i32;
+        editor.event(
+            Event::MouseDown {
+                x: slider.x + 2,
+                y: track.y + 2,
+                clicks: 1,
+                shift: false,
+                ctrl: false,
+                alt: false,
+                middle: false,
+            },
+            &mut ctx,
+        );
+        for left in [travel / 2, travel / 4, 0] {
+            let x = track.x + left + 2;
+            editor.event(Event::MouseMove { x, y: track.y }, &mut ctx);
+            editor.paint(&mut pixels, 800, 600);
+            let s = editor.hslider().unwrap();
+            assert!((s.x - (track.x + left)).abs() <= 1, "left {left}: {s:?}");
+        }
+        assert_eq!(editor.scroll.first_col, 0);
+        editor.event(Event::MouseUp, &mut ctx);
     }
 
     #[test]

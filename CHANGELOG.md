@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-11-11
+
+### Fixed
+
+- The caret is no longer hidden under the horizontal slider after moving or
+  paging down.
+- Dragging the horizontal slider after scrolling past the widest line keeps
+  the slider under the pointer.
+
 ## [0.6.3] - 2026-11-10
 
 The release polishes the scroll bar experience.
