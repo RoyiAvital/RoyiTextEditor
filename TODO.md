@@ -40,6 +40,7 @@
 
  - [x] Hint files which are in read only mode (Maybe write the path in orange).
  - [x] Embed metadata into the `exe`: File Version, Product Version, Product Name, File Description.
+ - [ ] Add horizontal scrol bar in case of long lines (Defer after loading).
 
 ## Bugs
 
