@@ -963,6 +963,15 @@ impl Editor {
         self.scroll.first_col = ((left * last + travel / 2) / travel) as u64;
     }
 
+    /// The point is on the vertical strip or the shown horizontal slider's
+    /// track (an arrow pointer, not the text one).
+    fn is_scroll_bar(&self, x: i32, y: i32) -> bool {
+        let layout = self.layout();
+        layout.scrollbar.contains(x, y)
+            || self.hslider().is_some()
+                && rte_view::htrack(&layout).is_some_and(|t| t.contains(x, y))
+    }
+
     fn toggle_full_screen(&mut self, ctx: &mut Ctx) {
         ctx.set_full_screen(!self.full_screen);
     }
@@ -2773,13 +2782,6 @@ impl App for Editor {
             && !self
                 .find_geometry()
                 .is_some_and(|g| g.panel.contains(x, y) || g.message.contains(x, y))
-    }
-
-    fn is_scroll_bar(&self, x: i32, y: i32) -> bool {
-        let layout = self.layout();
-        layout.scrollbar.contains(x, y)
-            || self.hslider().is_some()
-                && rte_view::htrack(&layout).is_some_and(|t| t.contains(x, y))
     }
 }
 

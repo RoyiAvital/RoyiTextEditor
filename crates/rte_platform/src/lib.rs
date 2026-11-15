@@ -39,19 +39,19 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWL_STYLE,
     GWLP_USERDATA, GetClientRect, GetCursorPos, GetMessageTime, GetMessageW, GetSystemMetrics,
-    GetWindowLongPtrW, GetWindowPlacement, GetWindowRect, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT,
-    HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, IDC_ARROW, IDC_IBEAM,
-    IMAGE_ICON, IsIconic, IsZoomed, LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MINMAXINFO, MSG,
-    NCCALCSIZE_PARAMS, PostMessageW, PostQuitMessage, RegisterClassExW, SM_CXDOUBLECLK, SM_CXICON,
-    SM_CXPADDEDBORDER, SM_CXSIZEFRAME, SM_CXSMICON, SM_CYDOUBLECLK, SM_CYICON, SM_CYSIZEFRAME,
-    SM_CYSMICON, SW_SHOW, SW_SHOWNORMAL, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SetCursor, SetForegroundWindow, SetWindowLongPtrW,
-    SetWindowPlacement, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage,
-    WINDOWPLACEMENT, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
-    WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
-    WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCACTIVATE, WM_NCCALCSIZE,
-    WM_NCHITTEST, WM_PAINT, WM_SETCURSOR, WM_SIZE, WM_SYSCOMMAND, WM_SYSKEYDOWN,
-    WM_WINDOWPOSCHANGED, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    GetWindowLongPtrW, GetWindowPlacement, GetWindowRect, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION,
+    HTCLIENT, HTLEFT, HTTOP, HTTOPLEFT, HTTOPRIGHT, IDC_ARROW, IDC_IBEAM, IMAGE_ICON, IsIconic,
+    IsZoomed, LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MINMAXINFO, MSG, NCCALCSIZE_PARAMS,
+    PostMessageW, PostQuitMessage, RegisterClassExW, SM_CXDOUBLECLK, SM_CXICON, SM_CXPADDEDBORDER,
+    SM_CXSIZEFRAME, SM_CXSMICON, SM_CYDOUBLECLK, SM_CYICON, SM_CYSIZEFRAME, SM_CYSMICON, SW_SHOW,
+    SW_SHOWNORMAL, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE,
+    SWP_NOZORDER, SetCursor, SetForegroundWindow, SetWindowLongPtrW, SetWindowPlacement,
+    SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, WINDOWPLACEMENT, WM_APP,
+    WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND,
+    WM_GETMINMAXINFO, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
+    WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST,
+    WM_PAINT, WM_SETCURSOR, WM_SIZE, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_WINDOWPOSCHANGED,
+    WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{KillTimer, SetTimer, WM_TIMER};
 
@@ -400,12 +400,6 @@ pub trait App {
 
     /// True when the pointer shows the text (I-beam) cursor at the client point.
     fn is_text(&self, _x: i32, _y: i32) -> bool {
-        false
-    }
-
-    /// True when the client point is on a scroll bar: it takes the mouse
-    /// even inside the resize border.
-    fn is_scroll_bar(&self, _x: i32, _y: i32) -> bool {
         false
     }
 }
@@ -1426,8 +1420,9 @@ unsafe fn hit_test(hwnd: HWND, lparam: LPARAM) -> LRESULT {
 }
 
 /// Hit-test code of a client point of a `size` window: the resize border
-/// (`None` when maximized or full screen) unless the point is on one of the
-/// application's scroll bars, then the caption or the client area.
+/// (`None` when maximized or full screen), then the caption or the client
+/// area. Every corner resizes; of the edges only the left and the top do, as
+/// the scroll bars lie along the right and the bottom.
 fn hit_code(
     x: i32,
     y: i32,
@@ -1435,9 +1430,7 @@ fn hit_code(
     border: Option<(i32, i32)>,
     app: Option<&dyn App>,
 ) -> u32 {
-    if let Some((bx, by)) = border
-        && !app.is_some_and(|app| app.is_scroll_bar(x, y))
-    {
+    if let Some((bx, by)) = border {
         let (w, h) = size;
         let left = x < bx;
         let right = x >= w - bx;
@@ -1449,9 +1442,7 @@ fn hit_code(
             (true, _, _, true) => Some(HTBOTTOMLEFT),
             (_, true, _, true) => Some(HTBOTTOMRIGHT),
             (true, ..) => Some(HTLEFT),
-            (_, true, ..) => Some(HTRIGHT),
             (_, _, true, _) => Some(HTTOP),
-            (.., true) => Some(HTBOTTOM),
             _ => None,
         };
         if let Some(hit) = hit {
@@ -1505,12 +1496,12 @@ unsafe fn paint(hwnd: HWND) {
 mod tests {
     use super::*;
 
-    /// Scroll bars at the window edge take the mouse inside the resize
-    /// border; the rest of the border still resizes.
+    /// Every corner resizes both ways; the right and the bottom edges never
+    /// resize, the left and the top edges do.
     #[test]
-    fn scroll_bars_take_the_mouse_inside_the_resize_border() {
-        struct Bars;
-        impl App for Bars {
+    fn corners_resize_and_the_right_and_bottom_edges_do_not() {
+        struct Title;
+        impl App for Title {
             fn event(&mut self, _: Event, _: &mut Ctx) -> bool {
                 false
             }
@@ -1518,19 +1509,37 @@ mod tests {
             fn is_caption(&self, _x: i32, y: i32) -> bool {
                 y < 30
             }
-            fn is_scroll_bar(&self, x: i32, y: i32) -> bool {
-                x >= 394 && (30..270).contains(&y)
-            }
         }
-        let app: Option<&dyn App> = Some(&Bars);
+        let app: Option<&dyn App> = Some(&Title);
         let (size, border) = ((400, 300), Some((8, 8)));
-        assert_eq!(hit_code(396, 100, size, border, app), HTCLIENT, "the strip");
-        assert_eq!(hit_code(396, 100, size, border, None), HTRIGHT);
-        assert_eq!(hit_code(393, 100, size, border, app), HTRIGHT, "beside it");
-        assert_eq!(hit_code(396, 20, size, border, app), HTRIGHT, "title");
+        assert_eq!(
+            hit_code(396, 100, size, border, app),
+            HTCLIENT,
+            "right edge"
+        );
+        assert_eq!(hit_code(393, 100, size, border, app), HTCLIENT);
+        assert_eq!(
+            hit_code(396, 20, size, border, app),
+            HTCAPTION,
+            "beside the title"
+        );
+        assert_eq!(
+            hit_code(396, 4, size, border, app),
+            HTTOPRIGHT,
+            "top-right corner"
+        );
         assert_eq!(hit_code(396, 296, size, border, app), HTBOTTOMRIGHT);
+        assert_eq!(hit_code(4, 100, size, border, app), HTLEFT);
+        assert_eq!(hit_code(4, 4, size, border, app), HTTOPLEFT);
+        assert_eq!(hit_code(4, 296, size, border, app), HTBOTTOMLEFT);
+        assert_eq!(hit_code(200, 4, size, border, app), HTTOP);
+        assert_eq!(
+            hit_code(200, 296, size, border, app),
+            HTCLIENT,
+            "bottom edge"
+        );
         assert_eq!(hit_code(200, 20, size, border, app), HTCAPTION);
-        assert_eq!(hit_code(396, 20, size, None, app), HTCAPTION, "maximized");
+        assert_eq!(hit_code(4, 100, size, None, app), HTCLIENT, "maximized");
     }
 
     #[test]

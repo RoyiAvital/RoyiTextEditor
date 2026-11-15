@@ -37,7 +37,7 @@ binding exactly. For example, `Ctrl+Shift+S` is not Save.
 | `Alt+PgUp` / `Alt+PgDn`                                                         | Scroll a page; the caret stays                                           |
 | Drag the slider; press the strip at the right edge                              | Scroll; jump to that place                                               |
 | Drag the bottom slider; press its track                                         | Scroll horizontally; jump to that place                                  |
-| Drag a corner; the right edge over the title strip or the status line           | Resize the window (beside the slider, the right edge scrolls)            |
+| Drag a corner, or the left or top edge                                          | Resize the window (not the right or bottom edge: the sliders are there)  |
 | `Shift`+wheel                                                                   | Scroll horizontally                                                      |
 | `Ctrl+=` / `Ctrl+Shift+=` / `Ctrl+Numpad+`; `Ctrl+-` / `Ctrl+Numpad-`; `Ctrl+0` | Zoom in; zoom out; reset zoom                                            |
 | `Ctrl`+wheel                                                                    | Zoom in or out                                                           |
